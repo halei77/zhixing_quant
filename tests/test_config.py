@@ -19,3 +19,14 @@ def test_empty_env_falls_back_to_default() -> None:
 def test_taskdb_file_layout_follows_adr_0007() -> None:
     path = config.taskdb_file({"ZX_DATA_ROOT": "/tmp/zxdata"})
     assert path == Path("/tmp/zxdata/taskdb/tasks.duckdb")
+
+
+def test_golden_snapshots_land_in_the_data_root_not_in_the_repo(tmp_path: Path) -> None:
+    """样本先落数据根、批准后才进仓（05 Q1-③）：这个位置本身就是口径，不钉住就会被改。"""
+    assert config.golden_dir({"ZX_DATA_ROOT": str(tmp_path)}) == tmp_path / "golden"
+
+
+def test_gate_rules_are_read_from_the_repo() -> None:
+    """门禁表在仓库而不在数据根：阈值改动必须出现在 git diff 里，事后才追得清谁改的口径。"""
+    assert config.gate_config_file() == config.repo_root() / "config" / "gate.toml"
+    assert config.gate_config_file().is_file()

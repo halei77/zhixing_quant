@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "个人 A 股数据与量化研究平台：文档驱动 + 机器验收"
 requires-python = ">=3.12"
 dependencies = [
+    "akshare>=1.18.65",
     "duckdb>=1.5.5",
     # DuckDB 读 TIMESTAMPTZ 列时要 import pytz 造带时区的 datetime，缺它直接
     # InvalidInputException（0d 实测）。显式声明，不留隐性依赖。

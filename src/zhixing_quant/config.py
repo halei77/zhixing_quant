@@ -24,6 +24,15 @@ def taskdb_file(env: Mapping[str, str] | None = None) -> Path:
     return data_root(env) / "taskdb" / "tasks.duckdb"
 
 
+def golden_dir(env: Mapping[str, str] | None = None) -> Path:
+    """真实响应快照的落点（tools/capture_golden.py）。
+
+    在数据根而不在仓库：快照是"外部服务器那天给了什么"，属于数据；批准之后才作为测试
+    资产进 `tests/golden/`（05 Q1-③）。两处隔开，才分得清"抓下来的"和"认过的"。
+    """
+    return data_root(env) / "golden"
+
+
 def repo_root() -> Path:
     """仓库根，由本文件位置反推：写死绝对路径会换机即废，也过不了路径扫描。"""
     return Path(__file__).resolve().parents[2]
