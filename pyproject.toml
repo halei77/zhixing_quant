@@ -3,7 +3,15 @@ name = "zhixing-quant"
 version = "0.0.0"
 description = "个人 A 股数据与量化研究平台：文档驱动 + 机器验收"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "duckdb>=1.5.5",
+    # DuckDB 读 TIMESTAMPTZ 列时要 import pytz 造带时区的 datetime，缺它直接
+    # InvalidInputException（0d 实测）。显式声明，不留隐性依赖。
+    "pytz>=2026.3.post1",
+]
+
+[project.scripts]
+zx-task = "zhixing_quant.tasks.cli:main"
 
 [dependency-groups]
 dev = [
@@ -40,13 +48,23 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "tools"]
+# tools/ 不在包内（不参与安装），tests 里的门禁自测按脚本名导入它，故加入搜索路径。
+mypy_path = "tools"
 warn_unreachable = true
+
+# duckdb 发布包里带了 py.typed 却没有任何标注，--strict 会把它的每个调用判为
+# "未标注函数调用"。这里把整包当 Any，Any 只允许停在 tasks/db.py 这一层，
+# 对上暴露的 Store/CLI 接口仍是全标注的——比在几十处调用点撒 type: ignore 干净。
+[[tool.mypy.overrides]]
+module = "duckdb.*"
+follow_imports = "skip"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# 阈值数字单一来源在此（02 §2 DoD-5）：Step 0b 空骨架不比对，自模块首次出现
-# 被测代码的 Step 起上调；quality/backtest/strategy/tasks 目标 90%，整体 80%。
+# 阈值数字单一来源在此（02 §2 DoD-5）：整体下限由 pytest 直接判定，核心模块的 90%
+# 由 tools/check_coverage.py 在 pytest 之后判定；没被测代码的模块不判定。
 # 用 CLI 参数而非 [tool.coverage.report] fail_under，后者是否决定退出码不确定，
 # 由 tests/test_gates.py 机器验证这条门禁真的会拦。
 addopts = """
@@ -54,8 +72,14 @@ addopts = """
 --cov=zhixing_quant
 --cov-report=term-missing
 --cov-report=json:.coverage.json
---cov-fail-under=0
+--cov-fail-under=80
 """
 
 [tool.coverage.run]
 source = ["src/zhixing_quant"]
+
+# 核心模块覆盖率下限（02 §2 DoD-5）。阈值数字只写在这里，正文与 CI 都引用本处；
+# 某模块从"首次出现被测代码的那个 Step"起参与判定，无被测代码不判定。
+# 判定脚本：tools/check_coverage.py（pytest 之后独立一步，理由见该文件 docstring）。
+[tool.zhixing.coverage]
+modules = { tasks = 90, quality = 90, backtest = 90, strategy = 90 }
