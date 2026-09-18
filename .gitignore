@@ -10,3 +10,6 @@ Desktop.ini
 *.tmp
 *.bak
 *.swp
+
+# Qoder 本机配置（含绝对路径与权限授予，不入库）
+.qoder/settings.local.json
