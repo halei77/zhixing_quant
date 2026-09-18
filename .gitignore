@@ -1,0 +1,12 @@
+# Windows 系统文件
+Thumbs.db
+Desktop.ini
+
+# macOS 系统文件
+.DS_Store
+
+# Office / 编辑器临时文件
+~$*
+*.tmp
+*.bak
+*.swp
