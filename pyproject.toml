@@ -7,6 +7,8 @@ dependencies = [
     "duckdb>=1.5.5",
     # DuckDB 读 TIMESTAMPTZ 列时要 import pytz 造带时区的 datetime，缺它直接
     # InvalidInputException（0d 实测）。显式声明，不留隐性依赖。
+    "hypothesis>=6.168.0",
+    "pydantic>=2.13.5",
     "pytz>=2026.3.post1",
 ]
 
