@@ -15,6 +15,7 @@ float 往返不闭合（乘除顺序影响末位），所以还原性质用相�
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -36,7 +37,10 @@ class AdjustmentFactor:
     factor: float
 
     def __post_init__(self) -> None:
-        if self.factor <= 0:
+        # 因子必须是"有限的正数"。NaN 过不了 `<= 0`（任何比较都是假），inf 过得了 `> 0`，
+        # 两者都能造出一个"合法的因子对象"，然后让复权价默默变成 NaN/inf。
+        # NaN 的入口是 CSV 空值，这条判断不是理论防御。
+        if not math.isfinite(self.factor) or self.factor <= 0:
             raise AdjustError(f"{self.code}@{self.effective_on} 因子必须为正，收到 {self.factor}")
 
 

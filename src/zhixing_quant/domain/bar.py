@@ -13,6 +13,7 @@
 两处共用——写两份迟早漂。它由 hypothesis 轰炸验证（03 §二 L3）。
 """
 
+import math
 from collections.abc import Sequence
 from datetime import date
 
@@ -29,8 +30,14 @@ def _ge(a: float, b: float) -> bool:
     return a >= b
 
 
-def _has_nan(values: Sequence[float]) -> bool:
-    return any(x != x for x in values)
+def not_finite(*values: float) -> bool:
+    """NaN 与 ±inf 一锅判。
+
+    NaN 用自等式判（任何比较对它都成立不了）；inf 更要判——`inf >= inf` 是成立的，
+    所以"高不低于开收"这种不等式对全 inf 的四元组会判"合法"，而一条价格为无穷的K线
+    进干净区之后，收益率、复权价全会跟着变 inf，且一声不响。
+    """
+    return not all(math.isfinite(v) for v in values)
 
 
 def ohlc_violations(open_: float, high: float, low: float, close: float) -> Sequence[str]:
@@ -42,8 +49,8 @@ def ohlc_violations(open_: float, high: float, low: float, close: float) -> Sequ
     比较式，并且不判成"通过"：不可判定的数据一律不进干净区。
     """
     prices = (open_, high, low, close)
-    if _has_nan(prices):
-        return ("价格为 NaN，OHLC 无法判定",)
+    if not_finite(*prices):
+        return ("价格含 NaN/无穷，OHLC 无法判定",)
     out: list[str] = []
     if not _ge(high, max(open_, close)):
         out.append("high 低于 open/close 较高者")
@@ -98,8 +105,11 @@ class Bar(BaseModel):
     high: float = Field(gt=0)
     low: float = Field(gt=0)
     close: float = Field(gt=0)
-    volume: float = Field(ge=0)
-    amount: float = Field(ge=0)
+    volume: float = Field(ge=0, allow_inf_nan=False)
+    amount: float = Field(ge=0, allow_inf_nan=False)
+    # adj_factor 故意不加约束：04 §二 没有任何 REJECT 级规则管它（R005 是 WARN，管的是
+    # "突变"不是"有没有值"），在这里收紧只会让门禁放行、契约拒收。NaN 因子由
+    # domain.adjust 在用的那一刻拒（AdjustmentFactor 要求严格为正）。
     adj_factor: float | None = None
     is_suspended: bool = False
 

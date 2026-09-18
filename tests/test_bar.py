@@ -127,6 +127,9 @@ def test_bar_accepts_clean_row_and_derives_board() -> None:
         {"volume": -1.0},
         {"amount": -0.5},
         {"high": 8.0},  # OHLC 逆序
+        {"open": float("inf")},  # 价格为 inf：比较式判"合法"，契约必须判非法
+        {"volume": float("inf")},
+        {"amount": float("nan")},
         {"symbol": "AAPL"},
     ],
 )

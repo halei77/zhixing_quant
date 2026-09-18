@@ -73,6 +73,19 @@ def test_listing_day_index_counts_trading_days_only() -> None:
     assert MASTER.listing_day_index("300750", date(2024, 1, 2), CAL) is None  # 还没上市
 
 
+def test_a_truncated_calendar_does_not_make_an_old_stock_look_new() -> None:
+    """增量抓取通常只装最近几十天的日历：老票在这份日历上"数得出 3 个交易日"。
+
+    照实返回就会被当成新股，R004 的涨跌幅检查被静默豁免——门禁最坏的一种失效，
+    因为日报上它长得像正常放行。数不出来就返回 None，让规则按"不在豁免窗口"处理。
+    """
+    assert MASTER.listing_day_index("600519", date(2024, 1, 3), CAL) is None
+    assert not MASTER.no_limit_period("600519", date(2024, 1, 3), CAL, trading_days=5)
+    # 日历真覆盖到上市日时常数得出来：这条不是"一律返回 None"。
+    since_listing = TradingCalendar([date(1999, 1, 1), date(1999, 1, 4), date(2024, 1, 3)])
+    assert MASTER.listing_day_index("600519", date(2024, 1, 3), since_listing) == 3
+
+
 @pytest.mark.parametrize(
     ("on", "expected"),
     [(date(2024, 1, 3), True), (date(2024, 1, 9), True), (date(2024, 1, 10), False)],

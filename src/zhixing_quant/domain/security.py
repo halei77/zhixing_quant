@@ -160,13 +160,20 @@ class SecurityMaster:
         )
 
     def listing_day_index(self, code: str, as_of: date, calendar: TradingCalendar) -> int | None:
-        """as_of 是该股上市后的第几个交易日（1 起）；非交易日或未上市返回 None。
+        """as_of 是该股上市后的第几个交易日（1 起）；数不出来返回 None。
 
         用"上市日之后（含当天）的交易日个数"而不是日历日差：新股的涨跌幅窗口是按
         交易日数的，节假日不占额度。
+
+        日历没覆盖到上市日时也返回 None 而不是给出一个偏小的数：增量抓取通常只装最近
+        几十天的日历，2001 年上市的票在这份日历上"数得出 3 个交易日"，于是被当成新股
+        豁免掉 R004 的涨跌幅检查——门禁最坏的一种失效，因为它看起来像正常放行。
         """
         listing = self.listing(code)
         if not calendar.is_trading_day(as_of) or as_of < listing.listed_on:
+            return None
+        first_day = calendar.days[0]
+        if first_day > listing.listed_on:
             return None
         return calendar.count_between(listing.listed_on, as_of)
 

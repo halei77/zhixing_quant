@@ -5,6 +5,7 @@
 其余合法的K线当时算"通过"），同源自证永远抓不到它。
 """
 
+import math
 from datetime import date
 
 import pytest
@@ -35,8 +36,12 @@ factor = st.floats(min_value=1e-3, max_value=1e3, allow_nan=False, allow_infinit
 
 
 def _ohlc_holds(open_: float, high: float, low: float, close: float) -> bool:
-    """R001 不等式的独立写法：NaN 用自等式判，比较拆成四条两两 ≥。"""
-    if any(x != x for x in (open_, high, low, close)):
+    """R001 不等式的独立写法：非有限值先判不成立，比较拆成四条两两 ≥。
+
+    inf 必须显式排除而不是交给不等式：`inf >= inf` 成立，所以全 inf 的四元组在比较式
+    眼里"完美合法"，而那样的价格是脏数据里最不该进干净区的一种。
+    """
+    if not all(math.isfinite(x) for x in (open_, high, low, close)):
         return False
     return high >= open_ and high >= close and open_ >= low and close >= low
 

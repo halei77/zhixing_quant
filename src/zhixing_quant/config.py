@@ -22,3 +22,17 @@ def data_root(env: Mapping[str, str] | None = None) -> Path:
 def taskdb_file(env: Mapping[str, str] | None = None) -> Path:
     """任务流水线库文件（09 §二：存 ${ZX_DATA_ROOT}/taskdb/，零运维单文件）。"""
     return data_root(env) / "taskdb" / "tasks.duckdb"
+
+
+def repo_root() -> Path:
+    """仓库根，由本文件位置反推：写死绝对路径会换机即废，也过不了路径扫描。"""
+    return Path(__file__).resolve().parents[2]
+
+
+def gate_config_file(root: Path | None = None) -> Path:
+    """门禁规则表（04 §二）。
+
+    放仓库不放数据根：阈值改动必须出现在 git diff 里，事后才追得清某天的大面积拒收
+    是谁改的口径；躺在数据根里的配置文件没有版本，等于口径随时可变。
+    """
+    return (root if root is not None else repo_root()) / "config" / "gate.toml"
