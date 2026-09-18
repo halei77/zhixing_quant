@@ -1,0 +1,99 @@
+# 数据质量门禁规则目录（04 §二 的实现配置；架构见 ADR-0002）
+#
+# 引擎只读这张表：新增规则 = 写一个谓词函数 + 在这里加一节 [[rule]]，不改 quality/engine.py。
+# 调整阈值/停用某条规则 = 只改这里。
+#
+# 字段：
+#   id       规则编号，与 04 §二 表格一一对应
+#   kind     row=逐条判定；batch=整批判（FATAL 用这个，"整批拒收"不能靠逐条拼）
+#   level    reject=该条进隔离区 / warn=放行但计数 / fatal=整批拒收并报警
+#   callable 谓词的 dotted path，装载时就解析，函数名写错立刻报错而不是第一行数据时才炸
+#   params   谓词自取的参数；不同规则参数名可重复，互不干扰
+#   enabled  false = 装表但停用（如日线阶段暂不用的规则）。不直接删配置：
+#            删了就没谁知道这条规则存在过、为什么停的
+
+[defaults]
+# 涨跌幅容差（04 §二 "留 0.5% 容差"）：数据源的收盘价与本方昨收差几分钱是常态，
+# 不留容差就会每天收盘后刷一屏假越界。
+tolerance_pct = 0.5
+# 板块涨跌幅上限，单位百分点（04 §二：数字以交易所当期规则为准）。
+# 放 defaults 而非 R004 私有一项，是因为 R007 的阈值要与之联动——同一件事写两处，
+# 迟早有一处忘了改。规则段的 params 覆盖 defaults，需要源级特例时在 [[rule]] 里重写。
+limits_pct = { main = 10.0, st = 5.0, gem = 20.0, star = 20.0, bse = 30.0 }
+
+[[rule]]
+id = "R001"
+kind = "row"
+level = "reject"
+callable = "zhixing_quant.quality.rules:ohlc_legal"
+
+[[rule]]
+id = "R002"
+kind = "row"
+level = "reject"
+callable = "zhixing_quant.quality.rules:nonnegative_volume_price"
+
+[[rule]]
+id = "R003"
+kind = "row"
+level = "warn"
+callable = "zhixing_quant.quality.rules:ghost_bar"
+
+[[rule]]
+id = "R004"
+kind = "row"
+level = "reject"
+callable = "zhixing_quant.quality.rules:limit_breach"
+
+[rule.params]
+# 04 §二 豁免：注册制下主板/创业板/科创板新股前 5 个交易日不设涨跌幅。
+# 北交所首日不设、此后 30%，走 bse 档而不是这里，所以按板块给。
+new_listing_no_limit_days = { main = 5, gem = 5, star = 5, bse = 1 }
+
+[[rule]]
+id = "R005"
+kind = "row"
+level = "warn"
+callable = "zhixing_quant.quality.rules:adjustment_factor_jump"
+
+[rule.params]
+# 因子单日相对变化超过此值即提示核对是否有对应分红送转公告（04 §二 R005）。
+jump_ratio = 0.02
+
+[[rule]]
+id = "R006"
+kind = "batch"
+level = "fatal"
+callable = "zhixing_quant.quality.rules:calendar_alignment"
+
+[[rule]]
+id = "R007"
+kind = "row"
+level = "reject"
+callable = "zhixing_quant.quality.rules:prev_close_consistency"
+
+[rule.params]
+# 阈值 = 板块上限（defaults.limits_pct）+ 全局容差 + 本项加宽。04 §二 的 flat "11%"
+# 就是主板的 10 + 0.5 + 0.5；写成常数会让创业板 20% 的合法跳空整批被拒。
+gap_extra_pct = 0.5
+
+[[rule]]
+id = "R008"
+kind = "row"
+level = "reject"
+callable = "zhixing_quant.quality.rules:duplicate_key"
+
+[[rule]]
+id = "R009"
+kind = "row"
+level = "reject"
+callable = "zhixing_quant.quality.rules:timestamp_monotonic"
+# 04 §二 明写"日线阶段暂不启用"：日线一行一天，同票内部没有可乱序的时间戳。
+# 谓词照写、表照装，接分钟线/Tick 时把 enabled 删掉即可（Step 3 的口子）。
+enabled = false
+
+[[rule]]
+id = "R010"
+kind = "batch"
+level = "fatal"
+callable = "zhixing_quant.quality.rules:field_completeness"
