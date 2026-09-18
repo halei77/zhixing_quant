@@ -1,0 +1,40 @@
+name: CI
+
+# 门禁顺序依 02 §3：ruff → mypy --strict → pytest（含覆盖率判定）→ 契约/黄金样本测试。
+# 契约与文档健康测试在 tests/ 里，由 pytest 一并执行；黄金样本目录在 Step 2 前有内容后自动纳入。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv（钉死版本，与本机一致）
+        run: |
+          curl -LsSf https://astral.sh/uv/0.12.16/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: 同步依赖（--frozen：uv.lock 与 pyproject 不一致即失败）
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run --frozen ruff check .
+
+      - name: ruff format --check
+        run: uv run --frozen ruff format --check .
+
+      - name: mypy --strict
+        run: uv run --frozen mypy
+
+      - name: pytest（含覆盖率门禁与契约/文档健康测试）
+        run: uv run --frozen pytest

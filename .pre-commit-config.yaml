@@ -1,0 +1,22 @@
+# 钩子用 uv run 调本仓库 dev 依赖，而不是 pre-commit 自带的独立环境：
+# 后者会在 .pre-commit-config.yaml 里再钉一次 ruff/mypy 版本，与 pyproject +
+# uv.lock 形成两个事实来源，本机放过、CI 测红的漂移就是这么来的。
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check --fix
+        entry: uv run --frozen ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types: [python]
+      - id: mypy-strict
+        name: mypy --strict（全项目）
+        entry: uv run --frozen mypy
+        language: system
+        types: [python]
+        pass_filenames: false
