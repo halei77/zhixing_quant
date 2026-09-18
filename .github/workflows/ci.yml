@@ -38,3 +38,8 @@ jobs:
 
       - name: pytest（含覆盖率门禁与契约/文档健康测试）
         run: uv run --frozen pytest
+
+      # 必须在 pytest 之后：它消费 pytest 落地的 .coverage.json（不放进 pytest 里，
+      # 是因为 pytest-cov 在会话结束才写文件，测试中读到的永远是上一轮的数）。
+      - name: 核心模块覆盖率门禁（02 §2 DoD-5）
+        run: uv run --frozen python tools/check_coverage.py
