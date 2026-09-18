@@ -3,10 +3,11 @@
 数据根只能从配置项读（ADR-0007）。写死路径的后果不是难看，是换机器/换盘即
 整批失效，而 02 §六 承诺了"CI 有一个扫描测试"，这条就是那个测试。
 
-豁免点只有一个，且必须按仓库相对路径精确列出：将来 ZX_DATA_ROOT 的默认值总得写在
-某个配置文件里，那是全仓唯一允许出现绝对路径的地方，届时把它加进 EXEMPT。按文件名
-豁免（会被同名文件绕过）或放宽正则（会被静默清空）都不算豁免，算拆门禁——所以文件
-末尾有一条自检测试盯着正则本身。
+豁免只有两处，且必须按仓库相对路径精确列出：本文件（持有下面这些字面量），以及
+数据根配置文件 `src/zhixing_quant/config.py`——"路径只能从配置读"要求默认值总得
+写死在某处，那里就是唯一的绝对路径落点。再加第三处得先改 02 §六。按文件名豁免
+（会被同名文件绕过）或放宽正则（会被静默清空）都不算豁免，算拆门禁——所以文件末尾
+有一条自检测试盯着正则本身。
 """
 
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # 本文件持有下面这些字面量，不豁免自己就会把样本判为违规
-EXEMPT = {"tests/test_path_hygiene.py"}
+EXEMPT = {"tests/test_path_hygiene.py", "src/zhixing_quant/config.py"}
 
 SCAN_TARGETS = ["src", "tests", ".github", "pyproject.toml", ".pre-commit-config.yaml"]
 
