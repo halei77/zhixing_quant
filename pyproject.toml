@@ -1,0 +1,61 @@
+[project]
+name = "zhixing-quant"
+version = "0.0.0"
+description = "个人 A 股数据与量化研究平台：文档驱动 + 机器验收"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zhixing_quant"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "UP", "B", "C4", "SIM", "RET", "RUF", "ARG", "PTH", "PIE", "PT",
+]
+# 本项目注释与文档大量使用中文全角标点，ruff 会把它们判为"形近 ASCII 字符"；
+# 不禁用则每篇中文 docstring 都报警，噪音会淹没真问题。
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PT018", "RET504"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 阈值数字单一来源在此（02 §2 DoD-5）：Step 0b 空骨架不比对，自模块首次出现
+# 被测代码的 Step 起上调；quality/backtest/strategy/tasks 目标 90%，整体 80%。
+# 用 CLI 参数而非 [tool.coverage.report] fail_under，后者是否决定退出码不确定，
+# 由 tests/test_gates.py 机器验证这条门禁真的会拦。
+addopts = """
+--strict-markers
+--cov=zhixing_quant
+--cov-report=term-missing
+--cov-report=json:.coverage.json
+--cov-fail-under=0
+"""
+
+[tool.coverage.run]
+source = ["src/zhixing_quant"]

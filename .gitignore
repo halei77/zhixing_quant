@@ -13,3 +13,21 @@ Desktop.ini
 
 # Qoder 本机配置（含绝对路径与权限授予，不入库）
 .qoder/settings.local.json
+
+# Python 虚拟环境与缓存（02 §1：uv.lock 必须入库，其余产物不入库）
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.json
+htmlcov/
+dist/
+*.egg-info/
+
+# 密钥与凭据（02 §4：仓库只放 .env.example）
+.env
+.env.*
+!.env.example
