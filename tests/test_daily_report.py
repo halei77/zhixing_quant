@@ -210,7 +210,7 @@ def test_the_trend_section_shows_the_last_run_not_yesterday() -> None:
     outcomes = [_outcome(total=100, quarantined=tuple(_row() for _ in range(20)))]
     trend = ((date(2024, 1, 12), 80.0, HealthGrade.C),)
     body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend})
-    assert "- 01-12 80.0（C） → 今天 92.0（B）" in body  # 20/100 拒收 = 8 分，B 档
+    assert "- 2024-01-12 80.0（C） → 今天 92.0（B）" in body  # 20/100 拒收 = 8 分，B 档
 
 
 def test_only_a_source_with_history_gets_a_trend_section() -> None:

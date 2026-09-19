@@ -144,7 +144,7 @@ def _trend_lines(metrics: SourceMetrics, trend: Trend) -> list[str]:
         "",
         f"- 近 {len(trend)} 日：{sparkline([s for _, s, _ in trend])}",
         f"- 日期：{' '.join(d.isoformat()[5:] for d, _, _ in trend)}",
-        f"- {day.isoformat()[5:]} {score:.1f}（{grade.value}）"
+        f"- {day.isoformat()} {score:.1f}（{grade.value}）"
         f" → 今天 {metrics.score:.1f}（{metrics.grade.value}）",
     ]
 
