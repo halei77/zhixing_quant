@@ -22,7 +22,8 @@ class SourceSchemaError(ValueError):
 #: `jobs.daily.Fetcher` 的返回值与 `akshare.daily.daily_drafts` 的入参必须是同一个形状，
 #: 各写一遍迟早漂成两份契约，而漂了的那份只会在真网络上出错——CI 里两边各自都"对"。
 Rows = Sequence[Mapping[str, object]]
-#: (不复权, 后复权) 两帧。R002 判涨跌停要看不复权价，干净区存后复权价，只能一起交进来。
+#: (不复权, 后复权) 两帧。R002 判涨跌停要看不复权价，干净区存的也是不复权价，后复权帧只
+#: 用来算 `adj_factor`（`akshare.daily._factor`），所以两帧只能一起交进来。
 Pair = tuple[Rows, Rows]
 
 
