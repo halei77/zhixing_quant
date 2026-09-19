@@ -33,6 +33,11 @@ def golden_dir(env: Mapping[str, str] | None = None) -> Path:
     return data_root(env) / "golden"
 
 
+def reports_dir(env: Mapping[str, str] | None = None) -> Path:
+    """质量日报归档目录（04 §四、ADR-0007 的 `reports/`）。"""
+    return data_root(env) / "reports"
+
+
 def repo_root() -> Path:
     """仓库根，由本文件位置反推：写死绝对路径会换机即废，也过不了路径扫描。"""
     return Path(__file__).resolve().parents[2]

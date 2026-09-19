@@ -160,7 +160,27 @@ def test_the_day_report_is_assembled_from_every_sources_outcome() -> None:
     assert [m.source for m in report.blocked] == ["xianyu"]
 
 
-def test_a_day_in_which_no_source_ran_is_reported_as_empty() -> None:
+def test_the_same_source_in_several_batches_is_one_row() -> None:
+    """按票分批跑门禁是真会发生的（分片抓、失败重跑半批）。并列两行时 `source()` 只返回
+    第一条，那个源的"总条数"就成了半个批次的数；分数流水按 (日期, 源) 覆盖，两行同键
+    等于其中一行的分数凭空消失。真数据第一次跑就撞上了这个。
+    """
+    report = DataQualityReport.from_outcomes(
+        DAY, [_outcome("ak", 100, rejected=50), _outcome("ak", 10000, rejected=50)]
+    )
+    assert [m.source for m in report.metrics] == ["ak"]
+    metrics = report.source("ak")
+    assert (metrics.total, metrics.rejected, metrics.warned) == (10100, 100, 0)
+    # 比率合并后重算 = 99.6；两个分数（80.0 / 99.8）取平均会得出 89.9，那是假故障。
+    assert metrics.score == pytest.approx(99.604)
+    assert metrics.grade is HealthGrade.A
+
+
+def test_a_fatal_in_any_batch_of_a_source_marks_the_whole_source() -> None:
+    report = DataQualityReport.from_outcomes(
+        DAY, [_outcome("ak", 10), _outcome("ak", 10, fatal=True)]
+    )
+    assert report.source("ak").fatal is True
     """调度器挂了、一个源都没跑：报告得是空的，不能凭空给个"今天满分"。
 
     空报告的分母为 0，`worst is None`；04 §三 的"当天没数据"这条线由引擎的空批

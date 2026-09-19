@@ -56,6 +56,24 @@ class SourceMetrics:
             fatal=outcome.has_fatal,
         )
 
+    @classmethod
+    def from_group(cls, source: str, outcomes: Iterable[GateOutcome]) -> SourceMetrics:
+        """同源多批并成一行：计数相加、FATAL 取或。
+
+        先各自 `from_outcome` 再求和，而不是直接读 `outcome.*`：把"哪些字段算 REJECT/WARN"
+        的口径写第二遍，就是给下一次改 `from_outcome` 留一个漏改的地方。
+        健康分按合并后的比率重算，不是两个分数取平均——取平均会把小批次的错误放大成
+        "这个源不行了"。
+        """
+        parts = [cls.from_outcome(outcome) for outcome in outcomes]
+        return cls(
+            source=source,
+            total=sum(p.total for p in parts),
+            rejected=sum(p.rejected for p in parts),
+            warned=sum(p.warned for p in parts),
+            fatal=any(p.fatal for p in parts),
+        )
+
     @property
     def reject_rate(self) -> float:
         return self.rejected / self.total if self.total else 0.0
@@ -100,7 +118,22 @@ class DataQualityReport:
 
     @classmethod
     def from_outcomes(cls, day: date, outcomes: Iterable[GateOutcome]) -> DataQualityReport:
-        return cls(day=day, metrics=tuple(SourceMetrics.from_outcome(o) for o in outcomes))
+        """**一个源一行**。同一源分批过门禁（按票分组、失败后重跑半批）要并起来，两个理由：
+
+        - `source()` 按名字返回第一条，并列两行时那个源的"总条数"就成了半个批次的数；
+        - `reports/scores.csv` 按 (日期, 源) 覆盖，两行同键等于其中一行的分数凭空消失。
+
+        并的是原始计数，健康分按合并后的比率重算（见 `SourceMetrics.from_group`）。
+        """
+        groups: dict[str, list[GateOutcome]] = {}
+        for outcome in outcomes:
+            groups.setdefault(outcome.source, []).append(outcome)
+        return cls(
+            day=day,
+            metrics=tuple(
+                SourceMetrics.from_group(source, group) for source, group in groups.items()
+            ),
+        )
 
     def source(self, name: str) -> SourceMetrics:
         """按源名取指标。缺源抛 KeyError：让 StopIteration 冒出去的话，

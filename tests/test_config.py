@@ -26,6 +26,11 @@ def test_golden_snapshots_land_in_the_data_root_not_in_the_repo(tmp_path: Path) 
     assert config.golden_dir({"ZX_DATA_ROOT": str(tmp_path)}) == tmp_path / "golden"
 
 
+def test_reports_are_archived_under_the_data_root(tmp_path: Path) -> None:
+    """日报路径由 04 §四 钉死为 `reports/YYYY-MM-DD.md`，这里只钉它的根。"""
+    assert config.reports_dir({"ZX_DATA_ROOT": str(tmp_path)}) == tmp_path / "reports"
+
+
 def test_gate_rules_are_read_from_the_repo() -> None:
     """门禁表在仓库而不在数据根：阈值改动必须出现在 git diff 里，事后才追得清谁改的口径。"""
     assert config.gate_config_file() == config.repo_root() / "config" / "gate.toml"
