@@ -31,6 +31,9 @@ REQUIRED_COST = (
     "slippage_pct",
 )
 REQUIRED_EXECUTION = ("delay_bars", "max_participation_pct")
+#: 底仓与一手股数。放在配置而不是写死在引擎里：`base_lots = 0` 是一次合法的实验设置
+#: （空仓起跑，只能测先买后卖的那一半），把它编译进代码就没有那个对照组了。
+REQUIRED_POSITION = ("lot_size", "base_lots")
 
 
 class BacktestConfigError(ValueError):
@@ -99,14 +102,38 @@ class Execution:
 
 
 @dataclass(frozen=True)
+class Sizing:
+    """一手多少股、期初底仓几手（07 §二）。台账用它把"几手"换成"几股"。"""
+
+    lot_size: int
+    base_lots: int
+
+    @property
+    def base_shares(self) -> int:
+        return self.lot_size * self.base_lots
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> Sizing:
+        return cls(lot_size=int(raw["lot_size"]), base_lots=int(raw["base_lots"]))
+
+
+@dataclass(frozen=True)
 class Assumptions:
     """一次回测的全部外部假设。报告要把它整个印出来：结论依赖哪个假设，得一眼看得见。"""
 
     cost: Cost
     execution: Execution
+    sizing: Sizing
 
     def with_cost_scaled(self, factor: float) -> Assumptions:
-        return Assumptions(cost=self.cost.scaled(factor), execution=self.execution)
+        """03-4.3 的成本敏感性：**只**乘成本。
+
+        `execution` 与 `sizing` 原样带过去是有意的——把 delay_bars 也乘 1.5 测出来的是另一种
+        实验（延迟敏感性），混在一行里读就成了"成本翻倍的策略依然赚钱"，而真正翻倍的是延迟。
+        """
+        return Assumptions(
+            cost=self.cost.scaled(factor), execution=self.execution, sizing=self.sizing
+        )
 
 
 def _section(data: Mapping[str, Any], name: str, required: tuple[str, ...]) -> Mapping[str, Any]:
@@ -119,7 +146,7 @@ def _section(data: Mapping[str, Any], name: str, required: tuple[str, ...]) -> M
     return raw
 
 
-def _check(cost: Cost, execution: Execution) -> None:
+def _check(cost: Cost, execution: Execution, sizing: Sizing) -> None:
     """形状检查：负费率与"隔 0 根"都不是"极端参数"，是写错了。"""
     if min(cost.commission_pct, cost.stamp_pct, cost.transfer_pct, cost.slippage_pct) < 0:
         raise BacktestConfigError("费率出现负数：成本为负的回测是在算赚钱的机器")
@@ -134,13 +161,18 @@ def _check(cost: Cost, execution: Execution) -> None:
         raise BacktestConfigError(
             f"max_participation_pct = {execution.max_participation_pct}：参与率必须在 (0, 100]"
         )
+    if sizing.lot_size <= 0:
+        raise BacktestConfigError(f"lot_size = {sizing.lot_size}：一手至少一股")
+    if sizing.base_lots < 0:
+        raise BacktestConfigError(f"base_lots = {sizing.base_lots}：底仓不可能是负的")
 
 
 def parse(data: Mapping[str, Any]) -> Assumptions:
     cost = Cost.from_mapping(_section(data, "cost", REQUIRED_COST))
     execution = Execution.from_mapping(_section(data, "execution", REQUIRED_EXECUTION))
-    _check(cost, execution)
-    return Assumptions(cost=cost, execution=execution)
+    sizing = Sizing.from_mapping(_section(data, "position", REQUIRED_POSITION))
+    _check(cost, execution, sizing)
+    return Assumptions(cost=cost, execution=execution, sizing=sizing)
 
 
 def load(path: Path) -> Assumptions:

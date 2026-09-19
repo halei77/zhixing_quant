@@ -1,4 +1,4 @@
-"""L3 属性测试：涨跌停判定的口径无关性（ADR-0010 决定 9）。
+"""L3 属性测试：成交判定的口径无关性（ADR-0010 决定 9）。
 
 决定 9 那句"同一天的四个价乘同一个因子，相对昨收涨了多少在两种口径下数值相同"是"引擎只吃
 后复权价"这条路的地基：它要是假的，用后复权价判出来的那堵墙就不是交易所那堵墙，而错在哪一侧
@@ -24,20 +24,31 @@ from hypothesis import strategies as st
 
 from tests.fakes import minute_span
 from tests.properties._profile import property_settings
+from zhixing_quant.backtest.fills import Fill, Order, Outcome, Reject, attempt
 from zhixing_quant.backtest.limits import ALLOWANCE_PP, PriceBand, clamp_fill, locked
-from zhixing_quant.backtest.spec import Side
-from zhixing_quant.domain.bar import Bar
+from zhixing_quant.backtest.spec import Cost, Side
+from zhixing_quant.domain.bar import Bar, stamp_of
 
 WHEN = datetime(2026, 9, 18, 14, 0)
+SIGNAL_AT = stamp_of(WHEN.date(), WHEN)  # `Order.signal_at` 要的是时钟元组，不是一个时刻
 #: 与 `config/gate.toml` 的 `limits_pct` 同一组档位。测试自抽而不是读配置：这里轰的是
 # "判定与价格空间无关"，与那张表里具体写了几分钱无关。
 BANDS = st.sampled_from([5.0, 10.0, 20.0, 30.0])
 STATES = st.sampled_from(["bound", "unlimited", "unknown"])
 SPREADS = st.sampled_from([0.0, 0.004, 0.02])  # 0 = 一字，其余是当天真在动
+#: 成交量抽的是"流动性能不能挡住一笔 300 股"的四档：没有量、薄、刚好不够、充裕。
+#: 它不参与缩放（换复权口径不改成交股数），抽进来是为了让最后那条流水线测试真走到
+#  `zero_volume` 与 `participation` 两个分支，而不是只在"能成交"那一侧打转。
+VOLUMES = st.sampled_from([0.0, 1000.0, 5000.0, 1e6])
 #: 抽成带类型的元组而不是字面列表：`sampled_from(["buy", "sell"])` 会推出 `str`，
 #: 而 `clamp_fill` 要的是 `Side` 那个 Literal——类型在测试里也不能靠"看着像"。
 SIDES: tuple[Side, ...] = ("buy", "sell")
 EDGE = 0.02
+SHARES = 300  # 07 §二 那 3 手
+COST = Cost(
+    commission_pct=0.025, commission_min=5.0, stamp_pct=0.05, transfer_pct=0.001, slippage_pct=0.02
+)
+PARTICIPATION = 5.0
 
 
 def _band(state: str, pct: float, prev_close: float) -> PriceBand:
@@ -82,7 +93,7 @@ def case(draw: Any) -> tuple[Bar, PriceBand, float]:
         high=price * (1.0 + spread),
         low=price * (1.0 - spread),
         close=price,
-        volume=1000.0,
+        volume=draw(VOLUMES),
     )
     scale = draw(st.floats(min_value=1e-3, max_value=1e6, allow_nan=False))
     return bar, _band(state, pct, prev_close), scale
@@ -127,3 +138,38 @@ def test_clamping_the_fill_is_the_same_experiment_after_scaling(
     plain = clamp_fill(raw, band, side)
     moved = clamp_fill(raw * factor, _rescaled_band(band, factor), side)
     assert moved == pytest.approx(plain * factor, rel=1e-9)
+
+
+def _verdict(outcome: Outcome) -> str:
+    """成了就叫 `fill`，没成就叫那条原因。比较的是**哪一档拦下的**，不是它写的那句话。"""
+    return outcome.reason if isinstance(outcome, Reject) else "fill"
+
+
+@property_settings
+@given(case(), st.sampled_from(SIDES))
+def test_the_whole_fill_pipeline_is_the_same_experiment_after_scaling(
+    trio: tuple[Bar, PriceBand, float], side: Side
+) -> None:
+    """决定 9 说的那"四条判据"要一起测：引擎用的是 `attempt` 这条流水线，判序也在里面。
+
+    逐条各测一遍留下一个缝：有人把参与率改成按**成交额**算（`shares × price / amount`——它看着
+    比按股数更讲道理，实际把价格灌进了一个本该只看量的判据），三条单点测试全都还绿，而换一口
+    径就能多成交几笔。这一条会红。
+
+    只比"成了还是哪条拒"与成交价，不比 `fee`：最低佣金 5 元是**钱**上的常数，不跟着价格缩放，
+    这与 `ALLOWANCE_PP` 是判定上的常数同一回事——它该不跟着变。
+    """
+    bar, band, factor = trio
+    order = Order(code="600519", side=side, shares=SHARES, signal_at=SIGNAL_AT)
+    plain = attempt(order, bar, band, cost=COST, max_participation_pct=PARTICIPATION)
+    moved = attempt(
+        order,
+        _scaled(bar, factor),
+        _rescaled_band(band, factor),
+        cost=COST,
+        max_participation_pct=PARTICIPATION,
+    )
+    assert _verdict(moved) == _verdict(plain)
+    if isinstance(plain, Fill):
+        assert isinstance(moved, Fill)
+        assert moved.price == pytest.approx(plain.price * factor, rel=1e-9)

@@ -23,6 +23,7 @@ GOOD: dict[str, Any] = {
         "slippage_pct": 0.02,
     },
     "execution": {"delay_bars": 1, "max_participation_pct": 5.0},
+    "position": {"lot_size": 100, "base_lots": 3},
 }
 
 
@@ -93,6 +94,29 @@ def test_a_participation_cap_outside_the_possible_range(participation: float) ->
     data["execution"]["max_participation_pct"] = participation
     with pytest.raises(BacktestConfigError, match="参与率"):
         parse(data)
+
+
+@pytest.mark.parametrize("lot_size", [0, -100])
+def test_a_lot_smaller_than_one_share_is_not_a_size(lot_size: int) -> None:
+    data = {name: dict(raw) for name, raw in GOOD.items()}
+    data["position"]["lot_size"] = lot_size
+    with pytest.raises(BacktestConfigError, match="一手至少一股"):
+        parse(data)
+
+
+def test_a_negative_base_position_is_an_empty_account_not_a_short() -> None:
+    """底仓填负数不是"做空"：A 股散户没有这条路，写负数只可能是把符号记错了。"""
+    data = {name: dict(raw) for name, raw in GOOD.items()}
+    data["position"]["base_lots"] = -1
+    with pytest.raises(BacktestConfigError, match="底仓不可能是负的"):
+        parse(data)
+
+
+def test_zero_base_lots_is_allowed_because_it_is_a_real_account() -> None:
+    """空仓起跑是合法配置，只是测不出"先卖后买"的那一半（`[position]` 的注释说的是这件事）。"""
+    data = {name: dict(raw) for name, raw in GOOD.items()}
+    data["position"]["base_lots"] = 0
+    assert parse(data).sizing.base_shares == 0
 
 
 def test_the_minimum_commission_binds_on_small_orders_only() -> None:
