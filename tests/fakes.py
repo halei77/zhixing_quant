@@ -7,9 +7,13 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
+import pytest
+
 from zhixing_quant.domain.bar import Bar
+from zhixing_quant.sources.akshare import master as akshare_master
 
 
 class FakeFrame:
@@ -100,3 +104,35 @@ def minute_bar(
         adj_factor=None,
         is_suspended=suspended,
     )
+
+
+#: 快照日历覆盖的三天：`zx-daily` 与 `zx-minute` 的报告日都落在这三天里。
+CALENDAR_DAYS = ("2024-01-02", "2024-01-03", "2024-01-04")
+
+
+def snapshot_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """一个只装了快照的数据根，并把 `ZX_DATA_ROOT` 指过去：CLI 读什么、写什么全落在 tmp 里。
+
+    两个采集入口共用它。各写一份的话，快照形状一改就只有一边会红——而"快照还能不能被读出
+    主数据与日历"恰恰是这两个入口唯一自己不管的事（判定与落盘都在被注入的那一层）。
+    """
+    monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
+    golden = tmp_path / "golden"
+    golden.mkdir()
+    (golden / "tool_trade_date_hist_sina.csv").write_text(
+        "trade_date\n" + "\n".join(CALENDAR_DAYS) + "\n", encoding="utf-8"
+    )
+    (golden / f"{akshare_master.SNAPSHOT_NAMES[0]}.csv").write_text(
+        "证券代码,证券简称,上市日期\n600519,贵州茅台,2001-08-27\n", encoding="utf-8"
+    )
+    (golden / f"{akshare_master.SNAPSHOT_NAMES[1]}.csv").write_text(
+        "A股代码,A股简称,A股上市日期\n300750,宁德时代,2018-06-11\n", encoding="utf-8"
+    )
+    rows = [
+        f"{name},{name}.csv,2,,2024-01-03T08:56:05,ok," for name in akshare_master.SNAPSHOT_NAMES
+    ]
+    (golden / akshare_master.MANIFEST_NAME).write_text(
+        "key,file,rows,columns,captured_at,status,detail\n" + "\n".join(rows) + "\n",
+        encoding="utf-8",
+    )
+    return tmp_path

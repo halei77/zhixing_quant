@@ -98,16 +98,16 @@ def stdout_alert(title: str, body: str) -> None:
     print(f"[ALERT] {title}\n{body}", flush=True)
 
 
-def with_retry(
-    fetch: Callable[[], Pair],
+def with_retry[T](
+    fetch: Callable[[], T],
     symbol: str,
     *,
     attempts: int = 3,
     backoff: float = 5.0,
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
-) -> Pair | Skipped:
-    """重试到 `attempts` 次；只在最后一次告警。
+) -> T | Skipped:
+    """重试到 `attempts` 次；只在最后一次告警。抓回来的东西是什么形状由 `fetch` 说（`T`）。
 
     退避是 `backoff × 2ⁿ`：免费源的失败大多是限流，等固定秒数等于用同样的节奏再撞三次。
     最终失败返回 `Skipped` 而不是抛——一只票抓不到不该让另外几千只的判定作废，但也不能
@@ -175,7 +175,7 @@ def collect(
     由退出码说给定时任务，比记下几条 Skipped、再出一份看起来正常的日报好。
 
     每只票只有三个去处：判成的行进干净区与（可能的）隔离区，请求失败的进 `Skipped`，请求成功
-    却零行的也进 `Skipped`——后者不该走门禁，理由写在 `_NO_ROWS` 那段。
+    却零行的也进 `Skipped`——后者不该走门禁，理由写在 `REASON_NO_ROWS` 那段。
     """
     start = _window_start(calendar, day, previous_days)
     engine = GateEngine(gate_config.load(config.gate_config_file()), master, calendar)
@@ -187,7 +187,7 @@ def collect(
     for position, symbol in enumerate(symbols):
         if consecutive >= breaker:
             left = symbols[position:]
-            skipped += [Skipped(symbol=s, reason=_BREAKER) for s in left]
+            skipped += [Skipped(symbol=s, reason=REASON_BREAKER) for s in left]
             break
         grabbed = with_retry(
             partial(fetch, symbol, start, day),
@@ -205,9 +205,9 @@ def collect(
         raw, hfq = grabbed
         drafts = akshare_daily.daily_drafts(raw, hfq, symbol=symbol)
         if not drafts:
-            # 零只票不交给门禁：见 `_NO_ROWS`。也不计入熔断——熔断数的是"请求在失败"，
+            # 零只票不交给门禁：见 `REASON_NO_ROWS`。也不计入熔断——熔断数的是"请求在失败"，
             # 而请求成功了；整池皆空由 `DayResult.ok` 拦住，不会静悄悄。
-            skipped.append(Skipped(symbol=symbol, reason=_NO_ROWS))
+            skipped.append(Skipped(symbol=symbol, reason=REASON_NO_ROWS))
             continue
         judged = engine.run(drafts)
         # 两个桶都按**整批**落盘，不裁成报告日：上一日那行也是今天抓到的证据——干净区因此少一次
@@ -216,10 +216,10 @@ def collect(
         written.append(store(judged.clean_zone))
         recorded.append(quarantine(judged.quarantined, day))
         outcomes.append(judged.for_day(day))
-    return outcomes, skipped, _total(written), _total_quarantine(recorded)
+    return outcomes, skipped, sum_writes(written), sum_quarantines(recorded)
 
 
-def _total(reports: Sequence[WriteReport]) -> WriteReport:
+def sum_writes(reports: Sequence[WriteReport]) -> WriteReport:
     """逐票的落盘账并成一次运行的账。
 
     分区数可以直接相加：一只票一年一个文件，而 `store_bars` 每次只看见一只票，重复不了。
@@ -232,7 +232,7 @@ def _total(reports: Sequence[WriteReport]) -> WriteReport:
     )
 
 
-def _total_quarantine(reports: Sequence[QuarantineReport]) -> QuarantineReport:
+def sum_quarantines(reports: Sequence[QuarantineReport]) -> QuarantineReport:
     """逐票的隔离账并成一次运行的账。
 
     与干净区不同，这里不能相加出一个"累计"：一天只有一个隔离区文件，各次调用的账都是对同一个
@@ -247,12 +247,12 @@ def _total_quarantine(reports: Sequence[QuarantineReport]) -> QuarantineReport:
 
 #: 熔断之后没去抓的票，在日报的失败清单上写这一句。它们不是"抓不到"而是"没试"，
 #: 混进同一个原因里，看日报的人就会以为源只对其中一部分失败了。
-_BREAKER = "熔断：源连续失败，未再抓取"
+REASON_BREAKER = "熔断：源连续失败，未再抓取"
 #: 请求成功、帧也拿到了，里头的行是零只（000016 *ST康佳A 与 600825 在 2026-09-18 就是这样）。
 #: 它既不是"抓取失败"（网络层没出错），也不是一批可判的数据：交给门禁会得到 R006 的整批 FATAL，
 #: 而那条按 04 §三 要扣整源 40 分——一天 4430 只里有两只是停牌，说不上"这个源今天不可信"。
 #: 所以它记在失败清单里，不记在健康分上。整池都空时 `DayResult.ok` 仍然为假，源宕了照样响。
-_NO_ROWS = "抓取成功但当日无行（停牌，或源漏了这只票）"
+REASON_NO_ROWS = "抓取成功但当日无行（停牌，或源漏了这只票）"
 
 
 def _window_start(calendar: TradingCalendar, day: date, previous_days: int) -> date:
@@ -296,8 +296,8 @@ def _skipped_section(skipped: Sequence[Skipped]) -> str:
     （或源在漏票），熔断说明源整体不行。合成一句"失败 N 只"会让人去查错方向。
     """
     cap = daily_report.DETAIL_TOP
-    untouched = sum(1 for item in skipped if item.reason == _BREAKER)
-    empty = sum(1 for item in skipped if item.reason == _NO_ROWS)
+    untouched = sum(1 for item in skipped if item.reason == REASON_BREAKER)
+    empty = sum(1 for item in skipped if item.reason == REASON_NO_ROWS)
     failed = len(skipped) - untouched - empty
     headline = f"- 重试后仍失败 {failed} 只"
     if empty:
@@ -372,7 +372,7 @@ def run(
         quarantined=quarantined,
     )
     if not result.ok:
-        empty = sum(1 for item in result.skipped if item.reason == _NO_ROWS)
+        empty = sum(1 for item in result.skipped if item.reason == REASON_NO_ROWS)
         failed = len(result.skipped) - empty
         alert(
             f"今日无数据：{target}",

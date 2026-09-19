@@ -1,5 +1,8 @@
 """`zx-daily`：每日盘后采集的命令行入口（01 路线图 Step 2 第 4 项，验收 4）。
 
+`day_arg` / `symbols_arg` 是公开名：`minute_cli.py` 用同一套参数写法，两个入口各解析一遍日期
+格式迟早漂成两种报错措辞。
+
 只做装配，不做判定：主数据与日历从快照读，日线从源抓，抓与判与落盘与报都在 `daily.py`，
 路径由这里给（`storage.layout` 的默认根就是 `config.parquet_dir()`）。所以这个文件里
 没有一条业务规则——规则住在有测试的地方，这里只负责"怎么被叫起来"。
@@ -27,14 +30,14 @@ from zhixing_quant.storage.quarantine import store_quarantined
 from zhixing_quant.storage.write import store_bars
 
 
-def _days(text: str) -> date:
+def day_arg(text: str) -> date:
     try:
         return date.fromisoformat(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"日期要写成 2024-01-31：{text!r}") from exc
 
 
-def _symbols(text: str) -> list[str]:
+def symbols_arg(text: str) -> list[str]:
     return [code.strip() for code in text.split(",") if code.strip()]
 
 
@@ -43,11 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="zx-daily", description="每日盘后采集：抓取 → 门禁 → 日报"
     )
     parser.add_argument(
-        "--day", type=_days, default=None, help="报告日，默认取今天（非交易日则回溯）"
+        "--day", type=day_arg, default=None, help="报告日，默认取今天（非交易日则回溯）"
     )
     parser.add_argument(
         "--symbols",
-        type=_symbols,
+        type=symbols_arg,
         default=None,
         metavar="代码[,代码…]",
         help="只跑这几只票，默认跑主数据当天的在册名单",

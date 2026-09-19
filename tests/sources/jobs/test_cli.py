@@ -13,13 +13,13 @@ from typing import Any
 
 import pytest
 
+from tests.fakes import snapshot_root
 from zhixing_quant.sources.akshare import fetch as akshare_fetch
 from zhixing_quant.sources.akshare import master as am
 from zhixing_quant.sources.jobs import cli
 from zhixing_quant.sources.rows import Pair
 from zhixing_quant.storage.quarantine import entries_on
 
-CALENDAR_DAYS = ("2024-01-02", "2024-01-03", "2024-01-04")
 DAY = date(2024, 1, 3)
 
 
@@ -47,25 +47,7 @@ def failing(_code: str, _start: date, _end: date) -> Pair:
 @pytest.fixture
 def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """一个只装了快照的数据根：CLI 读什么、写什么，全都落在 tmp 里。"""
-    monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
-    golden = tmp_path / "golden"
-    golden.mkdir()
-    (golden / "tool_trade_date_hist_sina.csv").write_text(
-        "trade_date\n" + "\n".join(CALENDAR_DAYS) + "\n", encoding="utf-8"
-    )
-    (golden / f"{am.SNAPSHOT_NAMES[0]}.csv").write_text(
-        "证券代码,证券简称,上市日期\n600519,贵州茅台,2001-08-27\n", encoding="utf-8"
-    )
-    (golden / f"{am.SNAPSHOT_NAMES[1]}.csv").write_text(
-        "A股代码,A股简称,A股上市日期\n300750,宁德时代,2018-06-11\n", encoding="utf-8"
-    )
-    (golden / am.MANIFEST_NAME).write_text(
-        "key,file,rows,columns,captured_at,status,detail\n"
-        + "\n".join(f"{name},{name}.csv,2,,2024-01-03T08:56:05,ok," for name in am.SNAPSHOT_NAMES)
-        + "\n",
-        encoding="utf-8",
-    )
-    return tmp_path
+    return snapshot_root(tmp_path, monkeypatch)
 
 
 def test_a_clean_run_exits_zero_and_prints_the_report(
