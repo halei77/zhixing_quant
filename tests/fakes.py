@@ -1,17 +1,24 @@
-"""测试用的假数据：假的 akshare 响应与假的干净区K线。
+"""测试用的假东西：假的 akshare 响应、假的干净区K线、假策略与假板。
 
 放在一处而不是每个测试文件各写一份：抓取层的注入点是全项目共用的那一个形状（`to_dict
 (orient="records")` 的帧），两份定义一旦漂开，就会出现"某一边测过的形状，真网络里没有"。
 `bar` 同理——它的默认值就是"一根正常K线"的定义，散在各文件里迟早长成几种不一样的"正常"。
+
+回测那一组（`assumptions` / `minutes` / `flat_bands` / `Scripted`）住这里的理由是同一件事的
+另一面：引擎、指标、报告、CLI 四层都要"三天几根K线、不封板、按剧本下单"这套道具，而它们对
+同一份输入必须看到同一个东西——否则"报告里的数与引擎算的是不是一回事"这种判据根本没得判。
 """
 
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from zhixing_quant.backtest.engine import BandLookup, Signal, View
+from zhixing_quant.backtest.limits import PriceBand
+from zhixing_quant.backtest.spec import Assumptions, Cost, Execution, Side, Sizing
 from zhixing_quant.domain.bar import Bar
 from zhixing_quant.sources.akshare import master as akshare_master
 
@@ -204,3 +211,67 @@ def snapshot_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         encoding="utf-8",
     )
     return tmp_path
+
+
+#: 与 `config/backtest.toml` 同一组数（佣金万 2.5 最低 5 元、印花税卖出千 0.5、过户费十万分之一、
+#: 滑点万 2；一手 100 股、期初底仓 3 手）。抄在这里而不是去读那张表：这几个数是测试的**判据**
+#: 的一部分——期望值是按它们手算出来的，表改了而测试没改，红的应该是测试。
+BACKTEST_COST = Cost(
+    commission_pct=0.025, commission_min=5.0, stamp_pct=0.05, transfer_pct=0.001, slippage_pct=0.02
+)
+BACKTEST_SIZING = Sizing(lot_size=100, base_lots=3)
+
+
+def assumptions(delay: int = 1, participation: float = 5.0) -> Assumptions:
+    """一套能跑引擎的执行假设。`delay` 与 `participation` 是要被单独拧的旋钮，其余钉死。"""
+    return Assumptions(
+        cost=BACKTEST_COST,
+        execution=Execution(delay_bars=delay, max_participation_pct=participation),
+        sizing=BACKTEST_SIZING,
+    )
+
+
+def minutes(
+    day: date, prices: list[float], *, symbol: str = "600519", volume: float = 1e6
+) -> list[Bar]:
+    """从 09:30 起每 5 分钟一根，`ts` 是收盘时刻：第一根 09:35。四价全等，好核对成交在哪个价上。"""
+    start = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=30)
+    return [
+        minute_span(
+            start + timedelta(minutes=5 * (offset + 1)),
+            open_=price,
+            high=price,
+            low=price,
+            close=price,
+            volume=volume,
+            symbol=symbol,
+        )
+        for offset, price in enumerate(prices)
+    ]
+
+
+def flat_bands(prev_close: float = 10.0) -> BandLookup:
+    """一只不封板的板：主板 10% 档、昨收 `prev_close`。判据本身有别处测，这里要的是"有板"。
+
+    参数带下划线是因为它真的不看是哪只票、哪天——`BandLookup` 的签名要求它在那儿。
+    """
+
+    def bands(_code: str, _day: date) -> PriceBand:
+        return PriceBand.bound(10.0, prev_close)
+
+    return bands
+
+
+class Scripted:
+    """按"该票第几根"给信号的桩策略。索引按票各算，与 `delay_bars` 同一把尺。"""
+
+    name = "scripted"
+
+    def __init__(self, plan: dict[tuple[str, int], Side]) -> None:
+        self.plan = plan
+        self.seen: list[View] = []
+
+    def signals(self, view: View, /) -> Signal | None:
+        self.seen.append(view)
+        side = self.plan.get((view.code, view.index))
+        return None if side is None else Signal(side=side, lots=3)

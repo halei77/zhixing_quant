@@ -5,13 +5,12 @@
 `test_backtest_fills.py` 与 `test_backtest_position.py`，不在这里重复。
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pytest
 
-from tests.fakes import minute_span
+from tests.fakes import Scripted, assumptions, flat_bands, minutes
 from zhixing_quant.backtest.engine import (
-    BandLookup,
     EquityPoint,
     NeverSignal,
     Signal,
@@ -20,71 +19,12 @@ from zhixing_quant.backtest.engine import (
     say,
 )
 from zhixing_quant.backtest.fills import REASON_LOCKED, REASON_NO_BAR, Order, Reject
-from zhixing_quant.backtest.limits import PriceBand
 from zhixing_quant.backtest.position import REASON_T1
-from zhixing_quant.backtest.spec import Assumptions, Cost, Execution, Side, Sizing
+from zhixing_quant.backtest.spec import Side
 from zhixing_quant.domain.bar import Bar, stamp_of
 
 DAY1 = date(2026, 9, 17)
 DAY2 = date(2026, 9, 18)
-COST = Cost(
-    commission_pct=0.025, commission_min=5.0, stamp_pct=0.05, transfer_pct=0.001, slippage_pct=0.02
-)
-SIZING = Sizing(lot_size=100, base_lots=3)
-
-
-def assumptions(delay: int = 1, participation: float = 5.0) -> Assumptions:
-    return Assumptions(
-        cost=COST,
-        execution=Execution(delay_bars=delay, max_participation_pct=participation),
-        sizing=SIZING,
-    )
-
-
-def minutes(
-    day: date, prices: list[float], *, symbol: str = "600519", volume: float = 1e6
-) -> list[Bar]:
-    """从 09:30 起每 5 分钟一根，`ts` 是收盘时刻：第一根 09:35。四价全等，好核对成交在哪个价上。"""
-    start = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=30)
-    return [
-        minute_span(
-            start + timedelta(minutes=5 * (offset + 1)),
-            open_=price,
-            high=price,
-            low=price,
-            close=price,
-            volume=volume,
-            symbol=symbol,
-        )
-        for offset, price in enumerate(prices)
-    ]
-
-
-def flat_bands(prev_close: float = 10.0) -> BandLookup:
-    """一只不封板的板：主板 10% 档、昨收 `prev_close`。判据本身有别处测，这里要的是"有板"。
-
-    参数带下划线是因为它真的不看是哪只票、哪天——`BandLookup` 的签名要求它在那儿。
-    """
-
-    def bands(_code: str, _day: date) -> PriceBand:
-        return PriceBand.bound(10.0, prev_close)
-
-    return bands
-
-
-class Scripted:
-    """按"该票第几根"给信号的桩策略。索引按票各算，与 `delay_bars` 同一把尺。"""
-
-    name = "scripted"
-
-    def __init__(self, plan: dict[tuple[str, int], Side]) -> None:
-        self.plan = plan
-        self.seen: list[View] = []
-
-    def signals(self, view: View, /) -> Signal | None:
-        self.seen.append(view)
-        side = self.plan.get((view.code, view.index))
-        return None if side is None else Signal(side=side, lots=3)
 
 
 def test_a_signal_fills_on_the_next_bars_open_not_on_its_own() -> None:

@@ -28,6 +28,18 @@ REASON_LOCKED = "locked"
 REASON_ZERO_VOLUME = "zero_volume"
 REASON_PARTICIPATION = "participation"
 
+#: 五条市场侧原因，**顺序就是判序**（决定 4 末段）：没有K线 → 判不出板 → 一字封死 →
+#: 零成交 → 参与率超了。报告按这个顺序把六档零填充列出来（账户侧的 `t_plus_1` 排在最前，
+#: 它比市场侧任何一条都先判），所以改了 `attempt` 的先后就得同时改这里——不一致会让
+#: 报告那一节的顺序自相矛盾，而它是用户唯一会读的那张表。
+REASONS: tuple[str, ...] = (
+    REASON_NO_BAR,
+    REASON_BAND_UNKNOWN,
+    REASON_LOCKED,
+    REASON_ZERO_VOLUME,
+    REASON_PARTICIPATION,
+)
+
 
 @dataclass(frozen=True)
 class Order:
