@@ -270,18 +270,24 @@ def publish(
     quarantined: QuarantineReport,
     skipped: Sequence[Skipped] = (),
     directory: Path | None = None,
+    extra: str = "",
 ) -> tuple[DataQualityReport, str]:
     """渲染 + 归档 + 分数流水。打印留给调用方：日报的正文同时是定时任务的日志。
 
     `landed` 与 `quarantined` 是这次运行留下的两本账。日报要把它们各列一行：判成多少行说的是
     门禁，落进干净区多少行说的是"明天有没有数据可用"，拒收的条目落了几条说的才是 04 §四 那句
     "全量可查"到底成不成立——三件事可以各自出岔子。
+
+    `extra` 是调用方追加的一节（分钟任务的对账），排在"没判成的票"之前。这里只接一段已经渲染好
+    的 Markdown，不接"对账结果"这类任务专属的事实：日线没有对账，共享的渲染层一旦认识它就长出了
+    两种日报。
     """
     reports = directory if directory is not None else config.reports_dir()
     scores = reports / "scores.csv"
     report = DataQualityReport.from_outcomes(day, outcomes)
     trends = {m.source: daily_report.history_for(scores, m.source, day) for m in report.metrics}
     body = daily_report.render(report, list(outcomes), trends, landed, quarantined)
+    body += extra
     if skipped:
         body += _skipped_section(skipped)
     daily_report.archive(body, day, reports)

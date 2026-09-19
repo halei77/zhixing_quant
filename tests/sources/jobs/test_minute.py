@@ -9,6 +9,8 @@
 3. **尾巴的形状**。源没有窗口参数，交回来的永远是一段历史。报告日裁得掉日报的分母，
    裁不掉落盘——尾巴上的每一天都是今天抓到的证据，而它明天就可能滑出窗口（代价三）。
 4. **失败要说清是哪一天停的**。`newest` 是唯一能把"源停更了"与"跑早了"分开的东西。
+5. **对账读的就是刚落的那块盘**。dataset 名、列序、不复权口径这三件事只有走真存储才测得到，
+   而 R011 报的每一句都建立在"它们没错"之上。判据本身在 `test_reconcile.py`，这里不重复。
 
 网络层不在这里测：`fetch` 是参数，全部测试离线可跑（03 §二 L2）。
 """
@@ -21,10 +23,11 @@ from typing import Any
 
 import pytest
 
-from tests.fakes import snapshot_root
+from tests.fakes import daily_span, snapshot_root
 from zhixing_quant import config
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Listing, SecurityMaster
+from zhixing_quant.quality.reconcile import Finding, Recon
 from zhixing_quant.sources.jobs import minute as job
 from zhixing_quant.sources.jobs import minute_cli
 from zhixing_quant.sources.jobs.daily import REASON_BREAKER, REASON_NO_ROWS, Store
@@ -92,6 +95,7 @@ def run_job(
     limit: int | None = None,
     breaker: int = 20,
     alerts: list[tuple[str, str]] | None = None,
+    reconcile: job.Reconciler | None = None,
 ) -> job.MinuteResult:
     sink = alerts if alerts is not None else []
 
@@ -108,6 +112,7 @@ def run_job(
         directory=tmp_path / "reports" / job.MINUTE_REPORTS,
         symbols=symbols,
         limit=limit,
+        reconcile=reconcile,
         breaker=breaker,
         sleep=lambda _s: None,
         alert=alert,
@@ -261,6 +266,95 @@ def test_the_minute_report_is_archived_beside_the_daily_one(tmp_path: Path) -> N
     assert (tmp_path / "reports" / job.MINUTE_REPORTS / "scores.csv").is_file()
 
 
+# --- R011：对账要读的就是刚落的那块盘 --------------------------------------------------
+
+
+def land_daily(root: Path, **override: Any) -> None:
+    """把与 `frame_today` 那两根对得上的一天日线落到日线 dataset。
+
+    高低两个数用 `close * 1.01` 现算而不是写常数：合成侧的极值是这么来的，日线侧写 102.01 会在
+    二进制里差出最后一位，于是 `extremes` 每天报一条谁也查不出的假案。
+    """
+    fields: dict[str, Any] = {
+        "open_": 100.0,
+        "high": 101.0 * 1.01,
+        "low": 100.0 * 0.99,
+        "close": 101.0,
+        "volume": 2004.0,  # 比合成的 2000 多 0.2%：实测尾差的量级
+        "amount": 201400.0,
+    }
+    fields.update(override)
+    store_bars([daily_span(DAY, **fields)], dataset=layout.DAILY, root=root)
+
+
+def test_the_two_books_on_disk_agree(tmp_path: Path) -> None:
+    """采完再对：这条测的是"对账读的确实是刚落的那块盘"，判据本身在 `test_reconcile.py`。
+
+    真存储、真 dataset 名、真列序。用假 reader 测的话，"把 minute_5 写成 minute_30"这种错
+    会一路绿到生产——而对账的全部意义就是说真话。
+    """
+    run_job(tmp_path)
+    land_daily(tmp_path)
+    recon = job.reconcile_pool(DAY, ["600519"], ["5"], root=tmp_path)
+    assert (recon.groups, recon.findings) == (1, ())
+
+
+def test_reconciliation_compares_raw_prices(tmp_path: Path) -> None:
+    """两边都取不复权价。日线带因子 8 也不动它：换一次口径就等于把同一个因子只乘到一本账上。
+
+    这条要防的是"顺手写成 adjust='backward'"——那种改动让 8 元的票看起来对得上 80 元的账吗？
+    不会，它让每天的价差栏全是报警，而真断档藏在抽样之下。
+    """
+    run_job(tmp_path)
+    land_daily(tmp_path, factor=8.0)
+    assert job.reconcile_pool(DAY, ["600519"], ["5"], root=tmp_path).findings == ()
+
+
+def test_minutes_without_the_daily_line_are_reported(tmp_path: Path) -> None:
+    """日线那天没抓到（分钟线落了两根）：这是日线任务的漏票，报出来才知道两本账少了一本。"""
+    run_job(tmp_path)
+    recon = job.reconcile_pool(DAY, ["600519"], ["5"], root=tmp_path)
+    assert [(f.kind, f.symbol, f.dataset) for f in recon.findings] == [
+        ("no_daily", "600519", "minute_5")
+    ]
+
+
+def test_each_period_is_a_group_of_its_own(tmp_path: Path) -> None:
+    """组数 = 票 × 周期：日报那句"查了 N 组"的分母要和股票池口径对得上，否则覆盖率无从判读。"""
+    run_job(tmp_path, periods=("5", "30", "60"))
+    land_daily(tmp_path)
+    recon = job.reconcile_pool(DAY, ["600519"], ["5", "30", "60"], root=tmp_path)
+    assert recon.groups == 3
+    assert recon.findings == ()
+
+
+def test_the_daily_report_carries_the_reconciliation(tmp_path: Path) -> None:
+    """验收 2 的落点：覆盖率与偏差进日报，不是只进返回值。"""
+    found = Finding("no_minutes", "600519", DAY, "minute_5", "日线有成交，分钟线一行都没有")
+    result = run_job(tmp_path, reconcile=lambda *_a: Recon(2, (found,)))
+    assert result.recon is not None and result.recon.groups == 2
+    assert "## 分钟 ↔ 日线对账（R011）" in result.markdown
+    assert "查了 2 组（票 × 5 分钟）：no_minutes 1" in result.markdown
+    assert "- 600519 2024-01-03 minute_5：日线有成交" in result.markdown
+
+
+def test_a_run_without_a_reconcile_boundary_says_so(tmp_path: Path) -> None:
+    """没查就写"这次没查"。写成"五种坏法全 0"是把没做报成做完，那是日报最坏的一种假。"""
+    result = run_job(tmp_path)
+    assert result.recon is None
+    assert "这次没查" in result.markdown
+
+
+def test_the_sample_is_per_kind_so_a_flood_cannot_hide_a_second_kind(tmp_path: Path) -> None:
+    """一类再来一百条也只列三条，另外四种各留自己的三条：全局截断会让断档把价差挤出日报。"""
+    many = [Finding("no_minutes", f"60000{i}", DAY, "minute_5", f"断档{i}") for i in range(4)]
+    many.append(Finding("price", "600519", DAY, "minute_5", "开盘不相等"))
+    result = run_job(tmp_path, reconcile=lambda *_a: Recon(5, tuple(many)))
+    assert result.markdown.count("断档") == job.KIND_SAMPLE
+    assert "其余 1 条 no_minutes 未列" in result.markdown
+    assert "开盘不相等" in result.markdown  # 另一种坏法没有被前一种挤出清单
+
+
 # --- 命令行入口：只剩"装配对不对"可测 --------------------------------------------------
 
 
@@ -280,7 +374,11 @@ def test_the_cli_wires_each_period_to_its_own_dataset(data_root: Path) -> None:
     parquet = config.parquet_dir()
     assert minute_file(parquet, "5") and minute_file(parquet, "60")
     assert not list(parquet.rglob(f"{layout.DAILY}/*.parquet"))
-    assert (data_root / "reports" / job.MINUTE_REPORTS / f"{DAY.isoformat()}.md").is_file()
+    archived = (data_root / "reports" / job.MINUTE_REPORTS / f"{DAY.isoformat()}.md").read_text(
+        encoding="utf-8"
+    )
+    # CLI 真的把对账边界接上了：读的是刚落的这两个 dataset，而盘上没有日线那一本账
+    assert "查了 2 组（票 × 5/60 分钟）：no_minutes 0、no_daily 2" in archived
 
 
 def test_the_cli_refuses_a_period_it_cannot_store() -> None:

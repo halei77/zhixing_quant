@@ -98,6 +98,9 @@ def main(argv: list[str] | None = None, *, fetcher: job.MinuteFetcher | None = N
             master=read_master().to_master(),
             calendar=calendar,
             directory=config.reports_dir() / job.MINUTE_REPORTS,
+            # 对账读的是干净区那一层，与 `stores` 里那些 `store_bars` 同一个 root（默认都是
+            # `config.parquet_dir()`）：写成数据根的话两边都读到空目录，"账对上了"就成了假话。
+            reconcile=partial(job.reconcile_pool, root=config.parquet_dir()),
             symbols=args.symbols,
             limit=args.limit,
             attempts=args.attempts,

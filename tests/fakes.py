@@ -106,6 +106,74 @@ def minute_bar(
     )
 
 
+def minute_span(
+    when: datetime,
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float = 100.0,
+    symbol: str = "600519",
+    dataset: str = "minute_5",
+) -> Bar:
+    """一根四个价格各给各的分钟K线。
+
+    与 `minute_bar` 的分工：那一个把 open/high/low 钉在 close 上，是"一根干净的K线"；这几个字段
+    一旦相等，"合成日的开盘取自最早那根的 open"这类判据就测不出来了——取错字段看不出区别。
+    合成与对账两层判的正是字段归属与两边的相对高低，所以它们要的是这一个。
+
+    参数是 dataset 而不是周期数字：对账给出来的那条 `Finding` 带的就是 dataset 名，而 `source`
+    由它派生（`sources/akshare/minute.py` 同一条式子）——测试手里握着"哪一批"，不该再换算一次。
+    """
+    return Bar(
+        source=f"akshare_{dataset}",
+        symbol=symbol,
+        trade_date=when.date(),
+        ts=when,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        amount=close * volume,
+        adj_factor=None,
+    )
+
+
+def daily_span(
+    day: date,
+    *,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+    volume: float,
+    amount: float,
+    symbol: str = "600519",
+    factor: float | None = 1.0,
+    suspended: bool = False,
+) -> Bar:
+    """一根四个价格与量额各自给定的日线。`minute_span` 同一条理由。
+
+    量额在这里是分开的两个参数而不像另外几个 builder 那样由价格乘出来：对账要能只让成交额
+    对不上而成交量对得上，否则"这两条判据是两条"这件事永远测不到。
+    """
+    return Bar(
+        source="akshare_daily",
+        symbol=symbol,
+        trade_date=day,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        amount=amount,
+        adj_factor=factor,
+        is_suspended=suspended,
+    )
+
+
 #: 快照日历覆盖的三天：`zx-daily` 与 `zx-minute` 的报告日都落在这三天里。
 CALENDAR_DAYS = ("2024-01-02", "2024-01-03", "2024-01-04")
 
