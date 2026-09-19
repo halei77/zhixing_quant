@@ -271,9 +271,10 @@ def test_depth_of_an_unnamed_dataset_raises(tmp_path: Path) -> None:
 def test_depth_of_an_empty_file_shell_is_none(tmp_path: Path) -> None:
     """文件在、行是零：报 None，而不是一个首末日为 None 的 `Cover`。
 
-    这不是想象中的形状——一次写坏的落盘（进程被掐在 `COPY` 中间）就留这么一个壳。没有这个
-    判据，None 会带着 `first: date` 的类型一路走到日报的 `.isoformat()` 上炸掉，而那时今天
-    的数据已经落完盘了：坏在报告上，看起来像报告的问题。
+    DuckDB 对 0 行的 Parquet 给 `min=NULL、count=0`，不判这一条就会造出一个 `first=None` 却标着
+    `first: date` 的对象，它一路走到日报的 `.isoformat()` 上炸掉——而那时今天的数据已经落完盘了，
+    坏在报告上，看起来像报告的问题。`write` 自己不产生空壳（空批次连文件都不碰），会有的场景是
+    手工恢复/搬盘之后：读的一侧不能假设盘上只躺着自己写出来的那种文件。
     """
     landed = layout.partition_path("600519", 2024, dataset=layout.MINUTE_5, root=tmp_path)
     write.store_bars([minute_bar(DATETIME1)], dataset=layout.MINUTE_5, root=tmp_path)

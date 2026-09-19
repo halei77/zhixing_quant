@@ -126,7 +126,8 @@ def depth(dataset: str, *, root: Path | None = None) -> Cover | None:
             [[str(path) for path in paths]],
         ).fetchone()
     if row[0] is None or row[1] is None:
-        return None  # 文件在、行是零：一次都没成功落过盘的空壳
+        # 文件在、行是零：DuckDB 给 NULL 而不是报错。别把它包成一个首末日为 None 的 Cover。
+        return None
     return Cover(
         first=row[0],
         last=row[1],

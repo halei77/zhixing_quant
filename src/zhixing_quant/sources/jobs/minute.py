@@ -218,7 +218,7 @@ def reconcile_pool(
 
     `root` 是干净区那一层（`config.parquet_dir()`），不是数据根：传成后者的话两次读都落在一个不存在
     的目录上，返回空列表，于是"两边都没数据"= 什么都不报——对账从此永远全绿，而盘上好好的装着今天
-    刚落的行。这个参数因此没有默认值。深度读的是同一个 root：传错的报法是"这个周期从没落过盘"，
+    刚落的行。这个参数因此没有默认值。深度读的是同一个 root：传错的报法是"盘上没有一行分钟线"，
     那是一句响的错话，比静默全绿好，但也不对，所以别传错。
     """
     findings: list[Finding] = []
@@ -294,7 +294,9 @@ def _disk_sections(recon: Recon | None, periods: Sequence[str]) -> str:
         return "\n".join(lines) + "\n"
     for dataset, cover in recon.covers.items():
         if cover is None:
-            lines.append(f"- {dataset}：盘上一个文件都没有，这个周期的落盘从没成功过")
+            # 一句话覆盖两种"没读到行"：一个文件都没有，和文件在而行是零。分开写是给报告的人多
+            # 一条他并不需要的分支——真要查，看一眼 minute_60/ 目录就知道是哪一种。
+            lines.append(f"- {dataset}：盘上没有一行分钟线，报不出区间")
             continue
         lines.append(
             f"- {dataset}：{cover.first.isoformat()} .. {cover.last.isoformat()}"

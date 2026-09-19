@@ -364,8 +364,8 @@ def test_the_sample_is_per_kind_so_a_flood_cannot_hide_a_second_kind(tmp_path: P
 def test_the_depth_read_is_the_run_that_just_landed(tmp_path: Path) -> None:
     """深度包含今天落的行：它排在落盘之后，报的才是"明天能回测到哪一天"。
 
-    未跑的周期报 None 而不是 0 天：`minute_60` 从没落过盘，与"落过但今天没落"在日报上必须是
-    两句话，否则第一次跑 60 分钟的那天，旧账会被写成今天没干活。
+    没跑的周期拿到的是 None，日报上那句"盘上没有一行分钟线"同时 cover 了"从没落过"与"文件在
+    而行是零"两种形状——人要分辨就去看一眼目录，报告不必替他分。
     """
     run_job(tmp_path, periods=("5", "30"))
     recon = job.reconcile_pool(DAY, ["600519"], ["5", "60"], root=tmp_path)
@@ -388,13 +388,13 @@ def test_the_daily_report_carries_the_depth(tmp_path: Path) -> None:
 
 
 def test_an_unlanded_dataset_says_so_instead_of_inventing_a_start(tmp_path: Path) -> None:
-    """一个文件都没有：报"从没落过盘"，不给区间。
+    """盘上没有一行可读：报"报不出区间"，不给起止日。
 
     拿报告日当起点会编出一段看起来能回测的区间；那段区间在盘上不存在，回测读它得到的是空表，
     而空表在回测里表现为"这只票那阵子没行情"。
     """
     result = run_job(tmp_path, reconcile=lambda *_a: Recon(1, (), {"minute_60": None}))
-    assert "- minute_60：盘上一个文件都没有" in result.markdown
+    assert "- minute_60：盘上没有一行分钟线，报不出区间" in result.markdown
     assert "2024-01-03 .." not in result.markdown
 
 
