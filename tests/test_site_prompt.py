@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import bar, minutes, snapshot_root
+from zhixing_quant.domain.bar import Bar
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.site import tokens
 from zhixing_quant.site.prompt import (
@@ -26,6 +27,7 @@ from zhixing_quant.site.prompt import (
 from zhixing_quant.site.table import IncompleteComponent
 from zhixing_quant.site.templates import Adjust, Format, Selection, Status, Template
 from zhixing_quant.storage import layout
+from zhixing_quant.storage.query import read_bars
 from zhixing_quant.storage.write import store_bars
 
 D1 = date(2024, 1, 2)
@@ -38,6 +40,8 @@ CALENDAR = TradingCalendar([*DAYS, date(2024, 1, 8), date(2024, 1, 9)])
 
 #: 与 `tests.fakes.bar` 默认因子一致：原始价 10.0 → 后复权 80.0，一眼看得出走的哪条路。
 FACTOR = 8.0
+#: 换手率的分母（流通股本，股）：与 `test_site_table` 同一量级，够让每一格的值互不相同。
+SHARES = 246900.0
 
 
 def tmpl(
@@ -196,3 +200,67 @@ def test_a_dataset_nobody_named_gets_no_chinese_label() -> None:
     assert title_of(layout.MINUTE_60) == "60 分K"
     with pytest.raises(UnnamedDataset):
         title_of(layout.QUARANTINE)
+
+
+def _table(text: str, label: str) -> list[list[str]]:
+    """把某一段的表格从提示词里读回来（第一行是表头）。
+
+    解析器在这里**故意另写一份**，不复用 `test_site_table` 里的那份：两边共用一个解析器时，
+    同一个偏移（比如都少切一个 `|`）会让比对一起错、一起绿——那正是 06 §八-3 要防的空转。
+    """
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(f"### {label}（"))
+    rows: list[list[str]] = []
+    for line in lines[start + 1 :]:
+        if line.startswith(("### ", "【输出要求】")):
+            break
+        if line.startswith("|") and "---" not in line:
+            rows.append([cell.strip() for cell in line.strip("|").split("|")])
+    return rows
+
+
+def _stamp(bar: Bar) -> str:
+    """时间格：日线只有日期，分钟线带时刻（规格在测试这边重写一遍，不共用渲染那侧的代码）。"""
+    return bar.trade_date.isoformat() if bar.ts is None else bar.ts.strftime("%Y-%m-%d %H:%M")
+
+
+def test_every_cell_of_the_prompt_is_the_clean_zone_row_it_claims(
+    data: Path,
+) -> None:
+    """06 §八-3 的自动化对照：落盘 → 组装 → 逐格读回，与干净区的查询结果一字不差。
+
+    判的是**接线**（价从哪来、行有没有错位、列有没有串），所以格式化那套写法照测试侧自己的
+    规格来（价格两位、量额取整、换手率 = 成交量 ÷ 流通股本 ×100）——格式口径本身归
+    `test_site_table` 判。日线与分钟线两段都比，因为两段各自有一次接错的机会。
+    """
+    store_bars(
+        minutes(D1, [10.0, 10.5]) + minutes(D2, [11.0, 11.5]) + minutes(D3, [12.0, 12.5]),
+        dataset=layout.MINUTE_5,
+        root=data,
+    )
+    text = build_it(
+        tmpl(
+            data=(
+                Selection(dataset=layout.DAILY, days=3),
+                Selection(dataset=layout.MINUTE_5, days=3),
+            ),
+            fields=("open", "high", "low", "close", "volume", "amount", "turnover"),
+        ),
+        float_shares=SHARES,
+    )
+    start, end = window(CALENDAR, D3, 3)
+    for label, dataset in (("日K", layout.DAILY), ("5 分K", layout.MINUTE_5)):
+        bars = read_bars("600519", start, end, adjust="backward", dataset=dataset)
+        rows = _table(text, label)
+        assert len(rows) == len(bars) + 1, f"{label}：行数对不上就是行本身错位"
+        for row, one in zip(rows[1:], bars, strict=True):
+            assert row == [
+                _stamp(one),
+                f"{one.open:.2f}",
+                f"{one.high:.2f}",
+                f"{one.low:.2f}",
+                f"{one.close:.2f}",
+                f"{one.volume:.0f}",
+                f"{one.amount:.0f}",
+                f"{one.volume * 100.0 / SHARES:.2f}",
+            ], f"{label} {row[0]} 那格与干净区不符"
