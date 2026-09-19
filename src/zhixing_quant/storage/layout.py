@@ -254,6 +254,18 @@ def year_of(path: Path) -> int:
     return int(path.parent.name.removeprefix("year="))
 
 
+def dataset_partitions(dataset: str, *, root: Path | None = None) -> tuple[Path, ...]:
+    """一个 dataset 在盘上的全部分区文件，按年升序。
+
+    与下面那个的分工：`existing_partitions` 问"这只票有哪几格"，这个问"整块盘有哪几格"——
+    `query.depth` 要的起点/末点是 dataset 级的事实，只能这么读。glob 留在本模块：让读的一侧
+    自己拼 `year=*/symbol=*` 的话，布局一改它就安静地扫到空集合，而"这条管道还没数据"与
+    "目录改名了"在结果里长得一模一样。
+    """
+    base = dataset_dir(dataset, root)
+    return tuple(sorted(base.glob("year=*/symbol=*.parquet"), key=year_of))
+
+
 def existing_partitions(
     symbol: str, *, dataset: str = DAILY, root: Path | None = None
 ) -> tuple[Path, ...]:
@@ -261,6 +273,9 @@ def existing_partitions(
 
     要整段历史而不是查询区间：复权因子是阶梯函数，区间首日之前发生过的除权也得算进来，
     否则一只 2015 年分红、2020 年起没分红的票在 2020 年这段会掉回 1.0。
+
+    模式里带着代码而不是全量扫一遍再筛：`read_bars` 每只票每问一次就走这里，池子 4430 只时
+    全量扫是每次四千多个文件名字。同一个形状，两种代价。
     """
     code = normalize_code(symbol)
     base = dataset_dir(dataset, root)

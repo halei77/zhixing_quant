@@ -21,7 +21,9 @@
 每天的盘后报告被分钟任务覆盖掉一份，而两份说的是两件不同的事。
 
 R011 的对账也挂在这个任务上。判据（价相等、量额留容差）是纯比较，住在 `quality.reconcile`；而
-"对哪一天、对哪些票、从哪块盘读"是任务的事实，所以 `reconcile_pool` 住在这里。
+"对哪一天、对哪些票、从哪块盘读"是任务的事实，所以 `reconcile_pool` 住在这里。同一次读盘顺带报出
+**盘上深度**（07 §5.1 要的可回测区间）：起点不另立档案——盘上最早的那个分区就是它，多一份记录就多
+一份和盘不一致的可能。
 """
 
 from __future__ import annotations
@@ -63,7 +65,8 @@ from zhixing_quant.storage.write import WriteReport
 
 #: 抓取边界：一只票、一个周期 → 源行。范围由 `stores` 的键说，而不是由一个窗口参数说。
 MinuteFetcher = Callable[[str, str], Rows]
-#: 对账边界：报告日 + 股票池 + 周期 → 两本账的差。生产上就是 `reconcile_pool`。
+#: 对账边界：报告日 + 股票池 + 周期 → 两本账的差，顺带每个周期在盘上覆盖了多久。
+#: 生产上就是 `reconcile_pool`。
 Reconciler = Callable[[date, Sequence[str], Sequence[str]], Recon]
 
 #: 分钟日报的子目录名。与日线报告分开归档的理由见模块说明最后一段。
@@ -215,7 +218,8 @@ def reconcile_pool(
 
     `root` 是干净区那一层（`config.parquet_dir()`），不是数据根：传成后者的话两次读都落在一个不存在
     的目录上，返回空列表，于是"两边都没数据"= 什么都不报——对账从此永远全绿，而盘上好好的装着今天
-    刚落的行。这个参数因此没有默认值。
+    刚落的行。这个参数因此没有默认值。深度读的是同一个 root：传错的报法是"这个周期从没落过盘"，
+    那是一句响的错话，比静默全绿好，但也不对，所以别传错。
     """
     findings: list[Finding] = []
     tolerance = _tolerance()  # 装一次就够：池子 300 只时这是 1 次与 900 次 TOML 解析的区别
@@ -226,7 +230,13 @@ def reconcile_pool(
             dataset = layout.minute_dataset(period)
             bars = query.read_bars(symbol, day, day, dataset=dataset, root=root)
             findings += reconcile_day(symbol, day, dataset, bars, line, tolerance_pct=tolerance)
-    return Recon(groups=len(symbols) * len(periods), findings=tuple(findings))
+    # 深度在 findings 之后读：同一个 dataset，一次是"今天对不对得上"，一次是"一共攒了多少"。
+    # 放在落盘之后而不是之前，报出来的起点/末点才算包含今天这批。
+    covers = {
+        layout.minute_dataset(period): query.depth(layout.minute_dataset(period), root=root)
+        for period in periods
+    }
+    return Recon(groups=len(symbols) * len(periods), findings=tuple(findings), covers=covers)
 
 
 def _tolerance() -> float:
@@ -238,18 +248,34 @@ def _tolerance() -> float:
     return float(gate_config.load(config.gate_config_file()).defaults["tolerance_pct"])
 
 
-def _reconcile_section(recon: Recon | None, periods: Sequence[str]) -> str:
-    """日报的 R011 那一节（01 Step 4 验收 2：覆盖率与偏差进日报）。
+def _disk_sections(recon: Recon | None, periods: Sequence[str]) -> str:
+    """日报末尾两节：R011 的账（01 Step 4 验收 2）与盘上深度（07 §5.1 的可回测区间）。
 
-    `recon` 为 None 说的是"这次没查"，写成"五种坏法全 0"就是把没做报成做完了——那正是 04 §四
-    反复要避开的那种日报。
+    两节共用同一个 `recon`，因为它们本来就是同一次读盘读出来的：分成两个边界就会有两个时刻，
+    而"今天有没有断档"与"一共攒了多少天"必须是同一天早上的两份账。
+
+    `recon` 为 None 或 `covers` 为空说的是"这次没查/没读盘"，写成"五种坏法全 0"或编一个起点
+    就是把没做报成做完了——那正是 04 §四 反复要避开的那种日报。
     """
-    lines = ["", "## 分钟 ↔ 日线对账（R011）", ""]
     if recon is None:
-        lines.append("- 这次没查：对账要读盘上两个 dataset 的同一日，调用方没给对账边界")
-        return "\n".join(lines) + "\n"
+        absent = [
+            "",
+            "## 分钟 ↔ 日线对账（R011）",
+            "",
+            "- 这次没查：对账要读盘上两个 dataset 的同一日，调用方没给对账边界",
+            "",
+            "## 盘上深度",
+            "",
+            "- 这次没读盘：深度与对账共用同一次读盘，没有对账边界就没有区间",
+        ]
+        return "\n".join(absent) + "\n"
     tally = "、".join(f"{kind} {n}" for kind, n in counts(recon.findings).items())
-    lines.append(f"- 查了 {recon.groups} 组（票 × {'/'.join(periods)} 分钟）：{tally}")
+    lines = [
+        "",
+        "## 分钟 ↔ 日线对账（R011）",
+        "",
+        f"- 查了 {recon.groups} 组（票 × {'/'.join(periods)} 分钟）：{tally}",
+    ]
     seen: Counter[str] = Counter()
     for finding in recon.findings:
         if seen[finding.kind] >= KIND_SAMPLE:
@@ -262,6 +288,22 @@ def _reconcile_section(recon: Recon | None, periods: Sequence[str]) -> str:
         if total > KIND_SAMPLE:
             hidden = total - KIND_SAMPLE
             lines.append(f"- 其余 {hidden} 条 {kind} 未列（日报每类只列 {KIND_SAMPLE} 条）")
+    lines += ["", "## 盘上深度", ""]
+    if not recon.covers:
+        lines.append("- 这次没读到：深度要扫一遍分区目录，调用方给的对账边界没填这一项")
+        return "\n".join(lines) + "\n"
+    for dataset, cover in recon.covers.items():
+        if cover is None:
+            lines.append(f"- {dataset}：盘上一个文件都没有，这个周期的落盘从没成功过")
+            continue
+        lines.append(
+            f"- {dataset}：{cover.first.isoformat()} .. {cover.last.isoformat()}"
+            f"，{cover.days} 个有行交易日 × {cover.symbols} 只票"
+        )
+    if any(cover is not None for cover in recon.covers.values()):
+        lines.append(
+            "- 起点那天是从源的 1970 根窗口里掉出来的，通常不足全天：算段长别把它当完整的一天"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -289,7 +331,8 @@ def run(
     而那正是模块说明里要避免的事——让调用方必须说一句话，比让它猜错便宜。
 
     `reconcile` 也没有默认值，但理由相反：读盘这件事要一个数据根，而这里连 root 都不知道（root
-    由 `stores` 的那些 partial 闭包握着）。不给就对不上账，日报上会明写"这次没查"。
+    由 `stores` 的那些 partial 闭包握着）。不给就对不上账、也报不出深度，日报上那两节会照实写
+    "这次没查"与"这次没读盘"。
 
     股票池：`symbols` 给了就用它，否则取主数据当天的在册名单再 `[:limit]`。两者都不给就抛
     `ScopeNotConfigured`（决定 8）。
@@ -327,7 +370,7 @@ def run(
         quarantined=tally.quarantined,
         skipped=tally.skipped,
         directory=directory,
-        extra=_reconcile_section(recon, tuple(stores)),
+        extra=_disk_sections(recon, tuple(stores)),
     )
     result = MinuteResult(
         day=target,

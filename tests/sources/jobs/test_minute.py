@@ -336,6 +336,8 @@ def test_the_daily_report_carries_the_reconciliation(tmp_path: Path) -> None:
     assert "## 分钟 ↔ 日线对账（R011）" in result.markdown
     assert "查了 2 组（票 × 5 分钟）：no_minutes 1" in result.markdown
     assert "- 600519 2024-01-03 minute_5：日线有成交" in result.markdown
+    # 这个假边界只回了账、没回深度：那一节照实说"没读到"，不留一个光秃秃的空标题。
+    assert "这次没读到" in result.markdown
 
 
 def test_a_run_without_a_reconcile_boundary_says_so(tmp_path: Path) -> None:
@@ -343,6 +345,7 @@ def test_a_run_without_a_reconcile_boundary_says_so(tmp_path: Path) -> None:
     result = run_job(tmp_path)
     assert result.recon is None
     assert "这次没查" in result.markdown
+    assert "这次没读盘" in result.markdown  # 深度与对账共用同一次读盘，没读就两节都没有
 
 
 def test_the_sample_is_per_kind_so_a_flood_cannot_hide_a_second_kind(tmp_path: Path) -> None:
@@ -353,6 +356,46 @@ def test_the_sample_is_per_kind_so_a_flood_cannot_hide_a_second_kind(tmp_path: P
     assert result.markdown.count("断档") == job.KIND_SAMPLE
     assert "其余 1 条 no_minutes 未列" in result.markdown
     assert "开盘不相等" in result.markdown  # 另一种坏法没有被前一种挤出清单
+
+
+# --- 盘上深度（07 §5.1 的可回测区间）----------------------------------------------------
+
+
+def test_the_depth_read_is_the_run_that_just_landed(tmp_path: Path) -> None:
+    """深度包含今天落的行：它排在落盘之后，报的才是"明天能回测到哪一天"。
+
+    未跑的周期报 None 而不是 0 天：`minute_60` 从没落过盘，与"落过但今天没落"在日报上必须是
+    两句话，否则第一次跑 60 分钟的那天，旧账会被写成今天没干活。
+    """
+    run_job(tmp_path, periods=("5", "30"))
+    recon = job.reconcile_pool(DAY, ["600519"], ["5", "60"], root=tmp_path)
+    assert recon.covers == {
+        layout.minute_dataset("5"): query.Cover(first=DAY, last=DAY, days=1, symbols=1),
+        layout.minute_dataset("60"): None,
+    }
+
+
+def test_the_daily_report_carries_the_depth(tmp_path: Path) -> None:
+    """区间进日报而不是只进返回值：07 §5.1 说的是"可回测区间要能被查到"，而日报是它的归档处。
+
+    首末之间跨两天、有行一天：`days` 必须是 1（按日历数会把中间那个没跑的日子算成可用样本）。
+    """
+    cover = query.Cover(first=PREV, last=DAY, days=1, symbols=200)
+    result = run_job(tmp_path, reconcile=lambda *_a: Recon(2, (), {"minute_5": cover}))
+    assert "## 盘上深度" in result.markdown
+    assert "- minute_5：2024-01-02 .. 2024-01-03，1 个有行交易日 × 200 只票" in result.markdown
+    assert "起点那天" in result.markdown  # 1970 根窗口切出来的第一天不足全天
+
+
+def test_an_unlanded_dataset_says_so_instead_of_inventing_a_start(tmp_path: Path) -> None:
+    """一个文件都没有：报"从没落过盘"，不给区间。
+
+    拿报告日当起点会编出一段看起来能回测的区间；那段区间在盘上不存在，回测读它得到的是空表，
+    而空表在回测里表现为"这只票那阵子没行情"。
+    """
+    result = run_job(tmp_path, reconcile=lambda *_a: Recon(1, (), {"minute_60": None}))
+    assert "- minute_60：盘上一个文件都没有" in result.markdown
+    assert "2024-01-03 .." not in result.markdown
 
 
 # --- 命令行入口：只剩"装配对不对"可测 --------------------------------------------------

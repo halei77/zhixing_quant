@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
@@ -45,6 +46,21 @@ class Unadjustable(ValueError):
     一模一样的价格，谁也不会发现复权其实没生效（`sources/akshare/daily.py` 的 `_factor`
     在源头就是同样的取舍）。
     """
+
+
+@dataclass(frozen=True)
+class Cover:
+    """一个 dataset 在盘上覆盖了多久（07 §5.1 要的"可回测区间"就是这几个数）。
+
+    `days` 数的是**有行的交易日**而不是首末之间的日历天数：跨一个周末就多半报两天，而 07 §5.3
+    的段长要的是"能切出多少天样本"。`symbols` 一起给，是因为"42 天 × 1 只票"与"42 天 × 300 只"
+    在回测里根本不是同一件事。
+    """
+
+    first: date
+    last: date
+    days: int
+    symbols: int
 
 
 def read_bars(
@@ -89,6 +105,34 @@ def read_bars(
             factors = _factors(con, code, root=root, up_to_year=end.year)
     bars = [_to_bar(row) for row in rows]
     return adjusted_bars(bars, adjust=adjust, factors=factors)
+
+
+def depth(dataset: str, *, root: Path | None = None) -> Cover | None:
+    """整个 dataset 在盘上的覆盖范围；一格都没落过时给 None（不是"0 天"）。
+
+    一次聚合而不是 `read_bars` 再把天数数出来：全市场分钟线一年 6500 万行，为了问"有多少天"
+    而把所有行拉进 Python，等于把 Parquet 的 min/max 统计白扔掉。
+
+    查的是**所有**分区而不是某只票：07 §5.1 要的是"这条管道从哪天开始有数据"，那是盘的事实。
+    """
+    layout.dataset_spec(dataset)  # 认不出的 dataset 名要在这里响，不是 glob 出一个空目录再报 None
+    paths = layout.dataset_partitions(dataset, root=root)
+    if not paths:
+        return None
+    with duckdb.connect() as con:
+        row: tuple[Any, ...] = con.execute(
+            "SELECT min(trade_date), max(trade_date), count(DISTINCT trade_date), "
+            "count(DISTINCT symbol) FROM read_parquet(?)",
+            [[str(path) for path in paths]],
+        ).fetchone()
+    if row[0] is None or row[1] is None:
+        return None  # 文件在、行是零：一次都没成功落过盘的空壳
+    return Cover(
+        first=row[0],
+        last=row[1],
+        days=int(row[2]),
+        symbols=int(row[3]),
+    )
 
 
 def adjusted_bars(

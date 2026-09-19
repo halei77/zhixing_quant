@@ -74,6 +74,23 @@ def test_a_symbol_never_written_reads_as_no_partitions(tmp_path: Path) -> None:
     assert layout.existing_partitions("600519", root=tmp_path / "not-yet") == ()
 
 
+def test_dataset_partitions_sees_every_symbol_of_that_dataset(tmp_path: Path) -> None:
+    """整块盘有哪几格：与上面那个的分工是"所有票"对"一只票"（`query.depth` 用的就是这一个）。
+
+    两只票、两年、外加另一个 dataset 的一格。混进来的那格必须不被看见——把日线的十年算进
+    5 分钟线的起点，那段"可回测区间"在盘上根本没有对应的行。
+    """
+    for year, code in ((2024, "600519"), (2021, "600520")):
+        for dataset in (layout.MINUTE_5, layout.DAILY):
+            path = layout.partition_path(code, year, dataset=dataset, root=tmp_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"")
+    found = layout.dataset_partitions(layout.MINUTE_5, root=tmp_path)
+    assert [layout.year_of(p) for p in found] == [2021, 2024]
+    assert [p.stem for p in found] == ["symbol=600520", "symbol=600519"]
+    assert len(layout.dataset_partitions(layout.DAILY, root=tmp_path)) == 2
+
+
 def test_columns_are_the_bar_fields_and_the_order_is_the_record_order() -> None:
     """列清单与 `Record` 形状一一对应：加一列时漏改一处，写和读会各自按不同顺序解读同一份文件。"""
     assert tuple(name for name, _ in layout.COLUMNS) == layout.NAMES

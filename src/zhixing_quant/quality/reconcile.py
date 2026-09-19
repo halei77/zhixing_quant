@@ -22,12 +22,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 
 from zhixing_quant.domain.aggregate import daily_from_minutes
 from zhixing_quant.domain.bar import Bar
+from zhixing_quant.storage.query import Cover
 
 #: 五种坏法的名字。写在这里而不是散在渲染里：日报的计数与告警的分组都按它来。
 KINDS = ("no_minutes", "no_daily", "price", "extremes", "volume")
@@ -46,15 +47,20 @@ class Finding:
 
 @dataclass(frozen=True)
 class Recon:
-    """一次对账的账：查了几组（票 × 周期）、对不上的那几条。
+    """一次对账的账：查了几组（票 × 周期）、对不上的那几条、每个周期在盘上覆盖了多久。
 
     `groups` 与 `findings` 是两个数，分开记是因为它们各自的 0 意思相反：0 条 findings 配上 0 组
     是"今天根本没查"，配上 900 组才是"两本账都对上了"。日报只能有一种写法把它们区分开，而写日报
     的人手里必须同时握着这两个数。
+
+    `covers` 是顺带报出的另一半（07 §5.1 的"可回测区间"）：断档说的是"今天少没少"，它说的是
+    "盘上一共攒了多少"。两个数来自同一次读盘，分开跑就会有两个时刻、两份答案。它的值是存储层的
+    记录——判据层因此认识了一个存储类型，与 `daily_report` 接 `WriteReport` 是同一条取舍。
     """
 
     groups: int
     findings: tuple[Finding, ...]
+    covers: Mapping[str, Cover | None] = field(default_factory=dict)
 
 
 def reconcile_day(

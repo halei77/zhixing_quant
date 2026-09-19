@@ -203,3 +203,86 @@ def test_minute_adjustment_without_daily_data_is_refused(tmp_path: Path) -> None
     with pytest.raises(query.Unadjustable, match="没有可用复权因子"):
         query.read_bars("600519", *FULL, adjust="backward", dataset=layout.MINUTE_5, root=tmp_path)
     assert query.read_bars("600519", *FULL, dataset=layout.MINUTE_5, root=tmp_path) != []
+
+
+def test_depth_is_the_span_that_is_actually_on_disk(tmp_path: Path) -> None:
+    """整个 dataset 的覆盖范围：首末日、有行的交易日数、票数（07 §5.1 的可回测区间）。
+
+    钉的是"盘上真有"而不是"这次跑了"：落盘失败的那些票不该出现在区间里。两只票、两年、
+    三个交易日，一次读全出来。
+    """
+    write.store_bars(
+        [minute_bar(datetime(2024, 1, 2, 9, 35)), minute_bar(datetime(2025, 3, 4, 9, 35))],
+        dataset=layout.MINUTE_5,
+        root=tmp_path,
+    )
+    write.store_bars(
+        [minute_bar(datetime(2025, 3, 6, 9, 35), symbol="000001")],
+        dataset=layout.MINUTE_5,
+        root=tmp_path,
+    )
+    assert query.depth(layout.MINUTE_5, root=tmp_path) == query.Cover(
+        first=date(2024, 1, 2), last=date(2025, 3, 6), days=3, symbols=2
+    )
+
+
+def test_depth_counts_days_with_rows_not_the_calendar_span(tmp_path: Path) -> None:
+    """首末之间三天、有行两天：`days` 报 2。
+
+    段长要拿去算"能切出多少天样本"（07 §5.3），按日历数会把每个周末都算成可用的一天。
+    """
+    write.store_bars(
+        [minute_bar(DATETIME1), minute_bar(datetime(2024, 1, 4, 9, 35))],
+        dataset=layout.MINUTE_5,
+        root=tmp_path,
+    )
+    cover = query.depth(layout.MINUTE_5, root=tmp_path)
+    assert cover is not None and (cover.first, cover.last, cover.days) == (
+        date(2024, 1, 2),
+        date(2024, 1, 4),
+        2,
+    )
+
+
+def test_depth_ignores_the_other_datasets(tmp_path: Path) -> None:
+    """日线的行不算进分钟线的深度：区间说的是"这条管道"，而三个周期各是一条。
+
+    混读的后果不是数字错一点，是 5 分钟的起点被日线那十年的假象拉长——回测切出来的第一段
+    里根本没有分钟行，而它看起来完全合法。
+    """
+    write.store_bars([bar(DAY1)], root=tmp_path)
+    write.store_bars([minute_bar(DATETIME1)], dataset=layout.MINUTE_30, root=tmp_path)
+    assert query.depth(layout.MINUTE_5, root=tmp_path) is None
+    assert query.depth(layout.DAILY, root=tmp_path) == query.Cover(
+        first=DAY1, last=DAY1, days=1, symbols=1
+    )
+
+
+def test_depth_of_an_unnamed_dataset_raises(tmp_path: Path) -> None:
+    """拼错的名字在这里也要响，而不是 glob 到一个空目录再回 None。
+
+    None 在日报上的写法是"这个周期从没落过盘"——一个拼错的名字被读成那句话，人就去找根本不
+    存在的落盘故障（`read_bars` 里同一个 `dataset_spec` 调用挡的是同一个坑）。
+    """
+    with pytest.raises(ValueError, match="未知 dataset"):
+        query.depth("minute5", root=tmp_path)
+
+
+def test_depth_of_an_empty_file_shell_is_none(tmp_path: Path) -> None:
+    """文件在、行是零：报 None，而不是一个首末日为 None 的 `Cover`。
+
+    这不是想象中的形状——一次写坏的落盘（进程被掐在 `COPY` 中间）就留这么一个壳。没有这个
+    判据，None 会带着 `first: date` 的类型一路走到日报的 `.isoformat()` 上炸掉，而那时今天
+    的数据已经落完盘了：坏在报告上，看起来像报告的问题。
+    """
+    landed = layout.partition_path("600519", 2024, dataset=layout.MINUTE_5, root=tmp_path)
+    write.store_bars([minute_bar(DATETIME1)], dataset=layout.MINUTE_5, root=tmp_path)
+    shell = tmp_path / "shell.parquet"
+    with duckdb.connect() as con:
+        con.execute(
+            f"COPY (SELECT * FROM read_parquet('{landed}') WHERE FALSE) TO ? (FORMAT PARQUET)",
+            [str(shell)],
+        )
+    landed.unlink()
+    shell.replace(landed)
+    assert query.depth(layout.MINUTE_5, root=tmp_path) is None
