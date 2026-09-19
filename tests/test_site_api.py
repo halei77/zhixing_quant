@@ -26,9 +26,10 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from tests.fakes import bar, snapshot_root
+from zhixing_quant import config
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Listing
-from zhixing_quant.site import api, tokens
+from zhixing_quant.site import api, templates, tokens
 from zhixing_quant.site.templates import Config, Selection, Template
 from zhixing_quant.storage import layout
 from zhixing_quant.storage.write import store_bars
@@ -632,3 +633,65 @@ def test_the_entry_point_assembles_from_the_published_data(
     served_client.post("/api/recent", json={"code": "600519"})
     assert trace == tmp_path / "site" / "recent.json"
     assert trace.is_file()
+
+
+#: 改 YAML 追加的那一条：这个名字在任何 `.py` 里都没出现过，`days: 2` 与真表的 `days: 120`
+#: 差一个量级，于是"生效没生效"在响应里看得见。只有日线——`root` 夹具往 tmp 里只落了三天日线。
+EXTRA_ROW = """
+  - name: 只看日线
+    status: ready
+    role: 你是一位只看量价的日内交易员
+    task: 判断下一个交易日的方向
+    data:
+      - {dataset: daily, days: 2}
+    format: markdown
+    fields: [close, volume]
+    adjust: backward
+    output: |
+      一句话结论，价位要能对得上表里某一天。
+"""
+
+
+def test_a_new_yaml_row_reaches_the_prompt_with_no_code_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, trace: Path
+) -> None:
+    """06 §八-2：改 YAML 即生效，不改代码。判的是"站点只认那份文件"这句话。
+
+    在真表上改，而不是另写一份干净的：那才是用户将来的动作。而且**加一条**比改一条更强——
+    `site/` 下没有任何一处认识「只看日线」，它出现在列表里只有一个来路：那份文件被读了。
+    """
+    shipped = config.prompt_templates_file()
+    edited = tmp_path / "prompt_templates.yaml"
+    edited.write_text(shipped.read_text(encoding="utf-8") + EXTRA_ROW, encoding="utf-8")
+
+    served: dict[str, object] = {}
+
+    def fake_run(app: FastAPI, **_kwargs: object) -> None:
+        served["app"] = app
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setattr(api, "load_calendar", lambda **_kwargs: CALENDAR)
+    monkeypatch.setattr(config, "prompt_templates_file", lambda **_kwargs: edited)
+    monkeypatch.setenv(api.TOKEN_ENV, TOKEN)
+
+    api.main()
+    app = served["app"]
+    assert isinstance(app, FastAPI)
+    shell = TestClient(app, headers=AUTH)
+
+    names = [t["name"] for t in shell.get("/api/templates").json()["templates"]]
+    want = [t.name for t in templates.load(shipped).templates]
+    assert names == [*want, "只看日线"], "列表不是「真表 + 追加那条」：站点读的不是这份文件"
+
+    body = shell.post(
+        "/api/prompt",
+        json={"code": "600519", "template": "只看日线", "as_of": "2024-01-04"},
+    ).json()
+    text = body["text"]
+    assert "你是一位只看量价的日内交易员" in text, "角色不是新表里那句：模板没从文件来"
+    assert "### 日K（2 个交易日）" in text
+    assert "| 88.00 |" in text and "| 96.00 |" in text
+    assert "80.00" not in text, "days: 2 没起作用：三天的数全进了表"
+    assert body["warn"] is None
+    shell.post("/api/recent", json={"code": "600519"})
+    assert [e["code"] for e in json.loads(trace.read_text(encoding="utf-8"))] == ["600519"]
