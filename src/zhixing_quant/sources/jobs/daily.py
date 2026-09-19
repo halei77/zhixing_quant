@@ -173,6 +173,9 @@ def collect(
 
     两个落盘都不兜异常：炸了（磁盘满、权限、同批冲突）意味着"今天这批没进库"，让它冒出去
     由退出码说给定时任务，比记下几条 Skipped、再出一份看起来正常的日报好。
+
+    每只票只有三个去处：判成的行进干净区与（可能的）隔离区，请求失败的进 `Skipped`，请求成功
+    却零行的也进 `Skipped`——后者不该走门禁，理由写在 `_NO_ROWS` 那段。
     """
     start = _window_start(calendar, day, previous_days)
     engine = GateEngine(gate_config.load(config.gate_config_file()), master, calendar)
@@ -201,6 +204,11 @@ def collect(
         consecutive = 0
         raw, hfq = grabbed
         drafts = akshare_daily.daily_drafts(raw, hfq, symbol=symbol)
+        if not drafts:
+            # 零只票不交给门禁：见 `_NO_ROWS`。也不计入熔断——熔断数的是"请求在失败"，
+            # 而请求成功了；整池皆空由 `DayResult.ok` 拦住，不会静悄悄。
+            skipped.append(Skipped(symbol=symbol, reason=_NO_ROWS))
+            continue
         judged = engine.run(drafts)
         # 两个桶都按**整批**落盘，不裁成报告日：上一日那行也是今天抓到的证据——干净区因此少一次
         # 联网重抓，隔离区因此不会在"那天到底拒收了什么"上留一个查不到的空洞。裁剪只发生在报给
@@ -240,6 +248,11 @@ def _total_quarantine(reports: Sequence[QuarantineReport]) -> QuarantineReport:
 #: 熔断之后没去抓的票，在日报的失败清单上写这一句。它们不是"抓不到"而是"没试"，
 #: 混进同一个原因里，看日报的人就会以为源只对其中一部分失败了。
 _BREAKER = "熔断：源连续失败，未再抓取"
+#: 请求成功、帧也拿到了，里头的行是零只（000016 *ST康佳A 与 600825 在 2026-09-18 就是这样）。
+#: 它既不是"抓取失败"（网络层没出错），也不是一批可判的数据：交给门禁会得到 R006 的整批 FATAL，
+#: 而那条按 04 §三 要扣整源 40 分——一天 4430 只里有两只是停牌，说不上"这个源今天不可信"。
+#: 所以它记在失败清单里，不记在健康分上。整池都空时 `DayResult.ok` 仍然为假，源宕了照样响。
+_NO_ROWS = "抓取成功但当日无行（停牌，或源漏了这只票）"
 
 
 def _window_start(calendar: TradingCalendar, day: date, previous_days: int) -> date:
@@ -277,14 +290,21 @@ def publish(
 
 
 def _skipped_section(skipped: Sequence[Skipped]) -> str:
-    """抓取失败清单：列前 `DETAIL_TOP` 只加总数。三千只票全列出来等于把日报撑爆。"""
+    """没判成的票清单：列前 `DETAIL_TOP` 只加总数。三千只票全列出来等于把日报撑爆。
+
+    三种原因是三种处置，所以各数各的：请求失败要查网络与限流，当日无行要查那只票是不是停牌
+    （或源在漏票），熔断说明源整体不行。合成一句"失败 N 只"会让人去查错方向。
+    """
     cap = daily_report.DETAIL_TOP
     untouched = sum(1 for item in skipped if item.reason == _BREAKER)
-    failed = len(skipped) - untouched
+    empty = sum(1 for item in skipped if item.reason == _NO_ROWS)
+    failed = len(skipped) - untouched - empty
     headline = f"- 重试后仍失败 {failed} 只"
+    if empty:
+        headline += f"，当日无行 {empty} 只"
     if untouched:
         headline += f"，熔断后没再抓取 {untouched} 只"
-    lines = ["", "## 抓取失败", "", f"{headline}（都不计入上面的分母）："]
+    lines = ["", "## 没判成的票", "", f"{headline}（都不计入上面的分母）："]
     lines += [f"- {item.symbol}：{item.reason}" for item in skipped[:cap]]
     if len(skipped) > cap:
         lines.append(f"- 其余 {len(skipped) - cap} 只同因，见任务日志")
@@ -352,10 +372,13 @@ def run(
         quarantined=quarantined,
     )
     if not result.ok:
+        empty = sum(1 for item in result.skipped if item.reason == _NO_ROWS)
+        failed = len(result.skipped) - empty
         alert(
             f"今日无数据：{target}",
-            f"股票池 {len(pool)} 只，一只都没判成（抓取失败 {len(skipped)} 只）。"
-            "日报已落盘，内容是空报告——别把它当「今天一切正常」。",
+            f"股票池 {len(pool)} 只，一只都没判成（抓取失败 {failed} 只、"
+            f"当日无行 {empty} 只）。日报已落盘，内容是空报告——"
+            "别把它当「今天一切正常」。整池都是「当日无行」就是源在给空表，与网络无关。",
         )
     elif result.fatal:
         # 判成了，但有票整批被拦：那只票今天不进干净区，而"一只"与"全部"的处置完全不同，
@@ -364,7 +387,7 @@ def run(
         alert(
             f"整批拒收：{target}",
             f"{count} / {len(result.outcomes)} 只票的批次被 FATAL 拦下，一只都没进干净区。"
-            "原因见日报的 FATAL 栏（多半是源改了列名或给了空表）；整批被拦的行不落隔离区——"
-            "FATAL 说的是「这批读不出行」，逐条落证据等于假装它们可读。",
+            "原因见日报的 FATAL 栏（多半是源改了列名，或给出来的日期全读不出）；"
+            "整批被拦的行不落隔离区——FATAL 说的是「这批读不出行」，逐条落证据等于假装它们可读。",
         )
     return result

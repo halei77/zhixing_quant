@@ -4,6 +4,7 @@
 
 1. 故障注入时**重试并最终告警**——断网不能表现为"今天没数据也算正常"。
 2. 少掉的票必须可见。抓取失败的票若悄悄从分母里消失，健康分反而上升，那是最坏的失真。
+   反过来也一样：请求成功却零行的票（停牌）要上清单，但不能因此去扣源的健康分。
 3. 两日一批换来的 R007 要真的能开火，而日报的分母仍是报告日那天。
 4. 判成 ≠ 落盘。干净区与隔离区各一本账（Step 3b/3c），而"重跑一遍"与"再记一遍"在盘上
    必须长得不一样——这两本账都是接线的性质，存储层自己的幂等测试替不了它们说话。
@@ -11,6 +12,7 @@
 网络层不在这里测：`fetch` 是参数，所以全部测试离线可跑（03 §二 L2）。
 """
 
+from collections.abc import Sequence
 from datetime import date
 from functools import partial
 from pathlib import Path
@@ -57,6 +59,12 @@ def bars(day: date, close: float) -> list[dict[str, object]]:
 def two_days(previous: float, today: float) -> Pair:
     raw = bars(PREV, previous) + bars(DAY, today)
     return raw, raw
+
+
+def garbled(day: str) -> Pair:
+    """形状齐全、只有日期读不出来的一帧：源改了日期格式时长这样。"""
+    row = {**bars(DAY, 100.0)[0], "date": day}
+    return [row], [row]
 
 
 def _no_landing(*_rows: Any) -> WriteReport:
@@ -295,7 +303,7 @@ def test_run_that_judges_nothing_alerts_and_is_not_ok(tmp_path: Path) -> None:
 def test_a_fatal_batch_alerts_even_when_the_day_otherwise_worked(
     tmp_path: Path,
 ) -> None:
-    """源给了一只票空表：那天判成了，但这只票一条都没进干净区，必须单独响一声。
+    """源给了一只票读不出日期的行：那天判成了，但这只票一条都没进干净区，必须单独响一声。
 
     混在"今日无数据"里不行——那只票出问题，和整个源出问题，是两条不同的处置。
     """
@@ -303,7 +311,9 @@ def test_a_fatal_batch_alerts_even_when_the_day_otherwise_worked(
 
     def half_broken(code: str, _start: date, _end: date) -> Pair:
         if code == "600520":
-            return [], []  # 空表：R006 判"本批无有效日期"
+            # 有行、日期读不出：R006 判"本批无有效日期"。请求成功而零行的票走不到这里，
+            # 那是"当日无数据"而不是"整批拒收"，见 `test_an_empty_frame_is_...`。
+            return garbled("0000-00-00")
         return two_days(100.0, 101.0)
 
     master = SecurityMaster(
@@ -327,6 +337,71 @@ def test_a_fatal_batch_alerts_even_when_the_day_otherwise_worked(
     assert title == "整批拒收：2024-01-03"
     # 数量必须在正文里："一只出问题"和"全部出问题"差三个数量级，处置也完全不同
     assert body.startswith("1 / 2 只票的批次被 FATAL 拦下")
+
+
+def test_an_empty_frame_is_a_missing_symbol_not_a_fatal_batch(tmp_path: Path) -> None:
+    """请求成功、帧里是零只票（000016 与 600825 在 2026-09-18 就是这样）。
+
+    把它交给门禁会得到一个 `source=""` 的无名批次加 R006 的整批 FATAL，而 04 §三 是按源打分：
+    4430 只里停牌两只，`akshare_daily` 就被打成 D，日报从此说"这个源今天不可信"。停牌不是源的错，
+    所以它上清单、不上健康分——分数与"那只票根本不在池里"必须完全相等。
+    """
+    alerts: list[str] = []
+
+    def fetch(code: str, _start: date, _end: date) -> Pair:
+        return ([], []) if code == "000016" else two_days(100.0, 101.0)
+
+    def run(symbols: Sequence[str], directory: Path) -> job.DayResult:
+        return job.run(
+            DAY,
+            fetch=fetch,
+            store=_no_landing,
+            quarantine=_no_quarantine,
+            master=MASTER,
+            calendar=CALENDAR,
+            symbols=symbols,
+            directory=directory,
+            alert=lambda t, _b: alerts.append(t),
+        )
+
+    with_suspended = run(["600519", "000016"], tmp_path)
+    without = run(["600519"], tmp_path / "without")
+    assert [m.source for m in with_suspended.report.metrics] == ["akshare_daily"]
+    assert [m.score for m in with_suspended.report.metrics] == [
+        m.score for m in without.report.metrics
+    ]
+    assert not with_suspended.fatal
+    assert alerts == []
+    assert "## 没判成的票" in with_suspended.markdown
+    assert "当日无行 1 只" in with_suspended.markdown
+    assert "- 000016：抓取成功但当日无行" in with_suspended.markdown
+
+
+def test_a_whole_pool_of_empty_frames_still_says_today_has_no_data(tmp_path: Path) -> None:
+    """整池都是"当日无行"＝源在给空表，与网络无关：不响一声就是静悄悄的空库。
+
+    但正文要分清两种原因。抓取失败 0 只而空表 2 只，该查的是源的接口；反过来说的是网络和限流。
+    """
+    alerts: list[tuple[str, str]] = []
+
+    def empty(_code: str, _start: date, _end: date) -> Pair:
+        return [], []
+
+    result = job.run(
+        DAY,
+        fetch=empty,
+        store=_no_landing,
+        quarantine=_no_quarantine,
+        master=MASTER,
+        calendar=CALENDAR,
+        symbols=["600519", "600520"],
+        directory=tmp_path,
+        alert=lambda t, b: alerts.append((t, b)),
+    )
+    assert result.ok is False
+    title, body = alerts[0]
+    assert title == "今日无数据：2024-01-03"
+    assert "抓取失败 0 只" in body and "当日无行 2 只" in body
 
 
 def test_a_broken_source_stops_instead_of_grinding_the_whole_pool() -> None:
@@ -390,16 +465,21 @@ def test_a_success_resets_the_breaker_counter() -> None:
     assert len(outcomes) == 2 and len(skipped) == 2  # 四只全都试过
 
 
-def test_the_failure_section_tells_grabbed_and_never_tried_apart(tmp_path: Path) -> None:
-    """两种失败在日报上必须分开：4000 只"没试"混进 30 只"抓不到"，看的人只会修错地方。"""
+def test_the_failure_list_keeps_the_three_reasons_apart(tmp_path: Path) -> None:
+    """三种原因是三种处置，混成一句"失败 N 只"就会有人去查错方向。
+
+    抓不到查网络与限流，当日无行查那只票是不是停牌（或源在漏票），熔断说明源整体不行。
+    4000 只"没试"混进 30 只"抓不到"，是最有误导性的一种合并。
+    """
     skipped = [
         job.Skipped(symbol="600519", reason="ConnectionError: 断网"),
+        job.Skipped(symbol="000016", reason="抓取成功但当日无行（停牌，或源漏了这只票）"),
         job.Skipped(symbol="600520", reason="熔断：源连续失败，未再抓取"),
     ]
     _, body = job.publish(
         DAY, [], landed=NO_LANDING, quarantined=NO_QUARANTINE, skipped=skipped, directory=tmp_path
     )
-    assert "重试后仍失败 1 只，熔断后没再抓取 1 只" in body
+    assert "重试后仍失败 1 只，当日无行 1 只，熔断后没再抓取 1 只" in body
 
 
 # --- 干净区接线（Step 3b）-------------------------------------------------------
