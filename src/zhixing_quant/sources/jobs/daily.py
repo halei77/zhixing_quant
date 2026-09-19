@@ -1,17 +1,20 @@
-"""每日盘后采集：抓取 → 门禁 → 日报（01 路线图 Step 2 第 4 项，验收 4）。
+"""每日盘后采集：抓取 → 门禁 → 干净区 → 日报（01 路线图 Step 2 第 4 项，验收 4）。
 
 抓取与告警都是**参数**而不是本模块里的调用：故障注入（断网/源不可用）要能塞进重试路径，
 真联网的那一层由调用方给。所以这里不 import akshare、不读环境变量、也不安装定时器——
-改用户机器上的 cron 属于"先问"（05 Q1）。
+改用户机器上的 cron 属于"先问"（05 Q1）。落盘同理是参数（`Store`）：真路径只有 CLI 知道，
+库函数默认往数据根写等于任何没传 root 的测试都会污染生产的干净区。
 
 两件事决定了批次的形状：
 
 - **两日一批**。R007 的判据是"今开 vs 昨收"，昨收只能由批次里上一日的行现算，单日一批
   等于这条规则永不触发且永不说话（04 §二：R007 阈值与 R004 联动）。报告再用
-  `GateOutcome.for_day` 裁回报告日，日报的分母仍是"那天"。
+  `GateOutcome.for_day` 裁回报告日，日报的分母仍是"那天"；**落盘裁不得**——上一日那一行
+  也是今天抓到的证据，而断点续传时它少一次联网请求。
 - **一只票一批**。`GateEngine` 本来就拒混批（`GateInconsistency`），按票分批还额外买到
   隔离性：一只票的网络失败不牵连其余几千只。同源多批由 `DataQualityReport.from_outcomes`
-  并成一行（台账坑 #10）。
+  并成一行（台账坑 #10）。落盘也按票一次：崩在中途时，已经写进去的就是已经写进去的，
+  重跑靠 `store_bars` 的幂等补齐——这里没有"整批事务"那种做不到的保证要去假装提供。
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from functools import partial
 from pathlib import Path
 
 from zhixing_quant import config
+from zhixing_quant.domain.bar import Bar
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import SecurityMaster
 from zhixing_quant.quality import daily_report, gate_config
@@ -31,11 +35,14 @@ from zhixing_quant.quality.engine import GateEngine, GateOutcome
 from zhixing_quant.quality.report import DataQualityReport
 from zhixing_quant.sources.akshare import daily as akshare_daily
 from zhixing_quant.sources.rows import Pair, SourceSchemaError
+from zhixing_quant.storage.write import WriteReport
 
 #: 抓取边界：一只票、一个闭区间，返回 (不复权, 后复权) 两帧。
 Fetcher = Callable[[str, date, date], Pair]
 #: 告警边界：标题 + 正文。iOS 推送通道接在这里，本模块只调用不实现。
 Alert = Callable[[str, str], None]
+#: 落盘边界：一批门禁放行的行 → 落盘的账。生产上就是 `storage.write.store_bars`。
+Store = Callable[[Sequence[Bar]], WriteReport]
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,7 @@ class DayResult:
     markdown: str
     skipped: tuple[Skipped, ...]
     pool: int
+    landed: WriteReport
 
     @property
     def ok(self) -> bool:
@@ -136,6 +144,7 @@ def collect(
     symbols: Sequence[str],
     *,
     fetch: Fetcher,
+    store: Store,
     master: SecurityMaster,
     calendar: TradingCalendar,
     previous_days: int = 1,
@@ -144,8 +153,8 @@ def collect(
     breaker: int = 20,
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
-) -> tuple[list[GateOutcome], list[Skipped]]:
-    """抓 + 判一批票，返回逐票结果与最终没拿下來的票。
+) -> tuple[list[GateOutcome], list[Skipped], WriteReport]:
+    """抓 + 判 + 落一批票：返回逐票结果、最终没拿下来的票、这次进干净区的账。
 
     `previous_days` 是往回带几个交易日：1 天够 R007；Step 3 做时间连续性检查时要更多。
     日历判不出上一日（样本区间的第一桶）时按单日批处理，此时 R007 不判——这一点由
@@ -154,11 +163,15 @@ def collect(
     `breaker` 是连败几只就收工：源整体宕掉时，4430 只 × 3 次 × 指数退避等于用十几个小时
     去撞一堵墙，而免费源会把这种撞法当作攻击。剩下的票照样进日报的失败清单，所以收工
     不是掩盖缺数，只是把"今天这个源不行"说得更早。
+
+    `store` 不兜异常：落盘炸了（磁盘满、权限、同批冲突）意味着"今天这批没进干净区"，
+    让它冒出去由退出码说给定时任务，比记下几条 Skipped、再出一份看起来正常的日报好。
     """
     start = _window_start(calendar, day, previous_days)
     engine = GateEngine(gate_config.load(config.gate_config_file()), master, calendar)
     outcomes: list[GateOutcome] = []
     skipped: list[Skipped] = []
+    written: list[WriteReport] = []
     consecutive = 0
     for position, symbol in enumerate(symbols):
         if consecutive >= breaker:
@@ -180,8 +193,23 @@ def collect(
         consecutive = 0
         raw, hfq = grabbed
         drafts = akshare_daily.daily_drafts(raw, hfq, symbol=symbol)
-        outcomes.append(engine.run(drafts).for_day(day))
-    return outcomes, skipped
+        judged = engine.run(drafts)
+        written.append(store(judged.clean_zone))
+        outcomes.append(judged.for_day(day))
+    return outcomes, skipped, _total(written)
+
+
+def _total(reports: Sequence[WriteReport]) -> WriteReport:
+    """逐票的落盘账并成一次运行的账。
+
+    分区数可以直接相加：一只票一年一个文件，而 `store_bars` 每次只看见一只票，重复不了。
+    """
+    return WriteReport(
+        partitions=sum(r.partitions for r in reports),
+        added=sum(r.added for r in reports),
+        repaired=sum(r.repaired for r in reports),
+        rewritten=sum(r.rewritten for r in reports),
+    )
 
 
 #: 熔断之后没去抓的票，在日报的失败清单上写这一句。它们不是"抓不到"而是"没试"，
@@ -200,15 +228,20 @@ def publish(
     day: date,
     outcomes: Sequence[GateOutcome],
     *,
+    landed: WriteReport,
     skipped: Sequence[Skipped] = (),
     directory: Path | None = None,
 ) -> tuple[DataQualityReport, str]:
-    """渲染 + 归档 + 分数流水。打印留给调用方：日报的正文同时是定时任务的日志。"""
+    """渲染 + 归档 + 分数流水。打印留给调用方：日报的正文同时是定时任务的日志。
+
+    `landed` 是这次运行进干净区的账，日报要把它单独列一行：判成多少行说的是门禁，
+    落进干净区多少行说的才是"明天有没有数据可用"，两者可以差在磁盘、差在落盘代码写坏。
+    """
     reports = directory if directory is not None else config.reports_dir()
     scores = reports / "scores.csv"
     report = DataQualityReport.from_outcomes(day, outcomes)
     trends = {m.source: daily_report.history_for(scores, m.source, day) for m in report.metrics}
-    body = daily_report.render(report, list(outcomes), trends)
+    body = daily_report.render(report, list(outcomes), trends, landed)
     if skipped:
         body += _skipped_section(skipped)
     daily_report.archive(body, day, reports)
@@ -235,6 +268,7 @@ def run(
     day: date | None = None,
     *,
     fetch: Fetcher,
+    store: Store,
     master: SecurityMaster,
     calendar: TradingCalendar,
     now: datetime | None = None,
@@ -247,7 +281,7 @@ def run(
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
 ) -> DayResult:
-    """一次盘后运行：定日 → 抓取判定 → 发布日报。
+    """一次盘后运行：定日 → 抓取判定 → 落干净区 → 发布日报。
 
     股票池默认取主数据当天的在册名单，`symbols` / `limit` 用来先在小范围跑通——全市场还是
     指数成分股是 01 路线图留给 Step 2 的待定口径，不在代码里替用户决定。
@@ -257,10 +291,11 @@ def run(
     pool = list(symbols) if symbols is not None else list(master.universe_on(target))
     if limit is not None:
         pool = pool[:limit]
-    outcomes, skipped = collect(
+    outcomes, skipped, landed = collect(
         target,
         pool,
         fetch=fetch,
+        store=store,
         master=master,
         calendar=calendar,
         previous_days=previous_days,
@@ -269,7 +304,7 @@ def run(
         sleep=sleep,
         alert=alert,
     )
-    report, body = publish(target, outcomes, skipped=skipped, directory=directory)
+    report, body = publish(target, outcomes, landed=landed, skipped=skipped, directory=directory)
     result = DayResult(
         day=target,
         outcomes=tuple(outcomes),
@@ -277,6 +312,7 @@ def run(
         markdown=body,
         skipped=tuple(skipped),
         pool=len(pool),
+        landed=landed,
     )
     if not result.ok:
         alert(

@@ -16,8 +16,11 @@ from zhixing_quant.quality import daily_report as dr
 from zhixing_quant.quality.engine import GateOutcome, QuarantinedRow
 from zhixing_quant.quality.facts import Violation
 from zhixing_quant.quality.report import DataQualityReport, HealthGrade
+from zhixing_quant.storage.write import WriteReport
 
 DAY = date(2024, 1, 19)
+#: 绝大多数版式测试不关心落盘那行，给它一个"什么都没写"的账；落盘行自己有专门的测试。
+NO_LANDED = WriteReport(0, 0, 0, 0)
 
 
 def _draft(**over: object) -> BarDraft:
@@ -156,7 +159,7 @@ def test_the_report_shows_every_source_the_gate_ran() -> None:
         _outcome("akshare_daily", 5000, quarantined=(_row(),)),
         _outcome("tencent_daily", 5000),
     ]
-    body = dr.render(_report_of(*outcomes), outcomes, {})
+    body = dr.render(_report_of(*outcomes), outcomes, {}, NO_LANDED)
     for name in ("akshare_daily", "tencent_daily"):
         assert f"| {name} |" in body
     assert "10,000" in body  # 行数千分位：五万行写成 50000 数不快
@@ -165,9 +168,27 @@ def test_the_report_shows_every_source_the_gate_ran() -> None:
 
 def test_a_clean_day_says_so_instead_of_printing_empty_tables() -> None:
     """没有命中就明说"没有任何规则命中"。空表在日报上和"忘了判"长得一模一样。"""
-    body = dr.render(_report_of(_outcome()), [_outcome()], {})
+    body = dr.render(_report_of(_outcome()), [_outcome()], {}, NO_LANDED)
     assert "（今天没有任何规则命中）" in body
     assert "（隔离区今天没有新条目）" in body
+
+
+def test_the_landing_line_separates_judged_from_written() -> None:
+    """判成 8,860 行与写进盘 8,860 行是两件事：磁盘写满那天只有后者会掉。"""
+    body = dr.render(_report_of(_outcome()), [_outcome()], {}, WriteReport(3, 8860, 12, 3))
+    assert "进干净区：新增 8,860 行、改写 12 行，重写 3/3 个分区文件" in body
+
+
+def test_an_idempotent_rerun_says_the_disk_was_left_alone() -> None:
+    """重跑时 `added=0` 是幂等的证据，不是"落盘坏了"。不写成一句话，第二天就有人来查磁盘。"""
+    body = dr.render(_report_of(_outcome()), [_outcome()], {}, WriteReport(4430, 0, 0, 0))
+    assert "进干净区：+0 行，4430 个分区文件在盘上已是最新" in body
+
+
+def test_nothing_at_all_landed_gets_its_own_sentence() -> None:
+    """一个分区都没触碰＝今天没有通过门禁的数据，与"触碰了但没改动"是两条不同的诊断。"""
+    body = dr.render(_report_of(_outcome()), [_outcome()], {}, NO_LANDED)
+    assert "进干净区：0 行——今天没有通过门禁的数据" in body
 
 
 def test_a_quarantine_sample_carries_rule_ids_and_raw_values() -> None:
@@ -177,7 +198,7 @@ def test_a_quarantine_sample_carries_rule_ids_and_raw_values() -> None:
         Violation("R004", "reject", "涨跌幅 +33.00% 越界"),
     )
     outcome = _outcome(quarantined=(row,))
-    body = dr.render(_report_of(outcome), [outcome], {})
+    body = dr.render(_report_of(outcome), [outcome], {}, NO_LANDED)
     assert "600519 2024-01-19 R001/R004" in body
     assert "low 高于 open/close 较低者；涨跌幅 +33.00% 越界" in body
     assert "close=1685.01" in body and "adj_factor=8.0718" in body
@@ -185,7 +206,7 @@ def test_a_quarantine_sample_carries_rule_ids_and_raw_values() -> None:
 
 def test_samples_are_capped_at_five_rows() -> None:
     outcome = _outcome(quarantined=tuple(_row() for _ in range(9)))
-    body = dr.render(_report_of(outcome), [outcome], {})
+    body = dr.render(_report_of(outcome), [outcome], {}, NO_LANDED)
     assert body.count("\n- 600519 ") == dr.SAMPLE_ROWS
 
 
@@ -195,7 +216,7 @@ def test_the_trend_section_names_its_source_and_window() -> None:
         (date(2024, 1, 17), 92.0, HealthGrade.B),
         (date(2024, 1, 18), 100.0, HealthGrade.A),
     )
-    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend})
+    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend}, NO_LANDED)
     assert "## 趋势 · akshare_daily" in body
     assert "近 2 日" in body
     assert "01-17 01-18" in body  # 日期只留 MM-DD：七天全写年号会把曲线挤到下一行
@@ -209,7 +230,7 @@ def test_the_trend_section_shows_the_last_run_not_yesterday() -> None:
     """
     outcomes = [_outcome(total=100, quarantined=tuple(_row() for _ in range(20)))]
     trend = ((date(2024, 1, 12), 80.0, HealthGrade.C),)
-    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend})
+    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend}, NO_LANDED)
     assert "- 2024-01-12 80.0（C） → 今天 92.0（B）" in body  # 20/100 拒收 = 8 分，B 档
 
 
@@ -217,14 +238,14 @@ def test_only_a_source_with_history_gets_a_trend_section() -> None:
     """一个源的历史不能顶替另一个源的：拿 akshare 的曲线去说 tencent 的趋势，是编一个假事实。"""
     outcomes = [_outcome("akshare_daily"), _outcome("tencent_daily")]
     trend = ((date(2024, 1, 18), 100.0, HealthGrade.A),)
-    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend})
+    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": trend}, NO_LANDED)
     assert "## 趋势 · akshare_daily" in body
     assert "## 趋势 · tencent_daily" not in body
 
 
 def test_a_source_without_history_gets_no_trend_section() -> None:
     outcomes = [_outcome()]
-    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": ()})
+    body = dr.render(_report_of(*outcomes), outcomes, {"akshare_daily": ()}, NO_LANDED)
     assert "## 趋势" not in body
 
 

@@ -1,7 +1,8 @@
-"""`zx-daily`：每日盘后采集的命令行入口（01 路线图 Step 2 第 4 项）。
+"""`zx-daily`：每日盘后采集的命令行入口（01 路线图 Step 2 第 4 项，验收 4）。
 
-只做装配，不做判定：主数据与日历从快照读，日线从源抓，抓与判与报都在 `daily.py`。
-所以这个文件里没有一条业务规则——规则住在有测试的地方，这里只负责"怎么被叫起来"。
+只做装配，不做判定：主数据与日历从快照读，日线从源抓，抓与判与落盘与报都在 `daily.py`，
+路径由这里给（`storage.layout` 的默认根就是 `config.parquet_dir()`）。所以这个文件里
+没有一条业务规则——规则住在有测试的地方，这里只负责"怎么被叫起来"。
 
 不调度自己：定时器（cron / systemd）装在用户机器上，属于"先问"（05 Q1）。这个入口的
 存在就是为了让那一步只是一行命令，而不是一次改造。
@@ -23,6 +24,7 @@ from zhixing_quant.sources.akshare.calendar import load_calendar
 from zhixing_quant.sources.akshare.master import read_master
 from zhixing_quant.sources.jobs import daily as job
 from zhixing_quant.sources.rows import SourceSchemaError
+from zhixing_quant.storage.write import store_bars
 
 
 def _days(text: str) -> date:
@@ -80,6 +82,7 @@ def main(argv: list[str] | None = None, *, fetcher: job.Fetcher | None = None) -
         result = job.run(
             args.day,
             fetch=grab,
+            store=store_bars,
             master=SecurityMaster(read_master().listings),
             calendar=calendar,
             symbols=args.symbols,

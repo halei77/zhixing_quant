@@ -26,6 +26,7 @@ from pathlib import Path
 
 from zhixing_quant.quality.engine import GateOutcome, QuarantinedRow
 from zhixing_quant.quality.report import DataQualityReport, HealthGrade, SourceMetrics
+from zhixing_quant.storage.write import WriteReport
 
 #: 04 §四 "明细 Top10"——**每个源**十条，不是全市场十条：后接入的源不能因为前面的源
 #: 报错多就被挤出日报。全量明细在隔离区（Step 3 落盘后查）。
@@ -95,13 +96,19 @@ def render(
     report: DataQualityReport,
     outcomes: Sequence[GateOutcome],
     trends: Mapping[str, Trend],
+    landed: WriteReport,
 ) -> str:
-    """日报正文。`trends` 按源给近 N 日的 (日期, 分数, 等级)，旧在前；没有历史就传空。"""
+    """日报正文。`trends` 按源给近 N 日的 (日期, 分数, 等级)，旧在前；没有历史就传空。
+
+    `landed` 是这次运行进干净区的账：门禁判成多少行说的是"源给的数据能不能要"，落盘多少行
+    说的是"明天有没有数据可用"。两个数各报各的，才不会在"判成八千行、磁盘写满"那天报平安。
+    """
     lines = [
         f"# 数据质量日报 {report.day.isoformat()}",
         "",
         f"- 行数 {report.total_rows:,}，源 {len(report.metrics)} 个，"
         f"降级或停用 {len(report.blocked)} 个",
+        _landed_line(landed),
         "",
         "## 各源",
         "",
@@ -128,6 +135,25 @@ def render(
     for metrics in report.metrics:
         lines += ["", *_trend_lines(metrics, trends.get(metrics.source, ()))]
     return "\n".join(lines) + "\n"
+
+
+def _landed_line(landed: WriteReport) -> str:
+    """落盘那行。三种情形要分开说，因为它们是三件不同的事实：
+
+    没写任何东西（今天没有一行通过门禁）、写了但一个文件都没改（重跑，幂等的直接证据）、
+    真的新增了行。把第二种写成"+0 行"就等于把验收 3 的观测点藏进一个看起来像失败的数字里。
+    """
+    if not landed.partitions:
+        return "- 进干净区：0 行——今天没有通过门禁的数据"
+    if not landed.added and not landed.repaired:
+        return (
+            f"- 进干净区：+0 行，{landed.partitions} 个分区文件在盘上已是最新"
+            "（重跑幂等，未改动任何文件）"
+        )
+    return (
+        f"- 进干净区：新增 {landed.added:,} 行、改写 {landed.repaired:,} 行，"
+        f"重写 {landed.rewritten:,}/{landed.partitions:,} 个分区文件"
+    )
 
 
 def _trend_lines(metrics: SourceMetrics, trend: Trend) -> list[str]:

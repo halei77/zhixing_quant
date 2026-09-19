@@ -70,6 +70,10 @@ def test_a_clean_run_exits_zero_and_prints_the_report(
     assert "| akshare_daily | 2 | 0 | 0 | 否 | 100.0 | A |" in out
     assert (data_root / "reports" / "2024-01-03.md").is_file()  # 归档走数据根，不落仓库
     assert (data_root / "reports" / "scores.csv").is_file()
+    # Step 3b：真入口跑一次，干净区就要在盘上（根来自 config.parquet_dir，即 ZX_DATA_ROOT）。
+    # 两票 × 两日 = 4 行，而日报的分母只有报告日那 2 行——两个数不同，才说明各报各的。
+    assert (data_root / "data/daily/year=2024/symbol=600519.parquet").is_file()
+    assert "- 进干净区：新增 4 行" in out
 
 
 @pytest.mark.usefixtures("data_root")
