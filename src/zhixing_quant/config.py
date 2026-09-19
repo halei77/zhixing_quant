@@ -60,3 +60,8 @@ def gate_config_file(root: Path | None = None) -> Path:
     是谁改的口径；躺在数据根里的配置文件没有版本，等于口径随时可变。
     """
     return (root if root is not None else repo_root()) / "config" / "gate.toml"
+
+
+def backtest_config_file(root: Path | None = None) -> Path:
+    """回测的成本与执行假设表（ADR-0010 决定 8）。与 `gate.toml` 同一条理由住在仓库里。"""
+    return (root if root is not None else repo_root()) / "config" / "backtest.toml"

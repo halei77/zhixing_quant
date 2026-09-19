@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from zhixing_quant.domain.bar import BarDraft, nonpositive_prices, not_finite, ohlc_violations
+from zhixing_quant.domain.limits import limit_pct, new_listing_days
 from zhixing_quant.domain.symbol import Board, UnknownCode, board_of
 from zhixing_quant.quality.facts import BatchFacts, RowFacts
 from zhixing_quant.quality.gate_config import RuleParams
@@ -89,7 +90,9 @@ def _limit_and_board(facts: RowFacts, params: RuleParams) -> tuple[float, Board]
     """该票该日的涨跌幅上限（百分点，未加容差）与所属板块。判不出来返回 None。
 
     R004 与 R007 共用它，这就是 04 §二 "R007 阈值与 R004 板块阈值联动"的落点：一条
-    代码路径、一份 `limits_pct`，不存在"改了 R004 忘了改 R007"的可能。
+    代码路径、一份 `limits_pct`，不存在"改了 R004 忘了改 R007"的可能。档位本身在
+    `domain/limits.py`——回测引擎判"能不能成交"要的是同一个数（ADR-0010 决定 4），
+    而它**不**叠这里的容差，所以共用到档位为止。
 
     主数据缺席时连北交所也不给上限：早先的版本先返回 bse 档位再问主数据，于是"北交所票、
     主数据没有它"会一路走到新股窗口那次 `listing()` 查询并抛 KeyError——整批跑批被一条
@@ -102,9 +105,7 @@ def _limit_and_board(facts: RowFacts, params: RuleParams) -> tuple[float, Board]
     if facts.state is None:
         return None  # ST 标记与新股窗口都要查主数据，缺了就判不了
     limits: Mapping[str, float] = params["limits_pct"]
-    if board is Board.BSE:
-        return limits["bse"], board
-    return (limits["st"] if facts.state.is_st else limits[board.value]), board
+    return limit_pct(board, is_st=facts.state.is_st, limits_pct=limits), board
 
 
 def limit_breach(facts: RowFacts, params: RuleParams) -> str | None:
@@ -133,11 +134,12 @@ def _in_new_listing_window(facts: RowFacts, board: Board, params: RuleParams) ->
     """04 §二 的新股无涨跌幅限制期。豁免条目仍进日报待核（同节末句）。
 
     天数按板块取，不在这里写死 5：北交所是"首日不设、此后 30%"，与注册制主板不同口径。
+    这张表回测引擎也读（ADR-0010 决定 4），所以取数的那一步在 `domain/limits.py`。
     """
     draft = facts.draft
     if facts.master is None or facts.calendar is None or draft.trade_date is None:
         return False
-    days = int(params["new_listing_no_limit_days"].get(board.value, 0))
+    days = new_listing_days(board, params["new_listing_no_limit_days"])
     try:
         return facts.master.no_limit_period(draft.symbol, draft.trade_date, facts.calendar, days)
     except KeyError:
