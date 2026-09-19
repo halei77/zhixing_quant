@@ -19,7 +19,7 @@ from zhixing_quant.domain.bar import Bar, BarDraft
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Interval, Listing, SecurityMaster
 from zhixing_quant.quality import gate_config
-from zhixing_quant.quality.engine import GateEngine, GateInconsistency
+from zhixing_quant.quality.engine import GateEngine, GateInconsistency, GateOutcome, QuarantinedRow
 from zhixing_quant.quality.facts import BatchFacts, Violation
 from zhixing_quant.quality.gate_config import GateConfig, RuleSpec
 
@@ -348,3 +348,41 @@ def test_batch_predicate_return_shapes_become_violations(
     ]
     assert outcome.has_fatal is bool(reasons)
     assert (outcome.clean_zone == ()) is bool(reasons)
+
+
+# --- for_day：批次跨两日、报告只说一天 ------------------------------------------
+
+
+def _bar(day: date) -> Bar:
+    return Bar(
+        source="ak",
+        symbol="600519",
+        trade_date=day,
+        open=1.0,
+        high=1.0,
+        low=1.0,
+        close=1.0,
+        volume=100.0,
+        amount=100.0,
+    )
+
+
+def _dirty(day: date) -> QuarantinedRow:
+    draft = BarDraft(symbol="600519", trade_date=day, close=1.0)
+    return QuarantinedRow(draft, (Violation("R001", "reject", "脏"),))
+
+
+def test_for_day_recomputes_the_denominator_from_the_rows_it_keeps() -> None:
+    """04 §四 的日报说的是"那天"：两日一批时 total 必须是当天的行数，否则分母白多一倍。"""
+    batch = GateOutcome(
+        source="ak",
+        total=2,
+        accepted=(_bar(DAY1),),
+        quarantined=(_dirty(DAY2),),
+        warned=(),
+        fatal=(),
+    )
+    only_second = batch.for_day(DAY2)
+    assert (only_second.total, only_second.rejected_count, len(only_second.accepted)) == (1, 1, 0)
+    assert batch.for_day(DAY1).total == 1
+    assert batch.for_day(DAY3).total == 0  # 那天没数据就报 0，不沿用批次规模

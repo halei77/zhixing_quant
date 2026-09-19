@@ -74,6 +74,30 @@ class GateOutcome:
         """策略层唯一入口（04 §一 关键不变量）：FATAL 时为空，整批都没进干净区。"""
         return () if self.has_fatal else self.accepted
 
+    def for_day(self, day: date) -> GateOutcome:
+        """把跨多日的判定批次裁成报告日那一天。
+
+        为什么需要：R007 的判据是"今开 vs 昨收"，昨收只能从批次里上一日的行拿到（引擎用
+        `_attach_previous_by_date` 现算），所以每日任务必须两日一批；而 04 §四 的日报说的
+        是"那天"，把两日的行数算进今天的分母，健康分就稀释了一倍。
+
+        FATAL 时整批原样返回：那时三个桶都是空的，`total` 是唯一的证据，裁成 0 反而像是
+        "那天没数据"。
+        """
+        if self.has_fatal:
+            return self
+        accepted = tuple(bar for bar in self.accepted if bar.trade_date == day)
+        quarantined = tuple(row for row in self.quarantined if row.draft.trade_date == day)
+        warned = tuple(row for row in self.warned if row.draft.trade_date == day)
+        return GateOutcome(
+            source=self.source,
+            total=len(accepted) + len(quarantined),
+            accepted=accepted,
+            quarantined=quarantined,
+            warned=warned,
+            fatal=(),
+        )
+
 
 class GateEngine:
     def __init__(
