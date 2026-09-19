@@ -10,6 +10,7 @@ dependencies = [
     # InvalidInputException（0d 实测）。显式声明，不留隐性依赖。
     "hypothesis>=6.168.0",
     "pydantic>=2.13.5",
+    "pypinyin>=0.55.0",
     "pytz>=2026.3.post1",
     "pyyaml>=6.0.3",
 ]

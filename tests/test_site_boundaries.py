@@ -1,4 +1,4 @@
-"""依赖边界（ADR-0011 决定 1 + ADR-0012 决定 1）：`site/` 的组装层是纯的，读盘只在一处。
+"""依赖边界（ADR-0011 决定 1 + ADR-0012 决定 1 + ADR-0013 决定 1）：组装层是纯的，碰盘只有两处。
 
 与 `tests/test_backtest_boundaries.py` 同一条理由，而这里的理由更硬：06 §八-3 要的验收是
 "生成提示词中的数据与干净区抽样比对 100% 一致，且**自动化对照测试进 CI**"。那种对照测试要能
@@ -6,8 +6,13 @@
 方便在 `table.py` 里 `from zhixing_quant.storage import query`，比对就变成了"盘上恰好有什么"的
 函数，而验收标准照样能打勾。
 
-所以逐文件扫 AST：越界一条报一条。纯模块清单还要对着 ADR-0012 决定 1 那句逐字比——文档写了
-哪几个文件，`site/` 下就该有哪几个；再加模块时得先改文档再改目录，顺序反了就红。
+所以逐文件扫 AST：越界一条报一条。纯模块清单还要对着 ADR-0013 决定 1 那句逐字比——文档写了
+哪几个文件，`site/` 下就该有哪几个；加模块时得先改文档再改目录，顺序反了就红。
+
+碰盘的位置从 ADR-0012 的一个变成两个（`prompt.py` 读K线，`api.py` 读主数据与日历），于是边界
+也从一条变成两条：`storage` 仍然只在 `prompt.py`，而 `sources`/`config` 只许出现在这两个具名
+文件里。**新增第三个碰盘位置时必须回来改这里**——这是拆成两个具名位置而不是放开成"谁都能读"
+的全部理由。
 """
 
 import ast
@@ -18,18 +23,24 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SITE = REPO_ROOT / "src" / "zhixing_quant" / "site"
-ADR_0012 = REPO_ROOT / "docs" / "adr" / "0012-站点取数与组合根.md"
+ADR_0013 = REPO_ROOT / "docs" / "adr" / "0013-站点壳的搜索与鉴权.md"
 
-#: 组合根：`site/` 下唯一允许读盘、翻仓库目录的文件（ADR-0012 决定 1）。
+#: 组合根：`site/` 下唯一能读干净区的文件（ADR-0012 决定 1）。
 ROOT_MODULE = "prompt.py"
+
+#: 壳：读主数据快照与日历，不 import `storage`（ADR-0013 决定 1）。
+SHELL_MODULE = "api.py"
 
 #: 纯模块往上只允许看见这两层：`domain/*`（纯数据结构）与 `site` 自己。
 #: `config` 不在列：模板表的路径是调用方读好后传进来的（`load(path)`），纯层自己去翻仓库目录，
 #: 等于给"这份配置从哪来"开一条暗道（与 ADR-0010 决定 1 同一条取舍）。
 ALLOWED = frozenset({"site", "domain"})
 
-#: 动过盘上或网络的那几个包。出现它们的 import，只许在 `ROOT_MODULE` 里（ADR-0012 决定 1）。
-IO_PACKAGES = frozenset({"storage", "sources", "tasks", "config"})
+#: 干净区那一层，只有组合根碰得着。
+STORAGE_PACKAGES = frozenset({"storage"})
+
+#: 动过盘上或网络、而壳也需要的那几个包。
+SHELL_PACKAGES = frozenset({"sources", "tasks", "config"})
 
 PURE_LIST = re.compile(r"`site/\{([^}]*)\}\.py`")
 
@@ -58,14 +69,14 @@ def _modules() -> list[str]:
 
 
 def _pure_modules() -> list[str]:
-    return [name for name in _modules() if name != ROOT_MODULE]
+    return [name for name in _modules() if name not in {ROOT_MODULE, SHELL_MODULE}]
 
 
 def _declared_pure_modules() -> list[str]:
-    """ADR-0012 决定 1 那句 `site/{a,b,…}.py` 里列的名字。"""
-    text = ADR_0012.read_text(encoding="utf-8")
+    """ADR-0013 决定 1 那句 `site/{a,b,…}.py` 里列的名字。"""
+    text = ADR_0013.read_text(encoding="utf-8")
     match = PURE_LIST.search(text)
-    assert match, "ADR-0012 决定 1 的模块清单被改写，正则得跟着改"
+    assert match, "ADR-0013 决定 1 的模块清单被改写，正则得跟着改"
     return [f"{name}.py" for name in (x.strip() for x in match.group(1).split(",")) if name]
 
 
@@ -80,11 +91,22 @@ def test_a_site_module_depends_only_on_the_pure_layers(module: str) -> None:
     assert not outside, f"{module} 越界 import：{sorted(outside)}；纯层只许 {sorted(ALLOWED)}"
 
 
-def test_the_root_module_is_the_only_io_site() -> None:
-    """两个方向都要成立：越界的一个不许有，而读盘这件事确实只发生在 `prompt.py` 里。
+def test_the_clean_zone_is_read_in_exactly_one_place() -> None:
+    """`storage` 只出现在组合根：ADR-0012 决定 1 那半句到今天一个字没改。
 
-    后半句防的是"根被改名或挪走"——那时前半句会空转通过（谁都没越界，因为根本没有根），而
-    ADR-0012 里那句"集中在一个文件"就成了假话。与 `test_backtest_boundaries` 同一条。
+    判的是"恰好一个"而不是"至多一个"——根被改名或挪走时，前一种说法会空转通过（谁都没越界，
+    因为根本没有根），而文档里那句"集中在一个文件"就成了假话。
     """
-    io_sites = {name for name in _modules() if _sources_of(SITE / name) & IO_PACKAGES}
-    assert io_sites == {ROOT_MODULE}, f"读盘的位置应当只有 {ROOT_MODULE}，实际 {sorted(io_sites)}"
+    readers = {name for name in _modules() if _sources_of(SITE / name) & STORAGE_PACKAGES}
+    assert readers == {ROOT_MODULE}, f"读干净区的位置应当只有 {ROOT_MODULE}，实际 {sorted(readers)}"
+
+
+def test_auxiliary_io_stays_inside_the_two_named_files() -> None:
+    """主数据、日历、仓库路径：只许组合根与壳碰，其余模块一个都不许有。
+
+    这一条与上一条分开判，是因为它们放宽的方向不同：上一条永远不该多出一个位置，这一条随着
+    壳的落地从"一个"变"两个"、而且以后可能跟着端点变多。写在一起就会看不出哪半句动了。
+    """
+    allowed = {ROOT_MODULE, SHELL_MODULE}
+    offenders = {name for name in _pure_modules() if _sources_of(SITE / name) & SHELL_PACKAGES}
+    assert not offenders, f"{sorted(offenders)} 越界读辅助数据；具名位置是 {sorted(allowed)}"
