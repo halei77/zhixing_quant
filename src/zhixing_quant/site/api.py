@@ -1,0 +1,222 @@
+"""站点壳：搜索 / 模板 / 生成 / 最近搜索四个端点（ADR-0013）。
+
+壳里没有口径（ADR-0013 决定 5）：token 数、价格口径行、"盘上 N 天而模板要 M 天"那句缺口，全部
+由 `prompt.build` 的返回值原样搬进响应。这里只判三件事——口令（决定 3）、留痕（决定 4）、请求里的
+字段到调用的对应。写在这里的东西一旦被允许变多，站点就会长出第二套口径，而 ADR-0011 决定 3 那句
+"口径行由代码跟着配置生成，模板作者删不掉"就白立了。
+
+数据根与采集端同一个根（ADR-0012 决定 1）：站点读的是**发布过来**的干净区（ADR-0006 决定 1/2），
+不是另抓一份。所以这个进程不需要采集能力，也不许在生成之路上联网（ADR-0012 决定 2）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import asdict
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from pydantic import BaseModel
+
+from zhixing_quant import config
+from zhixing_quant.domain.calendar import TradingCalendar
+from zhixing_quant.domain.security import Listing
+from zhixing_quant.domain.symbol import UnknownCode, normalize_code
+from zhixing_quant.site import prompt, search, templates
+from zhixing_quant.sources.akshare.calendar import load_calendar
+from zhixing_quant.sources.akshare.master import read_master
+
+#: 06 §四 那句"上限 10 只"里的 10。它是产品口径，不是"这一页显示几条"，所以不从请求里来。
+RECENT_CAP = 10
+#: 搜索一次回几条（下拉框容量），以及它的天花板——字典只有四千多只，而这是公网。
+SEARCH_LIMIT = 20
+SEARCH_MAX = 50
+#: 06 §二 那句"固定口令"的环境变量名（ADR-0013 决定 3）。
+TOKEN_ENV = "ZX_SITE_TOKEN"
+
+#: 鉴权中间件的下一个处理器。这一版 FastAPI 没导出这个别名，所以自己写。
+_Dispatch = Callable[[Request], Awaitable[Response]]
+
+
+class Entry(BaseModel):
+    """留痕里的一条（ADR-0013 决定 4）。`at` 是写下的时刻，给人看"多久之前"。"""
+
+    code: str
+    name: str
+    at: str
+
+
+class PromptBody(BaseModel):
+    """生成请求。`as_of` 不给就是今天：周日生成的提示词，末行自己退到周五那根K线
+
+    （ADR-0012 决定 2：区间终点是 ≤ as_of 的最后一个交易日，不是 as_of 本身。）
+    """
+
+    code: str
+    template: str
+    as_of: date | None = None
+
+
+class RecentBody(BaseModel):
+    code: str
+
+
+class Recent:
+    """最近搜索的票：一份 JSON 数组，同码再搜置顶，满了淘汰队尾（ADR-0013 决定 4）。
+
+    记的是**票**不是敲过的字符串，所以 `record` 之前先按代码去掉旧的自己——按条目数上限的话，
+    把一只票搜三次就挤掉了另外两只，而 06 §四 那句的量词是"只"。
+    """
+
+    def __init__(self, path: Path, *, cap: int = RECENT_CAP) -> None:
+        self._path = path
+        self._cap = cap
+
+    def load(self) -> list[Entry]:
+        """没有文件就是"还没搜过"，不是错误。形状不对则是错误，不清空。"""
+        if not self._path.is_file():
+            return []
+        raw: list[dict[str, Any]] = json.loads(self._path.read_text(encoding="utf-8"))
+        return [Entry.model_validate(item) for item in raw]
+
+    def record(self, code: str, name: str, *, at: str) -> list[Entry]:
+        entries = [entry for entry in self.load() if entry.code != code]
+        entries.insert(0, Entry(code=code, name=name, at=at))
+        kept = entries[: self._cap]
+        self._save(kept)
+        return kept
+
+    def _save(self, entries: Sequence[Entry]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [entry.model_dump() for entry in entries]
+        self._path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def site_token(env: Mapping[str, str] | None = None) -> str:
+    """口令从环境读；没配就**起不来**，不是"跳过鉴权"（ADR-0013 决定 3）。
+
+    "忘了配"实现成"没鉴权"是最坏的一种能跑：它的日志与"部署成功"完全同形，而它已经在公网上裸奔。
+    """
+    source = os.environ if env is None else env
+    token = source.get(TOKEN_ENV, "").strip()
+    if not token:
+        raise RuntimeError(f"{TOKEN_ENV} 没有设置：站点不许裸奔（ADR-0013 决定 3）")
+    return token
+
+
+def create_app(
+    *,
+    listings: Sequence[Listing],
+    cfg: templates.Config,
+    calendar: TradingCalendar,
+    recent: Recent,
+    token: str,
+) -> FastAPI:
+    """装配应用。依赖全部从参数进来（与 ADR-0010 决定 1 同一手法），只有 `main` 从盘上取。
+
+    字典既用来搜，也用来判"这只票存不存在"（`_known`）——同一份名单，不另立第二份答案。
+    """
+    book = search.Index(listings)
+    names = {listing.code: listing.name for listing in listings}
+    app = FastAPI(title="知行 · 提示词站点", docs_url=None, redoc_url=None)
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next: _Dispatch) -> Response:
+        """回数据的一律要口令，回壳本身的不必（ADR-0013 决定 3）。
+
+        比"逐个端点记得加 Depends"可靠：新加一个 `/api/...` 而忘了鉴权，是这种写法唯一会犯的错，
+        而它的表现是"一切正常"。前缀这条规则做不到忘。
+        """
+        if not request.url.path.startswith("/api") or _authorized(request, token):
+            return await call_next(request)
+        return Response(status_code=401, content="口令不对")
+
+    @app.get("/api/search")
+    def api_search(q: str, limit: int = Query(SEARCH_LIMIT, ge=1, le=SEARCH_MAX)) -> Any:
+        return {"hits": list(book.match(q, limit=limit))}
+
+    @app.get("/api/templates")
+    def api_templates() -> Any:
+        return {"templates": [asdict(template) for template in cfg.templates]}
+
+    @app.post("/api/prompt")
+    def api_prompt(body: PromptBody) -> Any:
+        """生成一条提示词。失败一律 400 带上原来那句话，不改写、不翻译。
+
+        收口成一条 `except ValueError` 是因为生成路上**可预期**的失败全是它的子类——pending 模板、
+        缺分母、空表、日历不覆盖、代码不认、模板名不存在。不是 ValueError 的就是程序错，让它 500：
+        把 bug 伪装成"请求不对"是排查路上最贵的一种礼貌。
+        """
+        try:
+            template = cfg.by_name(body.template)
+            code = _known(body.code, names)
+            built = prompt.build(
+                template,
+                code,
+                body.as_of or date.today(),
+                calendar=calendar,
+                token_warn_above=cfg.token_warn_above,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"text": built.text, "tokens": built.tokens, "warn": built.warn}
+
+    @app.get("/api/recent")
+    def api_recent_list() -> Any:
+        return {"entries": recent.load()}
+
+    @app.post("/api/recent")
+    def api_recent_add(body: RecentBody) -> Any:
+        """记下"看过的那只票"。名字从字典现取，不信前端传来的副本（决定 4 那句"真值是 code"）。"""
+        code = _known(body.code, names)
+        return {"entries": recent.record(code, names[code], at=_now())}
+
+    return app
+
+
+def _known(text: str, names: Mapping[str, str]) -> str:
+    """把请求里的代码规成字典的键。认不出、或不在字典里，都是 404。
+
+    "这只票不存在"与"这只票没有K线"是两件事：前者在这里响，后者由 `prompt.build` 里那张空表的
+    拒绝来说（ADR-0013 代价三）。混成一件事的话，用户会以为站点在骗他。
+    """
+    try:
+        code = normalize_code(text)
+    except UnknownCode as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if code not in names:
+        raise HTTPException(status_code=404, detail=f"主数据里没有 {code}：搜索字典是它的出处")
+    return code
+
+
+def _authorized(request: Request, token: str) -> bool:
+    """`X-Token` 逐字节比。用 `compare_digest` 不是玄学：口令只有一个、服务在公网上，而返回真假
+    的时间差是这台机器上唯一一条能问出"第几个字符对了"的通道。字节化是因为它只吃 ASCII。
+    """
+    given = request.headers.get("x-token", "")
+    return secrets.compare_digest(given.encode(), token.encode())
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def main() -> None:
+    """进程入口（`zx-site`）。默认只绑本机：公网那一步在阿里云侧由反代给出（ADR-0006）。"""
+    cfg = templates.load(config.prompt_templates_file())
+    app = create_app(
+        listings=read_master().listings,
+        cfg=cfg,
+        calendar=load_calendar(until=date.today()),
+        recent=Recent(config.site_recent_file()),
+        token=site_token(),
+    )
+    host = os.environ.get("ZX_SITE_HOST", "127.0.0.1")
+    port = int(os.environ.get("ZX_SITE_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

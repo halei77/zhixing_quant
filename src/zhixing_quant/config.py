@@ -58,6 +58,15 @@ def parquet_dir(env: Mapping[str, str] | None = None) -> Path:
     return data_root(env) / "data"
 
 
+def site_recent_file(env: Mapping[str, str] | None = None) -> Path:
+    """站点的最近搜索留痕（06 §四"服务端持久化"、ADR-0013 决定 4）。
+
+    放数据根而不是仓库：它是用户使用记录，不是口径——进仓库就等于把它当配置评审，而它每天变。
+    与"不进干净区"同一条理由：它既不进门禁也不进提示词，只是一份显示用的副本。
+    """
+    return data_root(env) / "site" / "recent.json"
+
+
 def repo_root() -> Path:
     """仓库根，由本文件位置反推：写死绝对路径会换机即废，也过不了路径扫描。"""
     return Path(__file__).resolve().parents[2]
