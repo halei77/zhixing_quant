@@ -21,15 +21,20 @@ from zhixing_quant.backtest.fills import REASON_NO_BAR, REASONS, Order, Reject
 from zhixing_quant.backtest.metrics import Metrics, measure
 from zhixing_quant.backtest.position import REASON_T1, RoundTrip
 from zhixing_quant.backtest.report import (
+    FAIL,
     NA,
+    PASS,
+    VOID,
     Identity,
     Probe,
     Report,
     Scope,
     equity_csv,
     render,
+    status,
 )
 from zhixing_quant.backtest.spec import Side
+from zhixing_quant.tasks import models
 
 DAY1 = date(2026, 9, 17)
 DAY2 = date(2026, 9, 18)
@@ -225,6 +230,62 @@ def test_sensitivity_without_a_single_trip_is_not_read_as_a_pass() -> None:
     text = _page(sensitivity=probes)
     assert "无从判断" in text
     assert "这不是“通过”" in text
+
+
+def _probe(factor: float, expectancy: float | None) -> Probe:
+    """`None` = 这一档没有回合（用真引擎的空跑结果），有数就只有一个回合、盈亏即期望。"""
+    if expectancy is None:
+        return Probe(factor, measure(run_of()))
+    return Probe(factor, _one_trip(expectancy))
+
+
+def _verdict_line(text: str) -> str:
+    return next(line for line in text.splitlines() if line.startswith("判定："))
+
+
+@pytest.mark.parametrize(
+    ("expectancies", "phrase", "code"),
+    [
+        ((1.0, 1.0, 1.0), "都是正的", PASS),
+        ((-1.0, -1.0, -1.0), "都不为正", FAIL),
+        ((1.0, -1.0, -1.0), "反转", FAIL),
+        ((None, None, None), "无从判断", VOID),
+    ],
+)
+def test_the_sentence_on_the_page_and_the_code_in_the_ledger_are_one_judgement(
+    expectancies: tuple[float | None, ...], phrase: str, code: str
+) -> None:
+    """纸上那句话与台账那个码，必须出自同一个判据。
+
+    这是 `status()` 存在的全部理由：台账记 `pass` 而报告写"反转"，两份产物就互相拆台，
+    而留痕（09 §五）要的恰恰是"事后能复核"。所以这里不分别测两条逻辑，而是四种形状各测一次
+    "两边一致"。
+    """
+    probes = tuple(
+        _probe(factor, value) for factor, value in zip((0.5, 1.0, 1.5), expectancies, strict=True)
+    )
+    assert status(probes) == code
+    assert phrase in _verdict_line(_page(sensitivity=probes))
+
+
+def test_a_run_that_only_breaks_even_does_not_pass() -> None:
+    """期望恰好为 0 不是正的：三档全平手也要记 `fail`，而不是"没输"就算通过。
+
+    真实费率下两笔回合正好抵平的机会很小，但"很小"不是"不可能"：`0` 落在"为正"与"不为正"之间，
+    判错方向就等于把"没赚钱"记成"赚钱"。
+    """
+    assert status(tuple(_probe(f, 0.0) for f in (0.5, 1.0, 1.5))) == FAIL
+
+
+def test_the_three_status_codes_are_the_ones_the_ledger_will_accept() -> None:
+    """`report` 这边写了三个码，台账的 CHECK 约束是另一个文件里的三个字符串（`tasks/db.py`）。
+
+    这边改名、那边不改，报错会推迟到插入那一刻——所以在这里先撞一次，让不匹配是测试红而不是
+    一次跑到一半的失败。
+    """
+    for code in (PASS, FAIL, VOID):
+        assert models.parse_backtest_status(code) == code
+        assert models.backtest_status_label(code) != code, f"{code} 没有中文名，原样回吐了"
 
 
 def test_the_optional_sections_stay_out_of_the_page_when_there_is_nothing_to_say() -> None:

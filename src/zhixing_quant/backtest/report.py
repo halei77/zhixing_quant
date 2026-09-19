@@ -4,6 +4,10 @@
 的地方。这么分是为了让这一页能被单测逐字断言：报告是用户唯一会读的东西，它说错一句，
 前面所有的正确都没人看见。
 
+判定也住在这里：`status()` 把三档成本折成台账那三个码之一。让报告与台账共用同一个 `_shape`，
+是为了堵掉一种最难发现的错——页面上写"同号：都是正的"、台账里记 `fail`。结论由数字算出来，
+调用方就敲不出一个"通过"来（09 §五）。
+
 三条写法上的硬规矩，都来自"不许把没做读成做了"：
 
 - 算不出来的数印 `—`，并在上面那句话里说清算不出来（0 回合的胜率不是 0.0%）。
@@ -15,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -28,6 +33,12 @@ from zhixing_quant.backtest.spec import Assumptions
 
 #: 表里"算不出来"的那个格子。空白会被读成"0"或"略过"，破折号至少是个没填的格。
 NA = "—"
+
+#: 台账 `backtests.status` 那三个码（`tasks/db.py` 的 CHECK 约束是出处，这里只转述不新造）。
+#: 测试把它们喂回 `tasks.models.parse_backtest_status`，撞了就红——防止这里改名而那边没跟。
+PASS = "pass"
+FAIL = "fail"
+VOID = "void"
 
 
 @dataclass(frozen=True)
@@ -59,6 +70,34 @@ class Probe:
 
     factor: float
     metrics: Metrics
+
+
+@dataclass(frozen=True)
+class Shape:
+    """三档成本的形状：有没有内容、符号一致吗、最贵那一档还赚不赚钱。
+
+    只留判定要的这三问，不留数字本身——`_verdict` 与 `status` 都从同一个 `Shape` 出发，
+    于是"报告写同号都是正的、台账记 fail"这种话在这套代码里出不来。
+    """
+
+    signs: Mapping[float, bool]
+
+    @property
+    def contentless(self) -> bool:
+        return not self.signs
+
+    @property
+    def flipped(self) -> bool:
+        return len(set(self.signs.values())) > 1
+
+    @property
+    def dearest_positive(self) -> bool:
+        """最贵一档的期望是否为正。07-5.4 第 2 条问的就是这一句。
+
+        三档同号时它同时就是"三档都为正"，所以 `_verdict` 那句"都是正的"也读它——两处
+        共用一个判据，才不会一处说通过、另一处记失败。
+        """
+        return bool(self.signs) and self.signs[max(self.signs)]
 
 
 @dataclass(frozen=True)
@@ -248,30 +287,55 @@ def _sensitivity_section(probes: tuple[Probe, ...]) -> list[str]:
 
 def _verdict(probes: tuple[Probe, ...]) -> str:
     """只问一件事：成本上下浮动 50% 之后，正期望会不会翻成负期望（或反过来）。"""
-    signed = [
-        (probe.factor, probe.metrics.expectancy)
-        for probe in probes
-        if probe.metrics.expectancy is not None
-    ]
-    if not signed:
+    shape = _shape(probes)
+    if shape.contentless:
         return (
             "**无从判断**：每一档都没有回合，“正期望会不会反转”在这里没有期望可问。"
             "这不是“通过”，是没有内容可判——策略一单没做成，或者票池与区间不对。"
         )
-    positive = {factor: expectancy > 0 for factor, expectancy in signed}
-    every = "、".join(_factor(factor) for factor in sorted(positive))
-    if len(set(positive.values())) == 1:
-        polarity = "都是正的" if next(iter(positive.values())) else "都是负的"
+    every = "、".join(_factor(factor) for factor in sorted(shape.signs))
+    if not shape.flipped:
+        # 说"都不为正"而不是"都是负的"：期望恰好为 0（两笔回合互相抵平）不是负，
+        # 而这一句要把零那一档也算进去——它对启用门槛同样是"不通过"。
+        polarity = "都是正的" if shape.dearest_positive else "都不为正"
         return (
             f"同号：{every} 这几档下期望{polarity}。结论不来自成本假设的乐观误差"
             "——03-4.3 要的就是这一句（期望为负也照样成立：那是老实的负，不是假的正）。"
         )
     detail = "、".join(
-        f"{_factor(factor)}→{'正' if good else '负'}" for factor, good in sorted(positive.items())
+        f"{_factor(factor)}→{'正' if good else '负'}"
+        for factor, good in sorted(shape.signs.items())
     )
     return (
         f"**反转**：{detail}。利润来自成本假设而不是信号，亮红灯，人工归因之前不谈启用（03-4.3）。"
     )
+
+
+def _shape(probes: tuple[Probe, ...]) -> Shape:
+    """三档 → 每档期望的符号。没有回合的档不参与：那里没有符号可问。"""
+    return Shape(
+        signs={
+            probe.factor: probe.metrics.expectancy > 0
+            for probe in probes
+            if probe.metrics.expectancy is not None
+        }
+    )
+
+
+def status(probes: tuple[Probe, ...]) -> str:
+    """把三档成本折成台账 `backtests.status` 那三个码之一（09 §五）。
+
+    为什么是算出来的而不是给个 `--status` 开关：状态是**结论**，一个能敲出来的结论就是一笔
+    能敲出来的假留痕。三档全无数据时它判不了盈亏，也就没资格说"通过"。
+    """
+    shape = _shape(probes)
+    if shape.contentless:
+        return VOID  # 什么都没测出来：票池或区间不对，这一跑不成立（不是失败，是作废）
+    if shape.flipped:
+        return FAIL  # 03-4.3：利润来自成本假设
+    if not shape.dearest_positive:
+        return FAIL  # 07-5.4 第 2 条：最贵那一档也要为正，否则这套信号不赚钱
+    return PASS
 
 
 def _disclosure_section(lines: tuple[str, ...]) -> list[str]:

@@ -38,6 +38,16 @@ def reports_dir(env: Mapping[str, str] | None = None) -> Path:
     return data_root(env) / "reports"
 
 
+def backtests_dir(env: Mapping[str, str] | None = None) -> Path:
+    """回测产物目录（09 §五：净值曲线等大件在盘上，DB 只存路径）。
+
+    一次运行一个子目录，目录名由 `zx-backtest` 生成（它自己带时间戳），里面固定两份文件
+    `report.md` 与 `equity.csv`。放数据根而不是仓库：报告是**那次实验的产物**，不是代码——
+    躺在仓库里就会被当成"当前结论"读，而台账里的第 N 次才是它应有的位置（03-4.5）。
+    """
+    return data_root(env) / "backtests"
+
+
 def parquet_dir(env: Mapping[str, str] | None = None) -> Path:
     """干净区 Parquet 的根（ADR-0007 的 `data/`）。
 
