@@ -8,17 +8,22 @@
 
 退市名单（`stock_info_sh_delist` 等）不在本层：Step 2a 只要"在册 + 上市日"，退市区间是
 Step 3 股票池 PIT 还原的活，届时它和 `Listing.delisted_on` 一起接。
+
+ST 帽是从证券简称的**前缀**推出来的，而前缀只是"抓取那天看到的样子"：所以那一段区间的起点
+是 `manifest.csv` 里的抓取日，快照日之前一律不判（帽可能是那之后才戴上的）。真正的 ST 历史
+要等一个能给出起止日期的源（01 §四 主数据条目里的"ST 状态历史"）。
 """
 
 from __future__ import annotations
 
 import csv
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 
 from zhixing_quant import config
-from zhixing_quant.domain.security import Listing
+from zhixing_quant.domain.security import Interval, Listing, SecurityMaster
 from zhixing_quant.domain.symbol import UnknownCode, board_of, normalize_code
 from zhixing_quant.sources.rows import SourceSchemaError, pick, to_date
 
@@ -27,6 +32,18 @@ NAME_ALIASES = ("证券简称", "A股简称", "name")
 LISTED_ALIASES = ("上市日期", "A股上市日期", "list_date")
 #: 两份交易所名单的文件名，与 `tools/capture_golden.py` 的 key 一致：两处不同名就是两份主数据。
 SNAPSHOT_NAMES = ("stock_info_sh_name_code__主板A股", "stock_info_sz_name_code__A股列表")
+#: 抓取清单的文件名，同样与 `tools/capture_golden.py` 一致。ST 判定要读它：没有抓取日期，
+#: "这名字挂着帽"就是一条不知道从哪天起生效的断言，而 PIT 模型不接受没有时点的状态。
+MANIFEST_NAME = "manifest.csv"
+#: 快照里真实存在的两种写法（`ST人福`、`*ST九鼎`）。`SST`/`S*ST` 是股权分置改革年代的老帽子，
+#: 源早就不产出了，但认出来不花钱——漏认等于拿 10% 的上限去判一只只许涨 5% 的票。
+ST_PREFIXES = ("ST", "*ST", "SST", "S*ST")
+
+
+def is_st_name(name: str) -> bool:
+    """证券简称是否挂着风险警示帽。只认前缀：帽子写在名字里任何别的位置都不是帽子。"""
+    text = name.strip().upper()
+    return any(text.startswith(prefix) for prefix in ST_PREFIXES)
 
 
 @dataclass(frozen=True)
@@ -42,6 +59,16 @@ class SkippedRow:
 class MasterLoad:
     listings: tuple[Listing, ...]
     skipped: tuple[SkippedRow, ...]
+    #: 只由 `read_master` 填：行级入口（`listings_from_rows`）拿不到抓取日期。
+    st_periods: tuple[Interval, ...] = ()
+
+    def to_master(self) -> SecurityMaster:
+        """装配成可查询的主数据。
+
+        装配放在这里而不是让调用方自己拼两个参数：漏掉 `st_periods` 的那份主数据在日报上
+        与"这个市场今天没有 ST 票"一模一样，而它真正的意思是 R004 的 5% 档整条失效。
+        """
+        return SecurityMaster(self.listings, self.st_periods)
 
 
 def _parse_row(row: Mapping[str, object]) -> Listing | str:
@@ -96,14 +123,43 @@ def snapshot_paths(directory: Path | None = None) -> tuple[Path, ...]:
     return tuple(root / f"{name}.csv" for name in SNAPSHOT_NAMES)
 
 
+def captured_on(directory: Path) -> date:
+    """名单是哪一天抓的——ST 那段区间唯一的起点候选。
+
+    两份名单各有一条 `captured_at` 时取**最晚**的那个：09-01 抓的名单里的 ST 票，从 09-19
+    起算才不越界（我们只见过 09-19 那天的名字）。宁可少判几天，不多判没有证据的日子。
+    """
+    path = directory / MANIFEST_NAME
+    if not path.is_file():
+        raise SourceSchemaError(
+            f"没有抓取清单 {path}：ST 帽的生效日期只能从快照的抓取时间拿，"
+            "先跑 tools/capture_golden.py"
+        )
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    days = [to_date(row.get("captured_at")) for row in rows if row.get("key") in SNAPSHOT_NAMES]
+    if len(days) != len(SNAPSHOT_NAMES) or any(day is None for day in days):
+        raise SourceSchemaError(
+            f"{path} 里没有两份名单完整的抓取时间（要 {sorted(SNAPSHOT_NAMES)}）："
+            "ST 帽从哪天起算判不出来，而判不出来在日报上与「今天没有 ST 票」长得一模一样"
+        )
+    return max(day for day in days if day is not None)
+
+
 def read_master(directory: Path | None = None) -> MasterLoad:
     """离线读主数据快照：两份名单合起来读，跳过的行照原样带原因返回。
 
     合起来读而不是各读各的：`SecurityMaster` 要的是"那天在册的全市场"，两个入口迟早被
     用成一个（日报上就是少一半票）。这里不刷新、不联网——快照旧不旧是抓取边界的事。
+
+    ST 区间在这里填：简称挂着帽的票，从抓取日起算一段"持续中"的 ST。往前不填——帽可能是
+    快照那天之后才戴上的；往后填到下一次抓取为止，因为摘帽同样没有源可查，而帽一摘，下一次
+    重抓就把这段截断了。这就是"主数据要定期重抓"这条运维口径在代码里的落点。
     """
+    root = directory if directory is not None else config.golden_dir()
+    observed_on = captured_on(root)
     rows: list[Mapping[str, object]] = []
-    for path in snapshot_paths(directory):
+    for path in snapshot_paths(root):
         if not path.is_file():
             raise SourceSchemaError(
                 f"没有主数据快照 {path}：先跑 tools/capture_golden.py"
@@ -111,4 +167,10 @@ def read_master(directory: Path | None = None) -> MasterLoad:
             )
         with path.open(encoding="utf-8", newline="") as fh:
             rows += list(csv.DictReader(fh))
-    return listings_from_rows(rows)
+    load = listings_from_rows(rows)
+    return replace(
+        load,
+        st_periods=tuple(
+            Interval(item.code, observed_on) for item in load.listings if is_st_name(item.name)
+        ),
+    )

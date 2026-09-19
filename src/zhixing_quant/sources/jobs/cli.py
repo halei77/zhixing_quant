@@ -18,7 +18,6 @@ import argparse
 import sys
 from datetime import date
 
-from zhixing_quant.domain.security import SecurityMaster
 from zhixing_quant.sources.akshare import fetch as akshare_fetch
 from zhixing_quant.sources.akshare.calendar import load_calendar
 from zhixing_quant.sources.akshare.master import read_master
@@ -85,7 +84,7 @@ def main(argv: list[str] | None = None, *, fetcher: job.Fetcher | None = None) -
             fetch=grab,
             store=store_bars,
             quarantine=store_quarantined,
-            master=SecurityMaster(read_master().listings),
+            master=read_master().to_master(),
             calendar=calendar,
             symbols=args.symbols,
             limit=args.limit,

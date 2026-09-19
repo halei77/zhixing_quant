@@ -59,6 +59,12 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (golden / f"{am.SNAPSHOT_NAMES[1]}.csv").write_text(
         "A股代码,A股简称,A股上市日期\n300750,宁德时代,2018-06-11\n", encoding="utf-8"
     )
+    (golden / am.MANIFEST_NAME).write_text(
+        "key,file,rows,columns,captured_at,status,detail\n"
+        + "\n".join(f"{name},{name}.csv,2,,2024-01-03T08:56:05,ok," for name in am.SNAPSHOT_NAMES)
+        + "\n",
+        encoding="utf-8",
+    )
     return tmp_path
 
 
@@ -172,11 +178,26 @@ def test_without_an_injected_fetcher_it_grabs_from_akshare(
         return [], []
 
     monkeypatch.setattr(akshare_fetch, "fetch_daily", grab)
-    # 源给空表时引擎报 R006"本批无有效日期"，一个 FATAL 批次都没留下行——报 0 等于
-    # 替一个宕掉的源说"今天一切正常"，这是定时任务最坏的一种谎言。
+    # 源给空表时，那只票以"当日无行"进失败清单、不进判定（#10）：一只都没判成就是没判成，
+    # 报 0 等于替一个宕掉的源说"今天一切正常"——定时任务最坏的一种谎言。
     assert cli.main(["--day", "2024-01-03", "--symbols", "600519"]) == 1
     assert asked == [("600519", date(2024, 1, 2), date(2024, 1, 3))]
-    assert "今日无数据：2024-01-03" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "今日无数据：2024-01-03" in out
+    assert "当日无行 1 只" in out
+
+
+def test_a_snapshot_without_a_manifest_exits_two(
+    data_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """名单在、抓取清单不在：ST 帽的生效日期判不出来，而"判不出来"在日报上与"今天没有 ST 票"同形。
+
+    所以这是"根本没开始"（退出码 2），不是"今天没数据"（1）：该去重跑 tools/capture_golden.py。
+    """
+    (data_root / "golden" / am.MANIFEST_NAME).unlink()
+    assert cli.main(["--day", "2024-01-03"], fetcher=clean_pair) == 2
+    err = capsys.readouterr().err
+    assert "采集中止" in err and "没有抓取清单" in err
 
 
 @pytest.mark.parametrize("argv", [["--day", "2024-1-3"], ["--day", "今天"]])
