@@ -14,7 +14,7 @@
 `draft()/row()` 两个助手就是"门禁交出什么"的形状：测试与真实调用方喂的是同一种东西。
 """
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,26 @@ def test_the_rejected_row_lands_in_a_file_that_survives_the_process(tmp_path: Pa
     assert (entry.open, entry.high, entry.low, entry.close) == ("10.0", "9.9", "10.1", "10.0")
     assert (entry.volume, entry.amount, entry.adj_factor) == ("1000.0", "10000.0", "8.0")
     assert entry.rules == ("R001",)
+    # 日线没有收盘时刻：留 `NULL` 而不是补一个 00:00，后者会让"这粒度本就没有这一列"
+    # 读起来像"这根K线发生在午夜"。
+    assert entry.ts is None
+
+
+def test_a_rejected_minute_bar_says_which_bar_it_was(tmp_path: Path) -> None:
+    """拒收的分钟K线必须留下 `ts`：没有它，一天 48 根在审计文件里长得一模一样。
+
+    顺带钉住这一列的类型与位置：它在三个平行数组**之前**，而 `partition.read` 按名字取列、
+    `_from_row` 认"末尾三列是数组"——把 `ts` 排到数组后面就会把 rules 读成时刻。
+    """
+    morning = datetime(2024, 1, 2, 9, 35)
+    close_of_day = datetime(2024, 1, 2, 15, 0)
+    report = quarantine.store_quarantined(
+        [row(ts=morning), row(ts=close_of_day)], RUN, root=tmp_path
+    )
+    assert (report.entries, report.recorded) == (2, 2)
+    assert [e.ts for e in entries(tmp_path)] == [morning, close_of_day]
+    named = {name: (name, dtype) for name, dtype in layout.QUARANTINE_COLUMNS}
+    assert _columns(file_on(tmp_path)) == [named[name] for name, _ in layout.QUARANTINE_COLUMNS]
 
 
 def test_a_nan_price_stays_a_different_answer_from_a_missing_one(tmp_path: Path) -> None:

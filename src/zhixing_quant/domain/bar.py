@@ -11,11 +11,16 @@
 
 同一个不变量在两处判，因此判定式只写一遍（`ohlc_violations` / `nonpositive_prices`），
 两处共用——写两份迟早漂。它由 hypothesis 轰炸验证（03 §二 L3）。
+
+`ts` 是 ADR-0009 决定 2 给分钟线留的那一个字段，含义是**这根K线的收盘时刻**（右端点：5 分钟
+的 09:35 那根覆盖 09:30–09:35）。日线为 None。加上它之后，全系统的主键是
+`(symbol, trade_date, ts)`：日线 `ts=None`，它自然退化回 ADR-0003 的 `(symbol, trade_date)`，
+所以两种粒度共用一条判定路径，没有"这是日线还是分钟线"的开关要维护。
 """
 
 import math
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -66,6 +71,16 @@ def nonpositive_prices(open_: float, high: float, low: float, close: float) -> b
     return any(x <= 0 for x in (open_, high, low, close))
 
 
+#: `(日期, 时刻)` 的排序键：两种粒度共用一个比较式，靠的是缺字段补成最小值而不是分支。
+#: 日线 `ts=None` 因此退化回原来的按日排序，不需要"这是哪种粒度"的开关。缺日期的行排到
+#: 全体最前——R010 正会因为它拒收，排序这里只保证不炸。
+Stamp = tuple[date, datetime]
+
+
+def stamp_of(when_date: date | None, when_ts: datetime | None) -> Stamp:
+    return (when_date or date.min, when_ts or datetime.min)
+
+
 class BarDraft(BaseModel):
     """适配器产出、门禁入口。可空表示"有待判定"，不是"允许缺失入库"。"""
 
@@ -74,6 +89,7 @@ class BarDraft(BaseModel):
     source: str = ""
     symbol: str
     trade_date: date | None = None
+    ts: datetime | None = None
     open: float | None = None
     high: float | None = None
     low: float | None = None
@@ -86,6 +102,17 @@ class BarDraft(BaseModel):
     @property
     def code(self) -> str:
         return normalize_code(self.symbol)
+
+    @property
+    def identity(self) -> tuple[str, date | None, datetime | None]:
+        """这一行"主张的是哪一刻"：日线 `ts=None`，于是它退化回 `(symbol, trade_date)`。"""
+        return (self.code, self.trade_date, self.ts)
+
+    @property
+    def stamp(self) -> Stamp:
+        """可比较的时间位置：R009 的乱序判定与"上一行"的装配都按它排，不看 `identity`——
+        一刻只能有一个主张，而排在它前面的行未必是同一刻。"""
+        return stamp_of(self.trade_date, self.ts)
 
     def missing_fields(self) -> Sequence[str]:
         """R010：必需字段清单。source/adj_factor/is_suspended 不在必需之列。"""
@@ -101,6 +128,7 @@ class Bar(BaseModel):
     source: str = ""
     symbol: str
     trade_date: date
+    ts: datetime | None = None
     open: float = Field(gt=0)
     high: float = Field(gt=0)
     low: float = Field(gt=0)

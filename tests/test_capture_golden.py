@@ -147,6 +147,9 @@ def test_fetcher_keys_encode_the_window_and_the_symbol() -> None:
     # 两所各一个 key：合并成一份样本就重放不出"某个交易所今天什么都没给"
     assert "stock_info_sh_name_code__主板A股" in keys
     assert "stock_info_sz_name_code__A股列表" in keys
+    # 分钟线的 key 不带窗口：源没有窗口参数（ADR-0009 决定 6），能带的参数只有周期。
+    assert "stock_zh_a_minute__sh600519__5min" in keys
+    assert "stock_zh_a_minute__sz300750__60min" in keys
 
 
 def test_each_symbol_binds_its_own_arguments() -> None:
@@ -155,7 +158,7 @@ def test_each_symbol_binds_its_own_arguments() -> None:
     fetchers = cg.build_fetchers(WINDOW, SYMBOLS, call=call)
     for key, fetcher in fetchers.items():
         assert fetcher() == [], key
-    daily = [k for k in call.kwargs if "adjust" in k]
+    daily = [k for k in call.kwargs if "start_date" in k]
     assert len(daily) == 4  # 两只票 × raw/hfq
     assert {(str(k["symbol"]), str(k["adjust"])) for k in daily} == {
         ("sh600519", ""),
@@ -164,6 +167,13 @@ def test_each_symbol_binds_its_own_arguments() -> None:
         ("sz300750", "hfq"),
     }
     assert {str(k["start_date"]) for k in daily} == {"20240102"}
+    # 分钟线：两只票 × 三个周期，`adjust` 恒为空（源的复权口径不进本方管道，ADR-0009 决定 4）
+    minute_calls = [k for k in call.kwargs if "period" in k]
+    assert {(str(k["symbol"]), str(k["period"])) for k in minute_calls} == {
+        (symbol, period) for symbol in SYMBOLS for period in ("5", "30", "60")
+    }
+    assert {k["adjust"] for k in minute_calls} == {""}
+    assert {"start_date" not in k for k in minute_calls} == {True}
 
 
 def test_the_command_line_reports_a_failed_capture_by_its_exit_code(

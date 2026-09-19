@@ -21,6 +21,7 @@ from typing import Any
 
 from zhixing_quant.domain.symbol import Board, board_of, normalize_code
 from zhixing_quant.sources.rows import Pair, Rows
+from zhixing_quant.storage import layout
 
 #: akshare 的调用边界：函数名 + 关键字参数 → 一个 DataFrame（本模块往下不留 pandas 类型）。
 AkCall = Any
@@ -101,6 +102,20 @@ def fetch_daily(code: str, start: date, end: date, *, call: AkCall | None = None
     raw = daily_frame(code, start, end, call=call)
     hfq = daily_frame(code, start, end, adjust="hfq", call=call)
     return raw, hfq
+
+
+def minute_frame(code: str, period: str = "5", *, call: AkCall | None = None) -> Rows:
+    """一帧分钟K线。**没有窗口参数**：源固定回最近 1970 根（实测，三种周期同数）。
+
+    两件事在这里硬掉，都不给调用方留旋钮：
+
+    - `period` 必须是 `layout.SPECS` 里有的那个周期。放任意数字过去，源真的会回数据（`1` 也行），
+      于是几十万次请求打完才发现没有对应的 dataset 可落——请求在前、形状校验在后是这里最贵的错法。
+    - `adjust` 恒为空。源的 qfq/hfq 用它自己那套因子，与"分钟价 × 当日日线因子"
+      （ADR-0009 决定 4）不是同一个口径；两种口径混进同一个 dataset，之后没人分得清哪根是哪个。
+    """
+    layout.minute_dataset(period)  # 只为校验周期：认不出的不发请求。dataset 名由落盘侧同一个函数取
+    return _rows("stock_zh_a_minute", call, symbol=sina_symbol(code), period=period, adjust="")
 
 
 def fetch_calendar(*, call: AkCall | None = None) -> Rows:

@@ -77,7 +77,12 @@ def test_a_symbol_never_written_reads_as_no_partitions(tmp_path: Path) -> None:
 def test_columns_are_the_bar_fields_and_the_order_is_the_record_order() -> None:
     """列清单与 `Record` 形状一一对应：加一列时漏改一处，写和读会各自按不同顺序解读同一份文件。"""
     assert tuple(name for name, _ in layout.COLUMNS) == layout.NAMES
-    assert set(layout.NAMES) == set(Bar.model_fields)
+    assert tuple(name for name, _ in layout.MINUTE_COLUMNS) == layout.MINUTE_NAMES
+    # `ts` 只活在分钟文件里：日线的 `Bar.ts` 是 None，磁盘上它连一列都不占（ADR-0009 决定 7）。
+    assert (*layout.NAMES, "ts") == layout.MINUTE_NAMES
+    assert set(layout.MINUTE_NAMES) == set(Bar.model_fields)
+    assert set(Bar.model_fields) - set(layout.NAMES) == {"ts"}
+    assert len(layout.Record._fields) == len(layout.MINUTE_NAMES)
 
 
 def test_record_of_follows_the_column_order() -> None:
@@ -106,4 +111,5 @@ def test_record_of_follows_the_column_order() -> None:
         10500.0,
         8.0,
         True,
+        None,  # 日线没有收盘时刻：这一列在 `Record` 上存在，但不进日线文件（`COLUMNS`）
     )

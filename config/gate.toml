@@ -11,6 +11,10 @@
 #   params   谓词自取的参数；不同规则参数名可重复，互不干扰
 #   enabled  false = 装表但停用（如日线阶段暂不用的规则）。不直接删配置：
 #            删了就没谁知道这条规则存在过、为什么停的
+#   grains   该规则跑在哪些粒度上（daily / minute）。不写 = 全跑。粒度由行自己说出来
+#            （`BarDraft.ts` 在不在），调用方不用配。哪些规则是例外、为什么，写在 04 §二
+#            末尾与 ADR-0009 决定 5——一句话版：R004/R007 的判据是"相对昨收"，而分钟批里
+#            的"上一行"是上一根K线，不是昨收。
 
 [defaults]
 # 涨跌幅容差（04 §二 "留 0.5% 容差"）：数据源的收盘价与本方昨收差几分钱是常态，
@@ -38,12 +42,15 @@ id = "R003"
 kind = "row"
 level = "warn"
 callable = "zhixing_quant.quality.rules:ghost_bar"
+# 冷门票在 5 分钟粒度上确有零成交的分钟，那是常态不是异常（ADR-0009 决定 5）。
+grains = ["daily"]
 
 [[rule]]
 id = "R004"
 kind = "row"
 level = "reject"
 callable = "zhixing_quant.quality.rules:limit_breach"
+grains = ["daily"]  # 判据要日级昨收，分钟批装配不出来；越界由当天那根日线在日线上判
 
 [rule.params]
 # 04 §二 豁免：注册制下主板/创业板/科创板新股前 5 个交易日不设涨跌幅。
@@ -55,6 +62,7 @@ id = "R005"
 kind = "row"
 level = "warn"
 callable = "zhixing_quant.quality.rules:adjustment_factor_jump"
+grains = ["daily"]  # 分钟线不落因子：阶梯函数日内不变，复权用日线那份（ADR-0009 决定 4）
 
 [rule.params]
 # 因子单日相对变化超过此值即提示核对是否有对应分红送转公告（04 §二 R005）。
@@ -71,6 +79,7 @@ id = "R007"
 kind = "row"
 level = "reject"
 callable = "zhixing_quant.quality.rules:prev_close_consistency"
+grains = ["daily"]  # 同 R004：昨收不是"上一行"
 
 [rule.params]
 # 阈值 = 板块上限（defaults.limits_pct）+ 全局容差 + 本项加宽。04 §二 的 flat "11%"
@@ -88,9 +97,10 @@ id = "R009"
 kind = "row"
 level = "reject"
 callable = "zhixing_quant.quality.rules:timestamp_monotonic"
-# 04 §二 明写"日线阶段暂不启用"：日线一行一天，同票内部没有可乱序的时间戳。
-# 谓词照写、表照装，接分钟线/Tick 时把 enabled 删掉即可（Step 3 的口子）。
-enabled = false
+# 04 §二 的"日线阶段暂不启用"到这里落地：日线一行一天，同票内部没有可乱序的时间戳；
+# 分钟线有，所以它现在跑，但只跑分钟批。用 grains 而不是删掉 enabled=false，是因为
+# "日线为什么不跑它"这句话得留在表里——否则下一个人会以为这是漏配。
+grains = ["minute"]
 
 [[rule]]
 id = "R010"

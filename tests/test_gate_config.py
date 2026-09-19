@@ -87,12 +87,36 @@ def test_rule_ids_kinds_and_levels_match_doc_04(shipped: GateConfig) -> None:
     assert [(r.id, r.kind, r.level) for r in shipped.rules] == list(SPEC_04)
 
 
-def test_r009_is_installed_but_disabled_for_daily_stage(shipped: GateConfig) -> None:
-    """04 §二 R009 括号里写着"日线阶段暂不启用"。停用而不是删除：删了就没人知道它存在过。"""
+def test_r009_is_installed_but_only_joins_the_minute_batch(shipped: GateConfig) -> None:
+    """R009（时间戳单调）在日线上没有可判的东西：一行一天，票内不存在会乱序的时间戳。
+
+    ADR-0009 决定 5 之后这件事写在 `grains` 而不是 `enabled = false`：规则是**永久**不适用一种
+    粒度，不是"这一阶段先停一停"。两者效果一样、含义不一样——`enabled` 会让人以为回来打开就能用，
+    而它在日线上打开也判不出任何东西。
+    """
     r009 = shipped.rule("R009")
-    assert not r009.enabled
-    assert "R009" not in shipped.enabled_ids
+    assert r009.enabled, "不是停用，是对日线不适用"
+    assert r009.grains == ("minute",)
     assert callable(r009.predicate)
+    assert "R009" in shipped.ids_for("minute")
+    assert "R009" not in shipped.ids_for("daily")
+
+
+def test_the_grain_scoped_rule_sets_match_adr_0009(shipped: GateConfig) -> None:
+    """两种粒度各自跑哪些规则，逐字钉住（ADR-0009 决定 5；04 §二"启用集按粒度配"）。
+
+    分钟批不跑 R003/R004/R005/R007：那四条的判据是"相对昨天""相对停牌"，而喂给它们的"上一行"
+    在分钟批里是上一根K线。跑它们的后果是一整批合法分钟数据被拒收，比不跑严重得多。
+    """
+    assert shipped.ids_for("minute") == ("R001", "R002", "R006", "R008", "R009", "R010")
+    assert shipped.ids_for("daily") == tuple(rid for rid, _, _ in SPEC_04 if rid != "R009")
+
+
+def test_every_rule_declares_a_grain_it_applies_to(shipped: GateConfig) -> None:
+    """没有规则被配成"哪种粒度都不跑"：那与 `enabled=false` 是同一件事的两种写法，留一种就够。"""
+    for spec in shipped.rules:
+        assert spec.grains, spec.id
+        assert set(spec.grains) <= set(gate_config.GRAINS), spec.id
 
 
 def test_defaults_are_merged_into_every_rule(shipped: GateConfig) -> None:
@@ -110,7 +134,7 @@ def test_rule_section_can_override_a_default() -> None:
     assert cfg.rule("R001").params == {"tolerance_pct": 1.5, "limits_pct": {"main": 9.0}}
 
 
-def test_enabled_rules_filters_by_kind(shipped: GateConfig) -> None:
+def test_enabled_rules_filters_by_kind_and_grain(shipped: GateConfig) -> None:
     assert [r.id for r in shipped.enabled_rules("batch")] == ["R006", "R010"]
     assert [r.id for r in shipped.enabled_rules("row")] == [
         "R001",
@@ -120,6 +144,14 @@ def test_enabled_rules_filters_by_kind(shipped: GateConfig) -> None:
         "R005",
         "R007",
         "R008",
+    ]
+    # 默认粒度是日线：不传 grain 的调用方拿到的还是 Step 1~3 那套，一分钟线的规则都不会跑。
+    assert [r.id for r in shipped.enabled_rules("batch", "minute")] == ["R006", "R010"]
+    assert [r.id for r in shipped.enabled_rules("row", "minute")] == [
+        "R001",
+        "R002",
+        "R008",
+        "R009",
     ]
 
 
@@ -210,6 +242,10 @@ def test_new_listing_exemption_days_match_doc_04(shipped: GateConfig) -> None:
             ),
             "启用的",
         ),
+        (_data(_rule(grains="minute")), "要写成数组"),
+        (_data(_rule(grains=[])), "空数组"),
+        (_data(_rule(grains=["hourly"])), "未知粒度"),
+        (_data(_rule(grains=["daily", "hourly"])), "未知粒度"),
     ],
 )
 def test_parse_refuses_broken_tables(data: dict[str, Any], needle: str) -> None:
@@ -219,7 +255,18 @@ def test_parse_refuses_broken_tables(data: dict[str, Any], needle: str) -> None:
 
 def test_parse_accepts_the_minimal_legal_table() -> None:
     """一张 FATAL 就够跑：门禁不要求规则数，只要求"整批级拒收"这条底线还在。"""
-    assert gate_config.parse(_data()).enabled_ids == ("R010",)
+    cfg = gate_config.parse(_data())
+    assert cfg.enabled_ids == ("R010",)
+    # 没写 `grains` 的表 = 全粒度。缺省必须是"照跑"，否则加一种粒度会让老配置静默少判。
+    assert cfg.rule("R010").grains == gate_config.ALL_GRAINS
+    assert cfg.ids_for("minute") == ("R010",)
+
+
+def test_a_rule_may_declare_one_grain() -> None:
+    cfg = gate_config.parse(_data(_rule(grains=["minute"])))
+    assert cfg.rule("R001").grains == ("minute",)
+    assert cfg.ids_for("daily") == ("R010",)
+    assert cfg.ids_for("minute") == ("R010", "R001")
 
 
 def test_resolve_callable_returns_the_same_function_object() -> None:

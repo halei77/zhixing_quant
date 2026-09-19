@@ -4,8 +4,11 @@
 装载阶段就把所有引用解析完（函数名写错、level 拼错、编号重复都当场抛错），不留到
 跑到第 3000 行数据时才炸——那种炸法最坏，前 2999 行已经按错的规则判完了。
 
-`enabled` 是给"某条规则在某个阶段不适用"用的（如 04 §二 R009 标注日线阶段暂不启用），
-而不是把配置删掉：删了就没人知道这条规则存在过、为什么停的。
+`enabled` 与 `grains` 是两种不同的"不跑"，别混用。`enabled = false` 说的是"这个暂缓，回头打开"；
+`grains` 说的是"这条规则对这种粒度永远不成立"。日线一行一天、分钟一行一根K线，R004 那种
+"相对昨收"的判据喂到分钟批里，它看到的"上一行"是上一根K线——不是同一回事，不是阈值能救的，
+所以 R009 走 `grains` 而不是回到 `enabled`（ADR-0009 决定 5）。缺省是全粒度，只有例外规则要写它
+（哪些是例外、为什么，04 §二 与 ADR-0009 决定 5）。
 """
 
 from __future__ import annotations
@@ -19,6 +22,11 @@ from typing import Any
 
 KINDS = ("row", "batch")
 LEVELS = ("reject", "warn", "fatal")
+#: 数据粒度。值由**行自己**说出来（`BarDraft.ts` 在不在），不由调用方配置——配错的样子是
+#: "分钟数据按日线规则判了一遍，全绿"，那种绿比红糟。
+GRAINS = ("daily", "minute")
+#: 缺省粒度：一张没写 `grains` 的表 = 所有粒度都跑。
+ALL_GRAINS: tuple[str, ...] = GRAINS
 #: `[defaults]` 里必须有的项：多条规则共用（R004 与 R007 的容差就是这一项），
 #: 少一个键就是运行到第 3000 行才 KeyError，所以装载时先炸。
 REQUIRED_DEFAULTS = ("tolerance_pct",)
@@ -54,6 +62,11 @@ class RuleSpec:
     predicate: Callable[..., object] = field(repr=False)
     params: RuleParams = field(default_factory=dict)
     enabled: bool = True
+    #: 这条规则适用的粒度（ADR-0009 决定 5）。空 = 不跑任何粒度，所以装载时按 `ALL_GRAINS` 兜。
+    grains: tuple[str, ...] = ALL_GRAINS
+
+    def applies_to(self, grain: str) -> bool:
+        return self.enabled and grain in self.grains
 
 
 @dataclass(frozen=True)
@@ -61,8 +74,8 @@ class GateConfig:
     defaults: Mapping[str, Any]
     rules: tuple[RuleSpec, ...]
 
-    def enabled_rules(self, kind: str) -> tuple[RuleSpec, ...]:
-        return tuple(r for r in self.rules if r.kind == kind and r.enabled)
+    def enabled_rules(self, kind: str, grain: str = "daily") -> tuple[RuleSpec, ...]:
+        return tuple(r for r in self.rules if r.kind == kind and r.applies_to(grain))
 
     def rule(self, rule_id: str) -> RuleSpec:
         """按编号取规则。查不到抛 KeyError，不让 StopIteration 冒出来——
@@ -76,6 +89,12 @@ class GateConfig:
     @property
     def enabled_ids(self) -> tuple[str, ...]:
         return tuple(r.id for r in self.rules if r.enabled)
+
+    def ids_for(self, grain: str) -> tuple[str, ...]:
+        """这个粒度上真正会跑的规则编号。报错信息用它：一条被拒收的分钟K线，说"已启用 R001…R010"
+        是假的——分钟批根本不跑 R004。
+        """
+        return tuple(r.id for r in self.rules if r.applies_to(grain))
 
 
 def _one_rule(raw: Mapping[str, Any], index: int, defaults: Mapping[str, Any]) -> RuleSpec:
@@ -91,6 +110,18 @@ def _one_rule(raw: Mapping[str, Any], index: int, defaults: Mapping[str, Any]) -
     # defaults 先铺、规则段覆盖：板块阈值这类多项配置因此只有一处真值（04 §二 R007
     # "与 R004 板块阈值联动"就是这个意思，抄两份迟早抄漂）。
     params: dict[str, Any] = {**defaults, **dict(raw.get("params", {}))}
+    grains = raw.get("grains")
+    if grains is None:
+        grain_set = ALL_GRAINS
+    else:
+        if isinstance(grains, str) or not isinstance(grains, Sequence):
+            raise GateConfigError(f"{where} grains 要写成数组，收到 {grains!r}")
+        grain_set = tuple(str(g) for g in grains)
+        unknown = sorted(set(grain_set) - set(GRAINS))
+        if unknown:
+            raise GateConfigError(f"{where} grains 含未知粒度 {unknown}，可选 {GRAINS}")
+        if not grain_set:
+            raise GateConfigError(f"{where} grains 是空数组：一条哪都不跑的规则应该 enabled=false")
     return RuleSpec(
         id=str(raw["id"]),
         kind=kind,
@@ -99,6 +130,7 @@ def _one_rule(raw: Mapping[str, Any], index: int, defaults: Mapping[str, Any]) -
         predicate=resolve_callable(str(raw["callable"])),
         params=params,
         enabled=bool(raw.get("enabled", True)),
+        grains=grain_set,
     )
 
 

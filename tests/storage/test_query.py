@@ -5,18 +5,20 @@
 语义决定——历史区间外也要读因子、None 因子沿用一个已知值、前复权的基准在区间末。
 """
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from tests.fakes import bar
+from tests.fakes import bar, minute_bar
 from zhixing_quant.domain.bar import Bar
-from zhixing_quant.storage import query, write
+from zhixing_quant.storage import layout, query, write
 
 DAY1 = date(2024, 1, 2)
 DAY2 = date(2024, 1, 3)
+DATETIME1 = datetime(2024, 1, 2, 9, 35)
+DATETIME_NOON = datetime(2024, 1, 2, 11, 30)
 FULL = (date(2020, 1, 1), date(2029, 12, 31))
 
 
@@ -140,7 +142,7 @@ def test_the_factor_staircase_is_cut_at_the_window_end_year(tmp_path: Path) -> N
     write.store_bars([bar(date(2025, 1, 2), 10.0, factor=8.0)], root=tmp_path)
 
     def staircase(con: duckdb.DuckDBPyConnection, up_to_year: int) -> tuple[float, ...]:
-        found = query._factors(con, "600519", dataset="daily", root=tmp_path, up_to_year=up_to_year)
+        found = query._factors(con, "600519", root=tmp_path, up_to_year=up_to_year)
         return tuple(f.factor for f in found)
 
     with duckdb.connect() as con:
@@ -150,6 +152,54 @@ def test_the_factor_staircase_is_cut_at_the_window_end_year(tmp_path: Path) -> N
 
 def test_dataset_names_keep_each_other_out(tmp_path: Path) -> None:
     """日线与分钟线共用布局但不共用文件：`dataset` 写错就等于查另一个东西，别混着放。"""
-    write.store_bars([bar(DAY1)], dataset="minute5", root=tmp_path)
+    write.store_bars([minute_bar(DATETIME1)], dataset=layout.MINUTE_5, root=tmp_path)
     assert query.read_bars("600519", *FULL, root=tmp_path) == []
-    assert len(query.read_bars("600519", *FULL, dataset="minute5", root=tmp_path)) == 1
+    assert len(query.read_bars("600519", *FULL, dataset=layout.MINUTE_5, root=tmp_path)) == 1
+    # 三个分钟周期同样互不相干：把 30 分钟的目录当 5 分钟读，行数量级看着都"正常"。
+    write.store_bars(
+        [minute_bar(DATETIME_NOON, period=30)], dataset=layout.MINUTE_30, root=tmp_path
+    )
+    assert len(query.read_bars("600519", *FULL, dataset=layout.MINUTE_5, root=tmp_path)) == 1
+    assert len(query.read_bars("600519", *FULL, dataset=layout.MINUTE_30, root=tmp_path)) == 1
+    # 拼错的 dataset 名不返回空列表（那与"这只票没数据"长得一样），直接抛。
+    with pytest.raises(ValueError, match="未知 dataset"):
+        query.read_bars("600519", *FULL, dataset="minute5", root=tmp_path)
+
+
+def test_minute_prices_are_rescaled_by_the_daily_factor(tmp_path: Path) -> None:
+    """分钟线自己不带因子，复权只能借当日日线因子（ADR-0009 决定 4）：同一天K线共用那一天的档。
+
+    两根在同一天的价格是等比放大的，跨天才跳档——这正是"因子是阶梯函数、日内不变"的落盘含义。
+    顺序也是这里一起钉的：结果按"交易日、再日内时刻"升序，`ts` 存成 TIMESTAMP 而不是字符串，
+    否则 09:35 会排在 15:00 之后而没人报错。
+    """
+    write.store_bars([bar(DAY1, 10.0, factor=2.0), bar(DAY2, 10.0, factor=4.0)], root=tmp_path)
+    write.store_bars(
+        [
+            minute_bar(datetime(2024, 1, 2, 15, 0), 11.0),
+            minute_bar(datetime(2024, 1, 2, 9, 35), 10.0),
+            minute_bar(datetime(2024, 1, 3, 9, 35), 10.0),
+        ],
+        dataset=layout.MINUTE_5,
+        root=tmp_path,
+    )
+    got = query.read_bars(
+        "600519", *FULL, adjust="backward", dataset=layout.MINUTE_5, root=tmp_path
+    )
+    assert [(b.trade_date, b.ts, b.close) for b in got] == [
+        (DAY1, datetime(2024, 1, 2, 9, 35), 20.0),
+        (DAY1, datetime(2024, 1, 2, 15, 0), 22.0),
+        (DAY2, datetime(2024, 1, 3, 9, 35), 40.0),
+    ]
+
+
+def test_minute_adjustment_without_daily_data_is_refused(tmp_path: Path) -> None:
+    """只有分钟线时给不出复权价：因子恒在日线 dataset 上，这里不拿 1.0 兜底。
+
+    兜底的后果比抛错难查——后复权价会等于分钟原价，而"这只票从没除权过"与"日线还没落盘"
+    在结果里长得一模一样（`Unadjustable` 的类文档记的就是同一条理由）。
+    """
+    write.store_bars([minute_bar(DATETIME1)], dataset=layout.MINUTE_5, root=tmp_path)
+    with pytest.raises(query.Unadjustable, match="没有可用复权因子"):
+        query.read_bars("600519", *FULL, adjust="backward", dataset=layout.MINUTE_5, root=tmp_path)
+    assert query.read_bars("600519", *FULL, dataset=layout.MINUTE_5, root=tmp_path) != []

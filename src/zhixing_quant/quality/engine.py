@@ -17,13 +17,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 
-from zhixing_quant.domain.bar import Bar, BarDraft
+from zhixing_quant.domain.bar import Bar, BarDraft, Stamp
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import SecurityMaster, SecurityState
 from zhixing_quant.quality.facts import BatchFacts, RowFacts, Violation
-from zhixing_quant.quality.gate_config import GateConfig
+from zhixing_quant.quality.gate_config import GateConfig, RuleSpec
 
 LEVELS_ORDER = ("fatal", "reject", "warn")
 
@@ -78,7 +78,7 @@ class GateOutcome:
         """把跨多日的判定批次裁成报告日那一天。
 
         为什么需要：R007 的判据是"今开 vs 昨收"，昨收只能从批次里上一日的行拿到（引擎用
-        `_attach_previous_by_date` 现算），所以每日任务必须两日一批；而 04 §四 的日报说的
+        `_attach_previous_by_stamp` 现算），所以每日任务必须两日一批；而 04 §四 的日报说的
         是"那天"，把两日的行数算进今天的分母，健康分就稀释了一倍。
 
         FATAL 时整批原样返回：那时三个桶都是空的，`total` 是唯一的证据，裁成 0 反而像是
@@ -109,28 +109,28 @@ class GateEngine:
         self._config = config
         self._master = master
         self._calendar = calendar
-        # 启用集在装载时就定了，逐行再筛一遍是纯浪费：五万行 × 十条规则 = 三十五万次
-        # 元组重建。配置是 frozen 的，缓存不会漂。
-        self._row_rules = config.enabled_rules("row")
-        self._batch_rules = config.enabled_rules("batch")
+        # 按 kind 预拆一次就够：启用集在装载时定了，逐行再筛是纯浪费（五万行 × 十条规则 =
+        # 三十五万次元组重建）。粒度是**每批**筛一遍——一批只有一个粒度，见 `_grain_of`。
+        self._row_rules = tuple(r for r in config.rules if r.kind == "row")
+        self._batch_rules = tuple(r for r in config.rules if r.kind == "batch")
 
     # --- 事实装配 --------------------------------------------------------------
 
     def _row_facts(self, drafts: Sequence[BarDraft]) -> list[RowFacts]:
-        seen: set[tuple[str, date | None]] = set()
-        last_date: dict[str, date] = {}
+        seen: set[tuple[str, date | None, datetime | None]] = set()
+        last_stamp: dict[str, Stamp] = {}
         out: list[RowFacts] = []
         for draft in drafts:
-            already = (draft.code, draft.trade_date) in seen
-            seen.add((draft.code, draft.trade_date))
-            previous = last_date.get(draft.code)
+            already = draft.identity in seen
+            seen.add(draft.identity)
+            previous = last_stamp.get(draft.code)
             out_of_order = (
                 previous is not None
-                and draft.trade_date is not None
-                and draft.trade_date < previous
+                and draft.trade_date is not None  # 没有日期就没有"乱序"可言，那是 R010 的活
+                and draft.stamp < previous
             )
             if draft.trade_date is not None:
-                last_date[draft.code] = draft.trade_date
+                last_stamp[draft.code] = draft.stamp
             out.append(
                 RowFacts(
                     draft=draft,
@@ -143,7 +143,7 @@ class GateEngine:
                     calendar=self._calendar,
                 )
             )
-        return _attach_previous_by_date(out)
+        return _attach_previous_by_stamp(out)
 
     def _state_on(self, draft: BarDraft) -> SecurityState | None:
         """主数据没有该股时返回 None 而不是抛：让规则自己判"判不了该拒还是该放行"。"""
@@ -164,9 +164,10 @@ class GateEngine:
                 "混批会把 A 源的脏算进 B 源的健康分（04 §三 按源打分）"
             )
         source = next(iter(sources)) if sources else ""
+        grain = _grain_of(drafts)
         batch = BatchFacts(drafts=tuple(drafts), master=self._master, calendar=self._calendar)
         fatal: list[Violation] = []
-        for spec in self._batch_rules:
+        for spec in _applies(self._batch_rules, grain):
             reasons = _as_reasons(spec.predicate(batch, spec.params))
             fatal += [Violation(spec.id, spec.level, why) for why in reasons]
         if fatal:
@@ -175,10 +176,11 @@ class GateEngine:
         accepted: list[Bar] = []
         quarantined: list[QuarantinedRow] = []
         warned: list[QuarantinedRow] = []
+        row_rules = _applies(self._row_rules, grain)
         for facts in self._row_facts(drafts):
             rejected: list[Violation] = []
             warnings: list[Violation] = []
-            for spec in self._row_rules:
+            for spec in row_rules:
                 reason = spec.predicate(facts, spec.params)
                 if not reason:
                     continue
@@ -189,7 +191,7 @@ class GateEngine:
                 continue
             # 通过行必须先变成干净区契约再进桶：warned 与 accepted 指向同一条数据，
             # 各存一份迟早漂成两份事实。
-            bar = _to_clean_bar(facts.draft, self._config.enabled_ids)
+            bar = _to_clean_bar(facts.draft, self._config.ids_for(grain))
             accepted.append(bar)
             if warnings:
                 warned.append(QuarantinedRow(facts.draft, tuple(warnings)))
@@ -203,6 +205,26 @@ class GateEngine:
         )
 
 
+def _grain_of(drafts: Sequence[BarDraft]) -> str:
+    """这批行的粒度：有 `ts` 就是分钟，没有就是日线（ADR-0009 决定 2）。
+
+    粒度由数据自己说，不由调用方传：传错的样子是"分钟数据按日线规则判了一遍，全绿"，
+    而混在一批里更没法判——R004 的"上一行"在同批内取，日线和分钟混批会让它一半时候
+    取到昨收、一半时候取到上一根K线。所以这里宁可炸。
+    """
+    grains = {"minute" if draft.ts is not None else "daily" for draft in drafts}
+    if len(grains) > 1:
+        raise GateInconsistency(
+            "一批里既有日线又有分钟K线：日线规则要的是昨收，分钟批里的「上一行」是上一根K线，"
+            "同批混判会让 R004/R007 判的不是它们各自说的那件事（ADR-0009 决定 5）"
+        )
+    return grains.pop() if grains else "daily"
+
+
+def _applies(rules: Sequence[RuleSpec], grain: str) -> Sequence[RuleSpec]:
+    return tuple(r for r in rules if r.applies_to(grain))
+
+
 def _as_reasons(result: object) -> Sequence[str]:
     if result is None:
         return ()
@@ -213,15 +235,15 @@ def _as_reasons(result: object) -> Sequence[str]:
     return (str(result),)
 
 
-def _attach_previous_by_date(facts: list[RowFacts]) -> list[RowFacts]:
-    """按票、按日期升序回填"上一行"的收盘与因子，返回顺序仍保持输入顺序。
+def _attach_previous_by_stamp(facts: list[RowFacts]) -> list[RowFacts]:
+    """按票、按时间位置升序回填"上一行"的收盘与因子，返回顺序仍保持输入顺序。
 
     缺交易日时"上一行"是更早的一天，偏差本就该更大——R007 报出来是对的，不为它开
     "必须是相邻交易日"的分支：那会让断档数据看起来干净。
     """
     order = sorted(
         range(len(facts)),
-        key=lambda i: (facts[i].draft.code, facts[i].draft.trade_date or date.min),
+        key=lambda i: (facts[i].draft.code, facts[i].draft.stamp),
     )
     previous: dict[str, RowFacts] = {}
     patched = list(facts)

@@ -6,7 +6,7 @@
 """
 
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from zhixing_quant.domain.bar import Bar
@@ -67,5 +67,36 @@ def bar(
         volume=volume,
         amount=close * volume,
         adj_factor=factor,
+        is_suspended=suspended,
+    )
+
+
+def minute_bar(
+    when: datetime,
+    close: float = 10.0,
+    *,
+    symbol: str = "600519",
+    period: int = 5,
+    volume: float = 100.0,
+    suspended: bool = False,
+) -> Bar:
+    """一根干净的分钟K线：`ts` 是收盘时刻，`adj_factor` 为空（ADR-0009 决定 4）。
+
+    交易日从 `when` 推出来，不是各给一个参数：分钟线的 `trade_date` 与 `ts` 在源那边就是
+    同一个字段（sina 的 `day`），能拼出"日期与时刻不匹配"的假K线，测出来的"能存"其实是
+    "存了个坏数据还能查回来"。
+    """
+    return Bar(
+        source=f"akshare_minute_{period}",
+        symbol=symbol,
+        trade_date=when.date(),
+        ts=when,
+        open=close,
+        high=close * 1.01,
+        low=close * 0.99,
+        close=close,
+        volume=volume,
+        amount=close * volume,
+        adj_factor=None,
         is_suspended=suspended,
     )

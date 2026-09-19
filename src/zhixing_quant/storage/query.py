@@ -32,12 +32,10 @@ from zhixing_quant.domain.adjust import (
 from zhixing_quant.domain.bar import Bar
 from zhixing_quant.domain.symbol import normalize_code
 from zhixing_quant.storage import layout
-from zhixing_quant.storage.layout import NAMES, Record
+from zhixing_quant.storage.layout import Record
 
 #: 三种口径。`Literal` 而不是 `Enum`：调用方传的是配置里的一个词，不是要拿去比较的对象。
 Adjust = Literal["raw", "backward", "forward"]
-
-_COLUMNS = ", ".join(NAMES)
 
 
 class Unadjustable(ValueError):
@@ -58,9 +56,16 @@ def read_bars(
     dataset: str = layout.DAILY,
     root: Path | None = None,
 ) -> list[Bar]:
-    """区间内的干净区K线，按交易日升序。没落过盘的票返回空列表。"""
+    """区间内的干净区K线，按时间升序。没落过盘的票返回空列表。
+
+    分钟 dataset 同一条查询：`start`/`end` 筛的是**交易日**（`trade_date` 仍在每行上），
+    区间内每天的所有K线都在结果里，顺序是"日、再日内时刻"。复权价要日线因子（`_factors`），
+    所以分钟 dataset 配 `adjust != "raw"` 时，日线那天必须也在盘上——这不是可商量的口径，
+    分钟价 × 当日日线因子是 ADR-0009 决定 4 给的唯一换算路径。
+    """
     if end < start:
         raise ValueError(f"区间颠倒了：{start} 晚于 {end}")
+    spec = layout.dataset_spec(dataset)
     code = normalize_code(symbol)
     paths = [
         path
@@ -69,16 +74,19 @@ def read_bars(
     ]
     if not paths:
         return []
+    columns = ", ".join(spec.names)
+    # 排序键跟着 dataset 走：日线只有交易日，分钟线再加一个 `ts`
+    order = ", ".join(spec.order)
     with duckdb.connect() as con:
         fetched: list[tuple[Any, ...]] = con.execute(
-            f"SELECT {_COLUMNS} FROM read_parquet(?) "
-            "WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date",
+            f"SELECT {columns} FROM read_parquet(?) "
+            f"WHERE trade_date BETWEEN ? AND ? ORDER BY {order}",
             [[str(path) for path in paths], start, end],
         ).fetchall()
         rows = [Record(*row) for row in fetched]
         factors: tuple[AdjustmentFactor, ...] = ()
         if adjust != "raw":
-            factors = _factors(con, code, dataset=dataset, root=root, up_to_year=end.year)
+            factors = _factors(con, code, root=root, up_to_year=end.year)
     bars = [_to_bar(row) for row in rows]
     return adjusted_bars(bars, adjust=adjust, factors=factors)
 
@@ -115,11 +123,14 @@ def _factors(
     con: Any,
     code: str,
     *,
-    dataset: str,
     root: Path | None,
     up_to_year: int,
 ) -> tuple[AdjustmentFactor, ...]:
-    """这只票已知的复权因子阶梯，按变化点给出。
+    """这只票已知的复权因子阶梯，按变化点给出。**来源恒为日线 dataset**（ADR-0009 决定 4）。
+
+    分钟线自己不带因子（`adj_factor` 为空）：因子是阶梯函数、日内不变，分钟级复权价 = 分钟价 ×
+    当日日线因子。所以这里不问"bars 来自哪个 dataset"——问了也只有日线一个答案，而那正是
+    "全项目只有一处换算式"要的形状。
 
     往前读到分区头、往后读到 `up_to_year` 就停：区间首日之前那次除权仍然决定区间内的
     价格，只看区间内的因子会把一只 2015 年除权、此后没动过的票在 2020 年段算回 1.0；
@@ -132,7 +143,7 @@ def _factors(
     """
     paths = [
         path
-        for path in layout.existing_partitions(code, dataset=dataset, root=root)
+        for path in layout.existing_partitions(code, dataset=layout.DAILY, root=root)
         if layout.year_of(path) <= up_to_year
     ]
     if not paths:
@@ -154,7 +165,7 @@ def _factors(
 def _to_bar(row: Record) -> Bar:
     """落盘行 → `Bar`。字段名逐个写出来（不 `zip` 列名）：那圈魔法下标是列序错位时唯一
     还能"看起来对"的地方，而这里一旦错位，`model_validate` 会安静地少校验一个字段。
-    加一列时 `layout.Record` 先报错，比在这里靠运气好。
+    加一列时 `Record` 与 dataset 的形状先对不上，比在这里靠运气好。
     """
     return Bar.model_validate(
         {
@@ -167,6 +178,7 @@ def _to_bar(row: Record) -> Bar:
             "close": row.close,
             "volume": row.volume,
             "amount": row.amount,
+            "ts": row.ts,
             "adj_factor": row.adj_factor,
             "is_suspended": row.is_suspended,
         }
@@ -184,6 +196,7 @@ def _rescaled(bar: Bar, prices: Sequence[float]) -> Bar:
         source=bar.source,
         symbol=bar.symbol,
         trade_date=bar.trade_date,
+        ts=bar.ts,
         open=open_,
         high=high,
         low=low,

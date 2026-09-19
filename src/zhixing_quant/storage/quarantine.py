@@ -68,6 +68,7 @@ def entry_of(draft: BarDraft, violations: Sequence[Violation]) -> Entry:
         amount=_text(draft.amount),
         adj_factor=_text(draft.adj_factor),
         is_suspended=draft.is_suspended,
+        ts=draft.ts,
         rules=tuple(v.rule_id for v in violations),
         levels=tuple(v.level for v in violations),
         reasons=tuple(v.reason for v in violations),

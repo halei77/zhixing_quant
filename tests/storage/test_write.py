@@ -8,33 +8,41 @@ DuckDB 只在这里当"能读 Parquet 的读者"用（`peek`）：干净区不�
 备份脚本、以后的分析人员都该能直接打开它，所以有一条测试专门验证"绕开本层也读得到"。
 """
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import pytest
 
-from tests.fakes import bar
+from tests.fakes import bar, minute_bar
 from zhixing_quant.storage import layout, query, write
 from zhixing_quant.storage.layout import NAMES
 
 DAY1 = date(2024, 1, 2)
 DAY2 = date(2024, 1, 3)
+MORNING = datetime(2024, 1, 2, 9, 35)
+AFTERNOON = datetime(2024, 1, 2, 15, 0)
 
 
-def peek(path: Path) -> list[tuple[Any, ...]]:
+def peek(path: Path, dataset: str = layout.DAILY) -> list[tuple[Any, ...]]:
     """绕开存储层，用 DuckDB 直接看文件：证明落的是标准 Parquet，不是私有格式。"""
+    spec = layout.dataset_spec(dataset)
     with duckdb.connect() as con:
         rows: list[tuple[Any, ...]] = con.execute(
-            f"SELECT {', '.join(NAMES)} FROM read_parquet(?) ORDER BY trade_date",
+            f"SELECT {', '.join(spec.names)} FROM read_parquet(?) ORDER BY {', '.join(spec.order)}",
             [str(path)],
         ).fetchall()
         return rows
 
 
-def partition(tmp_path: Path, year: int = 2024, symbol: str = "600519") -> Path:
-    return layout.partition_path(symbol, year, root=tmp_path)
+def partition(
+    tmp_path: Path,
+    year: int = 2024,
+    symbol: str = "600519",
+    dataset: str = layout.DAILY,
+) -> Path:
+    return layout.partition_path(symbol, year, dataset=dataset, root=tmp_path)
 
 
 def test_first_write_creates_the_adr_partition(tmp_path: Path) -> None:
@@ -172,3 +180,100 @@ def test_the_clean_zone_is_readable_without_this_layer(tmp_path: Path) -> None:
             [str(partition(tmp_path))],
         ).fetchall()
     assert [row[0] for row in described] == list(NAMES)
+
+
+# —— 分钟线（Step 4a / ADR-0009 决定 3、7）：上面那些判据换一种粒度再走一遍。
+
+
+def test_a_minute_batch_lands_in_its_own_dataset(tmp_path: Path) -> None:
+    """两种粒度各在一个目录：混进同一份文件，"这一天几根K线"就没有确定答案了。"""
+    bars = [minute_bar(MORNING), minute_bar(AFTERNOON)]
+    report = write.store_bars(bars, dataset=layout.MINUTE_5, root=tmp_path)
+    assert (report.partitions, report.added, report.rewritten) == (1, 2, 1)
+    path = partition(tmp_path, dataset=layout.MINUTE_5)
+    assert path.parent.as_posix().endswith("minute_5/year=2024")
+    assert not layout.dataset_dir(layout.DAILY, root=tmp_path).exists()
+    with duckdb.connect() as con:
+        described = con.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?, hive_partitioning=false)", [str(path)]
+        ).fetchall()
+    assert [row[0] for row in described] == list(layout.MINUTE_NAMES)
+    # TIMESTAMP 而不是 VARCHAR：存成字符串，`ORDER BY ts` 会给出字典序而没人报错。
+    assert {row[0]: row[1] for row in described}["ts"].startswith("TIMESTAMP")
+
+
+def test_two_bars_of_the_same_day_are_two_rows(tmp_path: Path) -> None:
+    """分钟线的键是收盘时刻：同一天的两根都留下，而日线在那儿会判成重复。"""
+    path = partition(tmp_path, dataset=layout.MINUTE_5)
+    write.store_bars(
+        [minute_bar(MORNING), minute_bar(AFTERNOON)], dataset=layout.MINUTE_5, root=tmp_path
+    )
+    rows = peek(path, dataset=layout.MINUTE_5)
+    assert [row[11] for row in rows] == [MORNING, AFTERNOON]
+    assert [row[2] for row in rows] == [DAY1, DAY1]
+
+
+def test_a_minute_rerun_writes_no_file(tmp_path: Path) -> None:
+    """幂等在分钟 dataset 上同样成立，且它测的是 `DatasetSpec` 三项自洽。
+
+    主键与排序键写在同一处正因如此：给分钟线换了主键没换排序键，"合并结果 == 文件已有"
+    会永远不成立，于是每次重跑都整文件重写一遍，而行数、内容都"看起来对"。mtime 是唯一
+    看得见这件事的地方。
+    """
+    bars = [minute_bar(AFTERNOON), minute_bar(MORNING)]
+    write.store_bars(bars, dataset=layout.MINUTE_5, root=tmp_path)
+    path = partition(tmp_path, dataset=layout.MINUTE_5)
+    stamp = path.stat().st_mtime_ns
+
+    report = write.store_bars(bars, dataset=layout.MINUTE_5, root=tmp_path)
+    assert (report.added, report.repaired, report.rewritten) == (0, 0, 0)
+    assert path.stat().st_mtime_ns == stamp
+
+
+def test_two_values_for_one_close_time_are_a_conflict(tmp_path: Path) -> None:
+    """同一批里一个 `ts` 两根不同的K线：多半是两个周期串了台，存储层不裁决。"""
+    with pytest.raises(write.BarConflict, match="不替它们裁决谁对"):
+        write.store_bars(
+            [minute_bar(MORNING, 10.0), minute_bar(MORNING, 10.2)],
+            dataset=layout.MINUTE_5,
+            root=tmp_path,
+        )
+
+
+def test_rows_are_stored_in_bar_time_order(tmp_path: Path) -> None:
+    """盘上顺序固定为"交易日、再收盘时刻"：不排序，"没变就不写"就取决于抓取时的行序。"""
+    write.store_bars(
+        [
+            minute_bar(datetime(2024, 1, 3, 9, 35)),
+            minute_bar(AFTERNOON),
+            minute_bar(MORNING),
+            minute_bar(datetime(2024, 1, 3, 15, 0)),
+        ],
+        dataset=layout.MINUTE_5,
+        root=tmp_path,
+    )
+    rows = peek(partition(tmp_path, dataset=layout.MINUTE_5), dataset=layout.MINUTE_5)
+    assert [row[11] for row in rows] == [
+        MORNING,
+        AFTERNOON,
+        datetime(2024, 1, 3, 9, 35),
+        datetime(2024, 1, 3, 15, 0),
+    ]
+
+
+def test_a_bar_without_a_close_time_is_refused_for_minute(tmp_path: Path) -> None:
+    """没有 `ts` 的分钟行落不进去：它与同一天其它无 `ts` 的行并成一个键，两根K线存成一根。"""
+    with pytest.raises(ValueError, match="主键列为空"):
+        write.store_bars([bar(DAY1)], dataset=layout.MINUTE_5, root=tmp_path)
+    assert list(tmp_path.rglob("*.parquet")) == []
+
+
+def test_a_minute_bar_is_refused_for_daily(tmp_path: Path) -> None:
+    """反过来也一样：日线文件没有 `ts` 列，带着时刻的行落进去会静默丢粒度。
+
+    丢完之后一切指标都"正常"——键还是那个键，行数还是一天一行，只有价格来自哪一根查不出来。
+    这种错必须在写之前响。
+    """
+    with pytest.raises(ValueError, match="没有 ts 列"):
+        write.store_bars([minute_bar(MORNING)], root=tmp_path)
+    assert list(tmp_path.rglob("*.parquet")) == []

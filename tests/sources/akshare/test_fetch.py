@@ -97,6 +97,23 @@ def test_daily_pulls_both_frames_in_one_call() -> None:
     assert raw == [{"close": 1685.01}] and hfq == [{"close": 13601.13}]
 
 
+@pytest.mark.parametrize("period", ["5", "30", "60"])
+def test_minute_frame_sends_symbol_period_and_no_adjust(period: str) -> None:
+    """分钟线只有三个参数：源没有窗口参数，`adjust` 恒为空（两种复权口径不许混进一个 dataset）。"""
+    call = Recorder([{"day": "2024-01-02 09:35:00", "close": "1685.01"}])
+    rows = fetch.minute_frame("600519", period, call=call)
+    assert call.kwargs == [{"symbol": "sh600519", "period": period, "adjust": ""}]
+    assert rows == [{"day": "2024-01-02 09:35:00", "close": "1685.01"}]
+
+
+def test_minute_frame_refuses_a_period_with_no_dataset() -> None:
+    """源真的会回 1 分钟的数据。让它走完再发现没有 `minute_1` 这个目录，是几十万请求之后才响。"""
+    call = Recorder([{"day": "2024-01-02 09:31:00"}])
+    with pytest.raises(ValueError, match="不支持的分钟周期"):
+        fetch.minute_frame("600519", "1", call=call)
+    assert call.kwargs == []
+
+
 def test_calendar_is_fetched_without_a_window() -> None:
     """源本身是"从开市到今天"的一整张表：给它传日期参数不会报错，只会静默少一批日子。"""
     call = Recorder([{"trade_date": DAY1}])

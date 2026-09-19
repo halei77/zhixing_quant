@@ -224,14 +224,22 @@ def prev_close_consistency(facts: RowFacts, params: RuleParams) -> str | None:
 
 
 def duplicate_key(facts: RowFacts, _params: RuleParams) -> str | None:
-    """R008 重复数据：(symbol, date) 已出现过，拒后到的。"""
+    """R008 重复数据：同一个 `(symbol, trade_date, ts)` 已出现过，拒后到的（ADR-0009 决定 3）。
+
+    日线 `ts=None`，这个键退化回 `(symbol, trade_date)`——两种粒度共用一条判定，靠的是键里
+    那一格天生为空，不是靠"先问这是哪种粒度再选哪种键"。后者会漂成两套。
+    """
     if facts.already_present:
-        return "同一 (symbol, trade_date) 重复入库，拒后到的一条"
+        day = facts.draft.trade_date
+        stamp = facts.draft.ts
+        when = f"{day}" if stamp is None else f"{day} {stamp:%H:%M:%S}"
+        return f"同一 {facts.draft.code}@{when} 重复入库，拒后到的一条"
     return None
 
 
 def timestamp_monotonic(facts: RowFacts, _params: RuleParams) -> str | None:
-    """R009 时间戳单调：本行打乱了同票既有顺序。日线阶段按 04 §二 暂不启用。"""
+    """R009 时间戳单调：本行打乱了同票既有顺序。日线阶段不跑（04 §二、ADR-0009 决定 5），
+    日线一行一天、同票内部没有可乱序的时间戳；分钟线就是它的启用期。"""
     if facts.out_of_order:
         return "时间戳相对同票前一行乱序"
     return None

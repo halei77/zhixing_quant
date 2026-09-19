@@ -8,7 +8,7 @@
 把它们放行，日报就会显示"今天一条都没违规"，而这正是 00 宪章第二节说的自欺。
 """
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -482,10 +482,31 @@ def test_r008_rejects_only_the_later_duplicate() -> None:
     assert duplicate_key(_row(_draft()), PARAMS) is None
 
 
-def test_r009_predicate_works_although_daily_stage_disables_it() -> None:
-    """规则停用≠谓词作废：接分钟线时把 enabled 删掉就要用（配置里那条注释）。"""
+def test_r008_names_the_bar_time_when_there_is_one() -> None:
+    """拒收一条分钟K线时只报日期，等于什么都没说：那一天有 48 根。
+
+    两种粒度的键都在这一条消息里（ADR-0009 决定 3）：日线不带时刻，读起来还是 `(symbol, date)`。
+    """
+    minute = _draft(ts=datetime(2024, 1, 3, 9, 35))
+    assert _said(duplicate_key(_row(minute, already_present=True), PARAMS)) == (
+        "同一 600519@2024-01-03 09:35:00 重复入库，拒后到的一条"
+    )
+    assert _said(duplicate_key(_row(_draft(), already_present=True), PARAMS)) == (
+        "同一 600519@2024-01-03 重复入库，拒后到的一条"
+    )
+
+
+def test_r009_predicate_is_independent_of_the_grain_it_runs_on() -> None:
+    """谓词不认识粒度，启用集才认识（ADR-0009 决定 5）：这里直接轰函数本身。
+
+    日线批不跑它由 `config/gate.toml` 的 `grains` 保证（test_gate_config.py 钉），把这条判据
+    重复写进谓词里就会有两处真值——那时"分钟线要不要跑 R009"就取决于谁先改。
+    """
     assert timestamp_monotonic(_row(_draft(), out_of_order=True), PARAMS)
     assert timestamp_monotonic(_row(_draft()), PARAMS) is None
+    assert timestamp_monotonic(
+        _row(_draft(ts=datetime(2024, 1, 3, 9, 35)), out_of_order=True), PARAMS
+    )
 
 
 # --- R010 字段完备性（整批 FATAL）---------------------------------------------------

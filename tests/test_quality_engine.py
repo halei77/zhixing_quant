@@ -9,7 +9,7 @@
 
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -276,8 +276,12 @@ def test_gate_passing_but_bar_rejecting_is_an_inconsistency(shipped: GateConfig)
         engine.run([_draft(high=8.0)])
 
 
-def test_disabled_rule_is_not_evaluated(shipped: GateConfig) -> None:
-    """R009 日线阶段停用（04 §二）：乱序数据不该因为它进隔离区。"""
+def test_r009_does_not_judge_daily_rows(shipped: GateConfig) -> None:
+    """日线乱序不因 R009 进隔离区（04 §二、ADR-0009 决定 5）：一行一天，先后不属于它判。
+
+    两条都得钉：只断言"没拒收"，把 R009 整个停用也能过——所以顺带要求它在分钟粒度上是启用的。
+    真正管这种数据的是 R006（日历对齐）与 R008（重复）。
+    """
     outcome = _engine().run(
         [
             _draft(trade_date=DAY3, open=10.0, high=10.5, low=9.9, close=10.0),
@@ -285,7 +289,8 @@ def test_disabled_rule_is_not_evaluated(shipped: GateConfig) -> None:
         ]
     )
     assert all("R009" not in q.rule_ids for q in outcome.quarantined)
-    assert "R009" not in shipped.enabled_ids
+    r009 = shipped.rule("R009")
+    assert r009.enabled and r009.grains == ("minute",)
 
 
 def test_clean_zone_follows_the_fatal_flag() -> None:
@@ -386,3 +391,71 @@ def test_for_day_recomputes_the_denominator_from_the_rows_it_keeps() -> None:
     assert (only_second.total, only_second.rejected_count, len(only_second.accepted)) == (1, 1, 0)
     assert batch.for_day(DAY1).total == 1
     assert batch.for_day(DAY3).total == 0  # 那天没数据就报 0，不沿用批次规模
+
+
+# --- 粒度：一批只跑属于它那一种的规则（ADR-0009 决定 2、5）--------------------------
+
+T1, T2, T3 = (
+    datetime(2024, 1, 2, 9, 35),
+    datetime(2024, 1, 2, 9, 40),
+    datetime(2024, 1, 2, 9, 45),
+)
+
+
+def _minute(ts: datetime = T1, **over: Any) -> BarDraft:
+    """一根干净的 5 分钟K线：与 `_draft` 同源，只多一个收盘时刻。"""
+    return _draft(ts=ts, **over)
+
+
+def test_the_grain_comes_from_the_rows_not_from_a_switch() -> None:
+    """分钟批放行两根K线，其中一根相对上一根涨了 90%：R004/R007 若跑了必然拒收。
+
+    这是粒度分派唯一有意义的判据——"没跑"与"跑了但没命中"在结果上长得一样，所以这里造的是
+    一根**在日线口径下确定违规**的K线。它被放行，才说明分钟批真的没拿昨收的规则判分钟。
+    """
+    outcome = _engine().run(
+        [
+            _minute(ts=T1),
+            _minute(ts=T2, open=20.0, high=21.0, low=19.5, close=20.5),
+        ]
+    )
+    assert len(outcome.accepted) == 2
+    assert outcome.quarantined == ()
+    assert [b.ts for b in outcome.accepted] == [T1, T2]  # 收盘时刻要跟着进干净区
+
+
+def test_a_zero_volume_minute_is_not_a_ghost_bar() -> None:
+    """R003 判的是"零成交还没有停牌标记"，日线上那是脏数据；冷门票的一个零成交分钟不是。"""
+    minute = _engine().run([_minute(ts=T1, volume=0.0)])
+    assert minute.warned == () and len(minute.accepted) == 1
+    daily = _engine().run([_draft(volume=0.0)])
+    assert [q.rule_ids for q in daily.warned] == [("R003",)]
+
+
+def test_r009_rejects_an_out_of_order_minute_bar() -> None:
+    """分钟线是 R009 的启用期：同一票后到的K线时刻更早，就是时间轴坏了。"""
+    outcome = _engine().run([_minute(ts=T1), _minute(ts=T3), _minute(ts=T2)])
+    assert [q.rule_ids for q in outcome.quarantined] == [("R009",)]
+    assert [b.ts for b in outcome.accepted] == [T1, T3]
+
+
+def test_the_minute_key_is_the_bar_time_not_the_day() -> None:
+    """同一天的两根K线不是重复（日线会判成重复）；同一个收盘时刻的两根才是。"""
+    both = _engine().run([_minute(ts=T1), _minute(ts=T2, close=10.6)])
+    assert len(both.accepted) == 2 and both.quarantined == ()
+    dup = _engine().run([_minute(ts=T1), _minute(ts=T1, close=10.6)])
+    assert [q.rule_ids for q in dup.quarantined] == [("R008",)]
+
+
+def test_a_batch_mixing_grains_is_refused() -> None:
+    """混批没法判：R004 的"上一行"在同批内取，混批里它一半时候取到昨收、一半取到上一根K线。"""
+    with pytest.raises(GateInconsistency, match="既有日线又有分钟"):
+        _engine().run([_draft(), _minute(ts=T1)])
+
+
+def test_the_inconsistency_message_lists_the_rules_that_actually_ran(shipped: GateConfig) -> None:
+    """报错信息里的"已启用"清单按粒度给：给分钟批列出 R004 是假话，它根本没跑。"""
+    engine = GateEngine(_without(shipped, "R002"), MASTER, CALENDAR)
+    with pytest.raises(GateInconsistency, match="已启用 R001,R006,R008,R009,R010") as exc:
+        engine.run([_minute(ts=T1, volume=-5.0)])
+    assert "R004" not in str(exc.value)

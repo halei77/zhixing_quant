@@ -68,6 +68,32 @@ def to_date(value: object) -> date | None:
     return None
 
 
+def to_datetime(value: object) -> datetime | None:
+    """源时间戳 → naive `datetime`（分钟K的收盘时刻，ADR-0009 决定 2）。认不出给 None。
+
+    与 `to_date` 同一条取向：不猜。两处刻意的严格是要的：
+
+    - **只有日期不算时刻**。`2026-09-18` 补成 00:00 会造出一根"当天第一根K线"，而源其实
+      没给分钟——那根不存在的K线在回测里会被当成真实事件。
+    - **带时区的拒收**。A 股分钟K的收盘时刻是交易所本地时间，源给个 `+08:00` 出来说明
+      口径不明；替它换算一次就是一条时间轴整体偏移，而 R009（乱序）判不出来。
+    """
+    if isinstance(value, datetime):
+        return None if value.tzinfo is not None else value
+    if isinstance(value, str):
+        text = value.strip().replace("/", "-")
+        # `fromisoformat("2024-01-02")` 与 `("20240102")` 都成功，给的是午夜（实测）。所以
+        # "只有日期"这件事不能靠解析失败来表达，得自己问：日期与时刻之间那个分隔符在不在。
+        if " " not in text and "T" not in text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return None if parsed.tzinfo is not None else parsed
+    return None
+
+
 def pick(row: Mapping[str, object], *aliases: str) -> object:
     """按别名顺序取第一个存在的列。各交易所的同一列有三种叫法（证券代码/A股代码/code）。
 

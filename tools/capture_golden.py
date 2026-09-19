@@ -152,7 +152,11 @@ FRAMES = (("", "raw"), ("hfq", "hfq"))
 
 
 def build_fetchers(
-    window: tuple[date, date], symbols: tuple[str, ...], *, call: fetch.AkCall | None = None
+    window: tuple[date, date],
+    symbols: tuple[str, ...],
+    *,
+    periods: tuple[str, ...] = ("5", "30", "60"),
+    call: fetch.AkCall | None = None,
 ) -> dict[str, Fetcher]:
     """这次抓取要落哪些样本：窗口与代码写在这一处，不散落在调用处。
 
@@ -161,6 +165,10 @@ def build_fetchers(
 
     key 的约定是 `<函数名>__<参数>`，双下划线分隔：key 直接可做文件名，参数一眼可见。
     换窗口就是换 key，覆盖同名文件等于把一份已批准的样本悄悄换掉。
+
+    分钟线是唯一不带窗口的 key（`__{period}min`）：源没有窗口参数，每次抓都是"最近 1970 根"
+    （ADR-0009 决定 6），所以重抓必然覆盖同名文件、内容整体前移。这在本项目里只对它成立，
+    后果也写在这里：分钟样本的断言不许钉具体日期，否则下次重抓后自己变红。
     """
     start, end = window
     tag = f"{start:%Y%m%d}_{end:%Y%m%d}"
@@ -175,6 +183,10 @@ def build_fetchers(
         for adjust, name in FRAMES:
             fetchers[f"stock_zh_a_daily__{symbol}__{tag}__{name}"] = partial(
                 fetch.daily_frame, symbol, start, end, adjust=adjust, call=call
+            )
+        for period in periods:
+            fetchers[f"stock_zh_a_minute__{symbol}__{period}min"] = partial(
+                fetch.minute_frame, symbol, period, call=call
             )
     return fetchers
 

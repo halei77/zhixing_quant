@@ -5,11 +5,11 @@
 """
 
 import math
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
-from zhixing_quant.sources.rows import pick, to_date, to_float
+from zhixing_quant.sources.rows import pick, to_date, to_datetime, to_float
 
 
 @pytest.mark.parametrize(
@@ -55,6 +55,31 @@ def test_to_float_keeps_non_finite_instead_of_cleaning_it_away(value: float) -> 
 def test_to_date_normalizes_every_shape(value: object, expected: date | None) -> None:
     """datetime 必须降回 date：留着时分秒，(symbol, trade_date) 主键就成两个字段了。"""
     assert to_date(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (datetime(2024, 1, 2, 15, 0), datetime(2024, 1, 2, 15, 0)),
+        ("2024-01-02 15:00:00", datetime(2024, 1, 2, 15, 0)),  # sina 的 `day` 列
+        ("2024-01-02 09:35", datetime(2024, 1, 2, 9, 35)),  # 秒可省
+        ("2024-01-02T15:00:00", datetime(2024, 1, 2, 15, 0)),
+        (" 2024/01/02 15:00:00 ", datetime(2024, 1, 2, 15, 0)),
+        (date(2024, 1, 2), None),  # 只有日期不算时刻
+        ("2024-01-02", None),  # 同上：fromisoformat 会解析成午夜，那是一根不存在的K线
+        ("20240102", None),
+        ("09:35", None),  # 只有时刻：补哪个日期？不猜
+        ("2024-01-02 15:00:00+08:00", None),  # 带时区一律拒收，见函数文档
+        (datetime(2024, 1, 2, 15, 0, tzinfo=UTC), None),
+        ("not-a-time", None),
+        ("2024-01-02 25:00:00", None),  # 有日期有时刻，但钟点不成立
+        (1704153600, None),  # epoch 秒不猜时区与单位
+        (None, None),
+    ],
+)
+def test_to_datetime_reads_only_full_timestamps(value: object, expected: datetime | None) -> None:
+    """收盘时刻是分钟线的键：把"只有日期"读成 00:00，就等于凭空造出一根当天第一根K线。"""
+    assert to_datetime(value) == expected
 
 
 def test_pick_takes_the_first_alias_that_exists() -> None:
