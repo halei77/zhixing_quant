@@ -30,6 +30,8 @@ from zhixing_quant.tasks.store import Backtest, Store
 PREV = date(2023, 12, 29)
 DAY1 = date(2024, 1, 2)
 DAY2 = date(2024, 1, 3)
+#: 日历在册、日线却没落到这里的一天：分钟K 有它，昨收没有——板判不出来的那个形状。
+DAY3 = date(2024, 1, 4)
 #: 注入的运行时刻：目录名由它定，所以产物路径是可以逐字断言的（决定 10 的修订）。
 WHEN = datetime(2026, 9, 19, 8, 0, tzinfo=UTC)
 LABEL = "20260919-080000"
@@ -374,6 +376,43 @@ def test_a_range_older_than_the_master_snapshot_says_the_st_cap_never_applied() 
     """快照抓取日之后才有 ST 判定；整段区间都在它之前时，那句"只有部分日期"要改成全段。"""
     zx("--start", DAY1.isoformat(), "--end", DAY1.isoformat())
     assert "整个区间都早于 ST 判定生效日" in page()
+
+
+def test_a_minute_day_without_previous_close_is_named_with_its_code_and_days(
+    root: Path,
+) -> None:
+    """坑 #31 的正面写法：日线深度不够时，报告自己说出缺哪几只票、缺几天、怎么补。
+
+    判的是"点名"而不是"有个数"：第四节那张拒单表只会说 `band_unknown` 485 根，读完还是不知道
+    该跑哪条命令。这一句把原因和补法一起给出去，才拦得住"把作废读成策略不行"。
+    """
+    store_bars(minutes(DAY3, [10.6, 10.8, 11.0]), dataset=layout.MINUTE_5, root=root / "data")
+    assert zx("--end", DAY3.isoformat()) == 0
+    text = page()
+    assert "600519 缺 1/3 天" in text
+    assert "`zx-daily --day 2024-01-04 --previous-days N`" in text
+
+
+def test_a_run_whose_daily_depth_covers_the_minutes_says_nothing_about_it() -> None:
+    """没缺口就不许道歉：这一句是报缺陷的，写成常态就等于每天都有一堆"不能保证"混在里面。"""
+    assert zx() == 0
+    assert "日线昨收不覆盖" not in page()
+    assert "zx-daily" not in page()
+
+
+def test_the_gap_is_counted_per_code_per_day_not_by_the_orders_it_blocked() -> None:
+    """缺口统计与策略无关：一只票一次都没被交易，它的日线缺口也必须在列。
+
+    这是 `blind_days` 与第四节拒单表的分工——拒单表按笔计（要策略真想交易才响），这里按天计
+    （数据到没到盘上，与这次做不做无关）。剧本只动 600519 的 DAY1 两根，000001 一笔都不成交；
+    按拒单数统计的话，000001 那两天整个隐身。
+    """
+    bars = {
+        "600519": [bar(DAY1, 10.0), bar(DAY2, 10.0)],
+        "000001": [bar(DAY1, 8.0, symbol="000001"), bar(DAY2, 8.2, symbol="000001")],
+    }
+    prev = {"600519": {DAY1: 9.8, DAY2: 10.0}}
+    assert cli.blind_days(bars, prev) == {"000001": (2, 2)}
 
 
 #: 板块档位与无涨跌幅窗口天数，与 `config/gate.toml` 的 `[defaults]`/R004 同一组数。

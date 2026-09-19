@@ -246,8 +246,51 @@ def describe_depth(dataset: str) -> str:
     )
 
 
+def blind_days(
+    bars: Mapping[str, Sequence[Bar]], prev: Mapping[str, Mapping[date, float]]
+) -> dict[str, tuple[int, int]]:
+    """每只票：有分钟K却没有昨收的天数 / 有分钟K的天数。缺一天的票都要出来，一条不许悄悄过。
+
+    这是 `band_unknown` 的**上界**，不是等号——`build_bands` 先问"今天在不设涨跌幅的窗口里"
+    再问昨收，那种日子根本不需要昨收。所以这句话只说它确凿知道的那一半：这些票这些天，板判不
+    出来是因为日线没到盘上。另一半（主数据没有这只票）另有名字，不混进来。
+
+    为什么不直接数 `band_unknown` 的拒单：那个数只在策略真想交易的天上出现，一次都没交易的票
+    缺多少天都会隐身——而"补数据"要的是缺口本身，跟这次策略做不做无关（坑 #31 就是这么烧掉
+    一跑：485 根 band_unknown 摆在第四节，没人说它为什么是 485）。
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for code, code_bars in bars.items():
+        days = {bar.trade_date for bar in code_bars}
+        known = prev.get(code, {})
+        blind = sum(1 for day in days if day not in known)
+        if blind:
+            out[code] = (blind, len(days))
+    return out
+
+
+def blind_note(blind: Mapping[str, tuple[int, int]], end: date) -> str:
+    """日线昨收缺口的披露：点名哪几只票、缺几天、怎么补，以及它会把结论带去哪里。"""
+    detail = "、".join(
+        f"{code} 缺 {miss}/{total} 天" for code, (miss, total) in sorted(blind.items())
+    )
+    return (
+        f"{len(blind)} 只票的日线昨收不覆盖本次分钟区间：{detail}。那些天问不出涨跌停价，"
+        "板判不出来就一律不产生成交（第四节 `band_unknown` 那一档，方向 = 低估可成交性）。"
+        "缺口的后果是**样本不够**，不是策略不行——把作废读成负结论，正是 03-4.5 禁止的那种误读。"
+        f"补法：`zx-daily --day {end} --previous-days N`（N ≥ 分钟区间交易日数 + 1），"
+        "补完重跑；同一份参数重跑的计数与逐位相等由台账管。"
+    )
+
+
 def disclosures(
-    *, st_since: date, end: date, empty: Sequence[str], dataset: str, delay_bars: int
+    *,
+    st_since: date,
+    end: date,
+    empty: Sequence[str],
+    dataset: str,
+    delay_bars: int,
+    blind: Mapping[str, tuple[int, int]],
 ) -> tuple[str, ...]:
     """这一页不能保证的事。每一条都对着 ADR-0010 的一条代价，偏差方向写死，不许含糊。"""
     missing = (
@@ -263,6 +306,7 @@ def disclosures(
     return (
         f"ST 帽只从快照抓取日 {st_since} 起算，更早的日期一律按非 ST 上限判板：ST 票的板取宽了"
         "（代价三，方向 = 高估可成交性）。停牌区间没有源，那一半由『没有K线就没有成交』接住。",
+        *(() if not blind else (blind_note(blind, end),)),
         "分钟线源不含退市票：区间内退市的票整段缺行，股票池因此自带**幸存者偏差**，"
         "方向 = 高估收益与可成交性（03-4.6）。" + missing,
         "一字板之外一律判成可成交：没有盘口深度，大单的冲击成本与部分成交都不建模"
@@ -446,8 +490,11 @@ def _execute(
     )
     # 读盘与三档跑完才建目录：数据没读出来就退出去（`Unadjustable`、坏快照），留一个空目录
     # 与一条没有报告的登记，等于在产物区里撒"这次跑过"的谎。
-    bars, empty = _gather(args.codes, args.start, args.end, dataset)
-    bands = _bands(args.codes, args.start, args.end)
+    minute, empty = _gather(args.codes, args.start, args.end, dataset)
+    bars = [bar for series in minute.values() for bar in series]
+    prev = previous_closes(args.codes, args.start, args.end)
+    bands = _bands(args.end, prev)
+    blind = blind_days(minute, prev)
     runs = {
         factor: run(
             bars, strategy=strategy, assumptions=assumptions.with_cost_scaled(factor), bands=bands
@@ -503,6 +550,7 @@ def _execute(
                     empty=empty,
                     dataset=dataset,
                     delay_bars=assumptions.execution.delay_bars,
+                    blind=blind,
                 ),
             )
         ),
@@ -518,8 +566,11 @@ def _execute(
     return 0
 
 
-def _bands(codes: Sequence[str], start: date, end: date) -> BandLookup:
-    """把三样外部事实拼成引擎的板查表：主数据、日历、`gate.toml` 的 R004 那张表。
+def _bands(end: date, prev: Mapping[str, Mapping[date, float]]) -> BandLookup:
+    """把四样外部事实拼成引擎的板查表：主数据、日历、`gate.toml` 的 R004 那张表、昨收。
+
+    昨收由调用方传进来，不是在这里自己读：同一份 `prev` 既喂板查表、又喂第七节的缺口披露，
+    两处各读一次日线就会各说一个"缺几天"。
 
     三档成本共用同一个 `bands` 是有意的：敏感性只该动成本。昨收与板块跟费率无关，各档重算
     一遍只会多出三个"改了成本忘了改板"的接缝，而这三样东西都是磁盘读——重算还更贵。
@@ -534,14 +585,16 @@ def _bands(codes: Sequence[str], start: date, end: date) -> BandLookup:
         calendar,
         limits_pct=limits,
         no_limit_days=no_limit,
-        prev_closes=previous_closes(codes, start, end),
+        prev_closes=prev,
     )
 
 
 def _gather(
     codes: Sequence[str], start: date, end: date, dataset: str
-) -> tuple[list[Bar], list[str]]:
-    """把所有票的分钟线合成一段，并记下哪些票一根都没有（那句披露的出处）。"""
+) -> tuple[dict[str, list[Bar]], list[str]]:
+    """把所有票的分钟线按票分组读出来，并记下哪些票一根都没有（那句披露的出处）。
+
+    按票分组而不是摊平成一段：昨收缺在哪几天是**逐票**的事，摊平之后就问不出"这只票缺几天"。
+    """
     minute = read_minute(codes, start, end, dataset)
-    bars = [bar for series in minute.values() for bar in series]
-    return bars, [code for code, series in minute.items() if not series]
+    return minute, [code for code, series in minute.items() if not series]
