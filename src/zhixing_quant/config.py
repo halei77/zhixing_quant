@@ -38,6 +38,16 @@ def reports_dir(env: Mapping[str, str] | None = None) -> Path:
     return data_root(env) / "reports"
 
 
+def parquet_dir(env: Mapping[str, str] | None = None) -> Path:
+    """干净区 Parquet 的根（ADR-0007 的 `data/`）。
+
+    只给到这一层：`data/<dataset>/year=…/symbol=…` 的分区形状属于存储层，不该混进全局配置
+    （`storage/layout.py` 是它的唯一出处）。放在这里而不是存储层自己拼，是为了让"路径只能
+    从这个配置读"这条规则没有例外（02 §六）。
+    """
+    return data_root(env) / "data"
+
+
 def repo_root() -> Path:
     """仓库根，由本文件位置反推：写死绝对路径会换机即废，也过不了路径扫描。"""
     return Path(__file__).resolve().parents[2]

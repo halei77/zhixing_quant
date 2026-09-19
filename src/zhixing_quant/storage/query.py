@@ -1,0 +1,195 @@
+"""单一查询接口：调用方既不感知文件布局，也不自己换算权（ADR-0003 决定 2、Step 3 验收 1/2）。
+
+一个函数管三个口径。拆成三个函数的话，"怎么算复权"就有两份写法，迟早漂，所以换算全部
+走 `domain.adjust`；本模块只回答两个问题——因子从哪来（干净区每行的 `adj_factor`）、
+基准取哪一天（`domain.adjust` 的口径：区间末日）。
+
+口径的取舍要在使用前说清，不然发现它的场合是回测跑完之后：
+
+- `backward` 只取决于当天及以前的因子，与查询区间无关。回测用它。
+- `forward` 的基准是区间末日（前复权的定义如此，见 `domain.adjust` 模块开头），所以同
+  一天的前复权价会随窗口末尾变化。这不是 bug，但跨窗口比对价格前先想起这一句。
+- 量与额不复权：`volume` 是股、`amount` 是元，源给什么存什么（04 §五 跨源对账按这个口径比）。
+  复权只动价格，"复权成交量"没有谁认的口径。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import date
+from pathlib import Path
+from typing import Any, Literal
+
+import duckdb
+
+from zhixing_quant.domain.adjust import (
+    AdjustmentFactor,
+    factor_on,
+    sorted_factors,
+    to_backward,
+    to_forward,
+)
+from zhixing_quant.domain.bar import Bar
+from zhixing_quant.domain.symbol import normalize_code
+from zhixing_quant.storage import layout
+from zhixing_quant.storage.layout import NAMES, Record
+
+#: 三种口径。`Literal` 而不是 `Enum`：调用方传的是配置里的一个词，不是要拿去比较的对象。
+Adjust = Literal["raw", "backward", "forward"]
+
+_COLUMNS = ", ".join(NAMES)
+
+
+class Unadjustable(ValueError):
+    """要复权价，但这只票一个因子都没有。
+
+    不拿 1.0 兜底：那等于把"源没给复权数据"洗成"这只票从没除权过"，前后两个口径会给出
+    一模一样的价格，谁也不会发现复权其实没生效（`sources/akshare/daily.py` 的 `_factor`
+    在源头就是同样的取舍）。
+    """
+
+
+def read_bars(
+    symbol: str,
+    start: date,
+    end: date,
+    *,
+    adjust: Adjust = "raw",
+    dataset: str = layout.DAILY,
+    root: Path | None = None,
+) -> list[Bar]:
+    """区间内的干净区K线，按交易日升序。没落过盘的票返回空列表。"""
+    if end < start:
+        raise ValueError(f"区间颠倒了：{start} 晚于 {end}")
+    code = normalize_code(symbol)
+    paths = [
+        path
+        for path in layout.partitions(code, start, end, dataset=dataset, root=root)
+        if path.is_file()
+    ]
+    if not paths:
+        return []
+    with duckdb.connect() as con:
+        fetched: list[tuple[Any, ...]] = con.execute(
+            f"SELECT {_COLUMNS} FROM read_parquet(?) "
+            "WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date",
+            [[str(path) for path in paths], start, end],
+        ).fetchall()
+        rows = [Record(*row) for row in fetched]
+        factors: tuple[AdjustmentFactor, ...] = ()
+        if adjust != "raw":
+            factors = _factors(con, code, dataset=dataset, root=root, up_to_year=end.year)
+    bars = [_to_bar(row) for row in rows]
+    return adjusted_bars(bars, adjust=adjust, factors=factors)
+
+
+def adjusted_bars(
+    bars: Sequence[Bar], *, adjust: Adjust, factors: Sequence[AdjustmentFactor]
+) -> list[Bar]:
+    """把不复权行换成指定口径。**全项目只有这里做口径切换**，别的模块不许自己乘因子。
+
+    拆成独立函数是为了属性测试能直接轰它：恒等式讲的是换算，与 Parquet 读写无关，把 IO
+    塞进循环只会让一万例跑一晚上，还测不到别的形状。
+    """
+    if adjust == "raw" or not bars:
+        return list(bars)
+    series = sorted_factors(factors)
+    if not series:
+        raise Unadjustable(
+            f"{bars[0].symbol} 没有可用复权因子，给不出 {adjust} 价：先确认 hfq 帧抓到了"
+        )
+    base = factor_on(series, bars[-1].trade_date) if adjust == "forward" else 1.0
+    out: list[Bar] = []
+    for bar in bars:
+        factor = factor_on(series, bar.trade_date)
+        raw = (bar.open, bar.high, bar.low, bar.close)
+        if adjust == "backward":
+            scaled = tuple(to_backward(value, factor) for value in raw)
+        else:
+            scaled = tuple(to_forward(value, factor, base) for value in raw)
+        out.append(_rescaled(bar, scaled))
+    return out
+
+
+def _factors(
+    con: Any,
+    code: str,
+    *,
+    dataset: str,
+    root: Path | None,
+    up_to_year: int,
+) -> tuple[AdjustmentFactor, ...]:
+    """这只票已知的复权因子阶梯，按变化点给出。
+
+    往前读到分区头、往后读到 `up_to_year` 就停：区间首日之前那次除权仍然决定区间内的
+    价格，只看区间内的因子会把一只 2015 年除权、此后没动过的票在 2020 年段算回 1.0；
+    而区间之后那次除权不该回头改区间内的价格，否则同一天的后复权价会随着"这只票后来又
+    除权了"而变化，回测就再也复现不出来。
+
+    只留变化点是因为 `factor_on` 是线性扫：五年日线逐日全给 ≈ 1250 行 × 1250 个点，
+    第一个撞破验收 1 那 100ms 的会是这里，而不是磁盘。阶梯函数只有一处台阶，读它的人
+    不需要看见每一天。
+    """
+    paths = [
+        path
+        for path in layout.existing_partitions(code, dataset=dataset, root=root)
+        if layout.year_of(path) <= up_to_year
+    ]
+    if not paths:
+        return ()
+    fetched: list[tuple[date, float]] = con.execute(
+        "SELECT trade_date, adj_factor FROM read_parquet(?) "
+        "WHERE adj_factor IS NOT NULL ORDER BY trade_date",
+        [[str(path) for path in paths]],
+    ).fetchall()
+    events: list[AdjustmentFactor] = []
+    previous: float | None = None
+    for day, value in fetched:
+        if value != previous:
+            events.append(AdjustmentFactor(code=code, effective_on=day, factor=value))
+            previous = value
+    return tuple(events)
+
+
+def _to_bar(row: Record) -> Bar:
+    """落盘行 → `Bar`。字段名逐个写出来（不 `zip` 列名）：那圈魔法下标是列序错位时唯一
+    还能"看起来对"的地方，而这里一旦错位，`model_validate` 会安静地少校验一个字段。
+    加一列时 `layout.Record` 先报错，比在这里靠运气好。
+    """
+    return Bar.model_validate(
+        {
+            "source": row.source,
+            "symbol": row.symbol,
+            "trade_date": row.trade_date,
+            "open": row.open,
+            "high": row.high,
+            "low": row.low,
+            "close": row.close,
+            "volume": row.volume,
+            "amount": row.amount,
+            "adj_factor": row.adj_factor,
+            "is_suspended": row.is_suspended,
+        }
+    )
+
+
+def _rescaled(bar: Bar, prices: Sequence[float]) -> Bar:
+    """整行照搬，只换四个价格，并重新过一遍 `Bar` 的不变量。
+
+    不用 `model_copy(update=...)`：它跳过校验。"正数缩放保序保正"是推理出来的结论，推理
+    错了（因子为负、基准为 0）就该在这里响，而不是让一张坏K线安静地进策略。
+    """
+    open_, high, low, close = prices
+    return Bar(
+        source=bar.source,
+        symbol=bar.symbol,
+        trade_date=bar.trade_date,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=bar.volume,
+        amount=bar.amount,
+        adj_factor=bar.adj_factor,
+        is_suspended=bar.is_suspended,
+    )
