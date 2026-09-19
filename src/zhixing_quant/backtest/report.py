@@ -211,7 +211,8 @@ def _money_section(m: Metrics) -> list[str]:
     return [
         "## 三、钱",
         "",
-        f"- 账户总盈亏 {_money(m.final_pnl)} 元，拆开是下面三项（相加恒等于总数）：",
+        f"- 账户总盈亏 {_money(m.final_pnl)} 元，拆开是下面三项（精确值相加等于总数；"
+        f"每个数各自四舍五入到分，纸上相加最多差二分）：",
         f"  - 回合已实现 {_money(m.trip_pnl)} 元 —— {m.trips} 个回合，做T 本身的成绩",
         f"  - 未还原腿浮盈亏 {_money(m.unrealized)} 元 —— 收盘还没配上的那几笔",
         f"  - 底仓 beta {_money(m.base_pnl)} 元 —— 拿着不动也会有，与手艺无关",

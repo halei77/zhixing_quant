@@ -91,7 +91,7 @@ def _page(
 
 
 def _paper_money(text: str, label: str) -> float:
-    """从第三节把某个钱数抠回成 float——报告说"相加恒等于总数"，就用纸面上的数判一次。"""
+    """从第三节把某个钱数抠回成 float——报告说三项相加等于总数，就用纸面上的数判一次。"""
     line = next(line for line in text.splitlines() if label in line)
     return float(line.split(label)[1].split(" 元")[0].replace(",", ""))
 
@@ -145,10 +145,12 @@ def test_the_header_says_which_run_this_is_not_just_which_strategy() -> None:
 
 
 def test_the_three_money_numbers_on_paper_add_up_to_the_total() -> None:
-    """第三节那句"相加恒等于总数"不能只是文案：把纸上的三个数抠出来加一遍。
+    """第三节那句"三项相加等于总数"不能只是文案：把纸上的三个数抠出来加一遍。
 
     容差不是零——每个数各自四舍五入到分，四项最多差二分。要判的是"差一个量级"那种错（漏加
-    一项、底仓算重），而容差多留一分是为了不让自己卡在最后一位上。
+    一项、底仓算重），而容差多留一分是为了不让自己卡在最后一位上。真盘第一跑就踩到了这个
+    量级：纸上三项相加 -148,417.12、总数印的是 -148,417.11，差 1 分。所以那句文案也不许写
+    "恒等于"——精确值才恒等，纸上的数不恒等。
     """
     text = _page({("600519", 0): "sell", ("600519", 4): "buy"})
     total = _paper_money(text, "账户总盈亏")
@@ -159,6 +161,7 @@ def test_the_three_money_numbers_on_paper_add_up_to_the_total() -> None:
     ]
     assert sum(parts) == pytest.approx(total, abs=0.03)
     assert parts[0] != 0.0 and total != 0.0  # 全是 0 的话上面那句是恒等式而不是判据
+    assert "恒等于" not in text
 
 
 def test_a_run_with_no_trips_says_无回合_instead_of_printing_zero_percent() -> None:
