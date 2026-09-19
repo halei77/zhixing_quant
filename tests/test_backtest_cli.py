@@ -300,6 +300,27 @@ def test_missing_adjustment_factors_stop_the_run_instead_of_silently_using_raw_p
     assert not (base / "backtests").exists()
 
 
+def test_the_missing_factor_refusal_names_the_whole_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """缺口要一次报全。撞一只报一只在 3 只票的池子里无所谓，在 Step 7 的几百只里就是"补数据
+    得先跑几百遍才看得见全貌"——那句"先确认日线落盘了"也就成了永远补不完的话。
+    """
+    elsewhere = tmp_path / "two_missing"
+    elsewhere.mkdir()
+    base = snapshot_root(elsewhere, monkeypatch)
+    store_bars(
+        minutes(DAY1, [10.0, 10.2]) + minutes(DAY1, [20.0, 20.2], symbol="300750"),
+        dataset=layout.MINUTE_5,
+        root=base / "data",
+    )
+    assert zx("--codes", "300750,600519") == 2
+    err = capsys.readouterr().err
+    assert "2 只票没有可用复权因子" in err
+    assert "300750" in err and "600519" in err
+    assert ledger() == []
+
+
 def test_the_command_line_refuses_to_guess_the_pool() -> None:
     """`--codes` 是 required：票池多大是等用户裁决的事（ADR-0009 决定 8），给默认值就是替人裁决。"""
     with pytest.raises(SystemExit) as gone:

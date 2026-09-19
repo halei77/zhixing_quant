@@ -193,10 +193,27 @@ def read_minute(codes: Sequence[str], start: date, end: date, dataset: str) -> d
 def _read(
     codes: Sequence[str], start: date, end: date, dataset: str, *, adjust: Adjust
 ) -> dict[str, list[Bar]]:
-    return {
-        code: read_bars(code, start, end, adjust=adjust, dataset=dataset, root=config.parquet_dir())
-        for code in codes
-    }
+    """票池里每只票一段K线。缺复权因子的票**一次全列出来**，不是撞一只报一只。
+
+    Step 7 的票池是几百只的量级：一次只说第一个读不出复权价的票，"补数据"这件事就得原地
+    跑 N 遍才看得见全貌。仍然整票池一起拒——悄悄少一只票，报告第一节那句"3 只票"就成了假话。
+    """
+    out: dict[str, list[Bar]] = {}
+    missing: list[str] = []
+    for code in codes:
+        try:
+            out[code] = read_bars(
+                code, start, end, adjust=adjust, dataset=dataset, root=config.parquet_dir()
+            )
+        except Unadjustable:
+            missing.append(code)
+    if missing:
+        raise Unadjustable(
+            f"{len(missing)} 只票没有可用复权因子，给不出 {adjust} 价："
+            + "、".join(missing)
+            + "（先确认这些票的日线 hfq 帧落盘了）"
+        )
+    return out
 
 
 def previous_closes(codes: Sequence[str], start: date, end: date) -> dict[str, dict[date, float]]:
