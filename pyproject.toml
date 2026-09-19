@@ -11,6 +11,7 @@ dependencies = [
     "hypothesis>=6.168.0",
     "pydantic>=2.13.5",
     "pytz>=2026.3.post1",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
@@ -26,6 +27,7 @@ dev = [
     "pytest",
     "pytest-cov",
     "pre-commit",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [build-system]

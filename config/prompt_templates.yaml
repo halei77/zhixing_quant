@@ -1,0 +1,81 @@
+# 提示词模板表（06 §五）。改这个文件即生效，不需要改代码（06 §八-2）；
+# 反幻觉固定头部不在这里——它由 `site/compose.py` 钉死，模板只能追加"输出要求"（ADR-0011 决定 4）。
+#
+# 默认组合是草案值（06 §五 底下那句）。草案值改一次就在这里改一次，git diff 就是评审记录。
+# `days` 数的是**交易日**，与查询层 `Cover.days` 同一口径（ADR-0011 决定 2）。
+# `status: pending` 的三条依赖还没落地的组件，站点会让它出现在列表里但拒生成，
+# 理由写在 `waiting_on`（一期只有K线，没有财务数据与消息组件——06 §四 的分期）。
+
+token_warn_above: 100000
+
+templates:
+  - name: 短期投资
+    status: ready
+    role: 你是资深 A 股分析师
+    task: 判断未来 1–4 周的机会与风险，给出趋势、量价关系、支撑与压力位
+    data:
+      - {dataset: daily, days: 120}
+      - {dataset: minute_60, days: 60}
+      - {dataset: minute_30, days: 30}
+      - {dataset: minute_5, days: 10}
+    format: markdown
+    fields: [open, high, low, close, volume, amount]
+    adjust: backward
+    output: |
+      先给结论（看多/看空/观望 + 一句话理由），再给依据。
+      每条依据都要引用具体日期与表中的价格，不许出现表中没有的数字。
+      最后单列"这个判断最需要哪份数据来验证"。
+
+  - name: 波段
+    status: ready
+    role: 你是资深 A 股分析师
+    task: 给出数周至数月的波段结构，标出可操作的买卖区域
+    data:
+      - {dataset: daily, days: 250}
+      - {dataset: minute_60, days: 90}
+    format: markdown
+    fields: [open, high, low, close, volume, amount]
+    adjust: backward
+    output: |
+      按"结构—位置—时间"三段作答：先说当前处在波段的哪一段，再给上下沿价位区间，
+      最后说预计的时间跨度；每个价位都要能对到表中某一天的价格。
+
+  # 以下三条是 06 §五 的草案，等对应组件落地才进一期。
+  - name: 长期投资
+    status: pending
+    waiting_on: 二期财务数据组件（06 §四：Forward PE、PE(TTM)/PB/PS 历史、ROE、增速、分红）
+    role: 你是资深 A 股基本面分析师
+    task: 评估估值水平与基本面趋势
+    data:
+      - {dataset: daily, days: 750}
+    format: markdown
+    fields: [open, high, low, close, volume, amount]
+    adjust: backward
+    output: |
+      估值部分只允许使用提示词里给出的财务序列；序列缺失的年份明确写「数据未提供」。
+
+  - name: 建仓价分析
+    status: pending
+    waiting_on: 二期财务数据组件（合理建仓区间的分母要 earnings/PE 序列）
+    role: 你是资深 A 股基本面分析师
+    task: 测算合理建仓区间，并给出区间对应的假设
+    data:
+      - {dataset: daily, days: 250}
+    format: markdown
+    fields: [open, high, low, close, volume, amount]
+    adjust: backward
+    output: |
+      先列假设（增长率、目标估值），再给区间；假设与区间要能逐项对回提供的数据。
+
+  - name: 最新消息解读
+    status: pending
+    waiting_on: 消息组件（06 §四 列为候选：akshare 新闻接口质量未评估）
+    role: 你是资深 A 股事件驱动分析师
+    task: 判断消息面对走势的影响与持续时间
+    data:
+      - {dataset: daily, days: 30}
+    format: markdown
+    fields: [open, high, low, close, volume, amount]
+    adjust: backward
+    output: |
+      只允许解读提示词内附的消息原文；没有原文时回答「本次未提供消息」，不得推测新闻。

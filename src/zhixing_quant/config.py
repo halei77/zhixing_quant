@@ -75,3 +75,8 @@ def gate_config_file(root: Path | None = None) -> Path:
 def backtest_config_file(root: Path | None = None) -> Path:
     """回测的成本与执行假设表（ADR-0010 决定 8）。与 `gate.toml` 同一条理由住在仓库里。"""
     return (root if root is not None else repo_root()) / "config" / "backtest.toml"
+
+
+def prompt_templates_file(root: Path | None = None) -> Path:
+    """提示词模板表（06 §五、ADR-0011 决定 2）。同一条理由住在仓库里：改默认组合必须进 diff。"""
+    return (root if root is not None else repo_root()) / "config" / "prompt_templates.yaml"
