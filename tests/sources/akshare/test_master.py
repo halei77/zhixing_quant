@@ -7,9 +7,12 @@
 板块只认代码前缀，源自己写的"板块"列不能进来当第二份事实。
 """
 
+from pathlib import Path
+
 import pytest
 
 from zhixing_quant.domain.symbol import Board, board_of
+from zhixing_quant.sources.akshare import master as am
 from zhixing_quant.sources.akshare.master import MasterLoad, listings_from_rows
 from zhixing_quant.sources.rows import SourceSchemaError
 
@@ -102,3 +105,46 @@ def test_duplicates_are_left_for_the_master_to_refuse() -> None:
     load = listings_from_rows([SH_ROWS[0], SH_ROWS[0]])
     assert [x.code for x in load.listings] == ["600519", "600519"]
     assert isinstance(load, MasterLoad)
+
+
+# --- 快照文件 → 主数据（每日任务的离线入口）--------------------------------------
+
+
+def write_listings(tmp_path: Path, index: int, body: str) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    header = "证券代码,证券简称,上市日期" if index == 0 else "A股代码,A股简称,A股上市日期"
+    (tmp_path / f"{am.SNAPSHOT_NAMES[index]}.csv").write_text(
+        f"{header}\n{body}\n", encoding="utf-8"
+    )
+
+
+def test_the_snapshot_paths_follow_the_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
+    assert [p.parent.name for p in am.snapshot_paths()] == ["golden"] * 2
+    assert [p.name for p in am.snapshot_paths()] == [f"{n}.csv" for n in am.SNAPSHOT_NAMES]
+
+
+def test_read_master_merges_both_exchange_lists(tmp_path: Path) -> None:
+    """两个入口迟早被用成一个：合读一份"那天在册的全市场"，才不会再出现少一半票的日报。"""
+    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27")
+    write_listings(tmp_path, 1, "300750,宁德时代,2018-06-11")
+    load = am.read_master(tmp_path)
+    assert [x.code for x in load.listings] == ["600519", "300750"]
+    assert load.skipped == ()
+
+
+def test_a_single_missing_list_is_rejected_not_partial(tmp_path: Path) -> None:
+    """只有一份名单在，看起来"还能用"：深市两千只票凭空消失而健康分照样满分，所以拒收。"""
+    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27")
+    with pytest.raises(SourceSchemaError, match="没有主数据快照"):
+        am.read_master(tmp_path)
+
+
+def test_skips_survive_the_round_trip_from_a_file(tmp_path: Path) -> None:
+    """跳过的行必须一路带到日报：B 股/债券不入库是对的，"对地少了 3 行"得说得出原文。"""
+    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27\n900901,B股示例,1992-02-21")
+    write_listings(tmp_path, 1, "300750,宁德时代,2018-06-11")
+    load = am.read_master(tmp_path)
+    assert [(x.raw_code, x.position) for x in load.skipped] == [("900901", 1)]

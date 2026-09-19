@@ -12,9 +12,12 @@ Step 3 股票池 PIT 还原的活，届时它和 `Listing.delisted_on` 一起接
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
+from zhixing_quant import config
 from zhixing_quant.domain.security import Listing
 from zhixing_quant.domain.symbol import UnknownCode, board_of, normalize_code
 from zhixing_quant.sources.rows import SourceSchemaError, pick, to_date
@@ -22,6 +25,8 @@ from zhixing_quant.sources.rows import SourceSchemaError, pick, to_date
 CODE_ALIASES = ("证券代码", "A股代码", "code")
 NAME_ALIASES = ("证券简称", "A股简称", "name")
 LISTED_ALIASES = ("上市日期", "A股上市日期", "list_date")
+#: 两份交易所名单的文件名，与 `tools/capture_golden.py` 的 key 一致：两处不同名就是两份主数据。
+SNAPSHOT_NAMES = ("stock_info_sh_name_code__主板A股", "stock_info_sz_name_code__A股列表")
 
 
 @dataclass(frozen=True)
@@ -83,3 +88,27 @@ def listings_from_rows(rows: Sequence[Mapping[str, object]]) -> MasterLoad:
             f"{sorted({s.reason for s in skipped})}"
         )
     return MasterLoad(listings=tuple(listings), skipped=tuple(skipped))
+
+
+def snapshot_paths(directory: Path | None = None) -> tuple[Path, ...]:
+    """两份交易所名单的快照位置（数据根 `golden/`，与日历同一处）。"""
+    root = directory if directory is not None else config.golden_dir()
+    return tuple(root / f"{name}.csv" for name in SNAPSHOT_NAMES)
+
+
+def read_master(directory: Path | None = None) -> MasterLoad:
+    """离线读主数据快照：两份名单合起来读，跳过的行照原样带原因返回。
+
+    合起来读而不是各读各的：`SecurityMaster` 要的是"那天在册的全市场"，两个入口迟早被
+    用成一个（日报上就是少一半票）。这里不刷新、不联网——快照旧不旧是抓取边界的事。
+    """
+    rows: list[Mapping[str, object]] = []
+    for path in snapshot_paths(directory):
+        if not path.is_file():
+            raise SourceSchemaError(
+                f"没有主数据快照 {path}：先跑 tools/capture_golden.py"
+                "（少一份名单等于少一个交易所，股票池凭空缩小一半）"
+            )
+        with path.open(encoding="utf-8", newline="") as fh:
+            rows += list(csv.DictReader(fh))
+    return listings_from_rows(rows)

@@ -4,10 +4,13 @@
 所以每个断言都在问同一件事——出错时它有没有可能表现为"全部通过"。
 """
 
+from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 
 import pytest
 
+from zhixing_quant.sources.akshare import calendar as ac
 from zhixing_quant.sources.akshare.calendar import calendar_from_rows
 from zhixing_quant.sources.rows import SourceSchemaError
 
@@ -60,3 +63,45 @@ def test_the_rejection_names_the_row_that_broke() -> None:
     with pytest.raises(SourceSchemaError) as caught:
         calendar_from_rows([{"trade_date": "2024-01-02"}, {"trade_date": "??"}])
     assert "第 1 行" in str(caught.value)
+
+
+# --- 快照文件 → 日历（每日任务的离线入口）----------------------------------------
+
+
+def write_calendar_csv(directory: Path, values: Sequence[str]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ac.SNAPSHOT_NAME
+    path.write_text("trade_date\n" + "\n".join(values) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_snapshot_path_follows_the_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """快照位置只有一个来源：日历写在别处，等于第二天起每天现抓，费用与失效都不可见。"""
+    monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
+    assert ac.snapshot_path() == tmp_path / "golden" / "tool_trade_date_hist_sina.csv"
+
+
+def test_a_snapshot_file_is_read_back_into_a_calendar(tmp_path: Path) -> None:
+    write_calendar_csv(tmp_path, ["2024-01-02", "2024-01-03"])
+    loaded = ac.load_calendar(ac.snapshot_path(tmp_path))
+    assert loaded.is_trading_day(date(2024, 1, 2))
+    assert not loaded.is_trading_day(date(2024, 1, 6))  # 周六不在样本里
+
+
+def test_a_missing_snapshot_says_which_file_to_fetch(tmp_path: Path) -> None:
+    """快照不在是第一天就撞上的事：报错要直接给出该跑哪个工具，而不是一个 FileNotFoundError。"""
+    with pytest.raises(SourceSchemaError, match="capture_golden"):
+        ac.load_calendar(ac.snapshot_path(tmp_path))
+
+
+def test_a_snapshot_that_stops_short_is_not_allowed_to_judge(tmp_path: Path) -> None:
+    """日历不覆盖目标日时 R006 永远不会报"缺交易日"，门禁表现为"全部通过"。
+
+    这是最坏的失效：它不响。所以 `until` 越过快照最后一天就抛，让人去重抓快照。
+    """
+    write_calendar_csv(tmp_path, ["2024-01-02", "2024-01-31"])
+    with pytest.raises(SourceSchemaError, match="只到 2024-01-31"):
+        ac.load_calendar(ac.snapshot_path(tmp_path), until=date(2024, 3, 1))
+    assert ac.load_calendar(ac.snapshot_path(tmp_path), until=date(2024, 1, 31)).days
