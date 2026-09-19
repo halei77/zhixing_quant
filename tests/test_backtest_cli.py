@@ -194,6 +194,22 @@ def test_a_losing_run_is_recorded_as_fail_and_still_exits_zero() -> None:
     assert json.loads(row.metrics_in)["trips"] == 1
 
 
+def test_a_void_run_exits_one_while_a_losing_one_still_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """坑 #29 那一晚烧掉的正是"一次退出码 0 的作废跑"：`&&` 链读它和读一次成功一模一样。
+
+    与上一条测试同一份道具：`600000` 在分钟盘上一根都没有 → 三档全无回合 → 台账 `void`。
+    判两件事：退出码 1，和那句话得说清 1 指的是运行不成立而不是结论是负的——把"负结论也退 0"
+    这条豁免顺手扩到 void，下一个读产物的人就只能在两种"1"之间猜。
+    """
+    assert zx("--codes", "600000") == 1
+    out = capsys.readouterr().out
+    assert "这一跑**不成立**（作废）" in out
+    assert "负结论照样退出 0" in out
+    assert ledger()[-1].status == "void"
+
+
 def test_a_number_that_does_not_exist_is_stored_as_null_not_zero() -> None:
     """票池里没有分钟行的那只票：胜率不存在，台账要存 null。
 
