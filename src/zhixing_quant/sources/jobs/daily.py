@@ -31,10 +31,11 @@ from zhixing_quant.domain.bar import Bar
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import SecurityMaster
 from zhixing_quant.quality import daily_report, gate_config
-from zhixing_quant.quality.engine import GateEngine, GateOutcome
+from zhixing_quant.quality.engine import GateEngine, GateOutcome, QuarantinedRow
 from zhixing_quant.quality.report import DataQualityReport
 from zhixing_quant.sources.akshare import daily as akshare_daily
 from zhixing_quant.sources.rows import Pair, SourceSchemaError
+from zhixing_quant.storage.quarantine import QuarantineReport
 from zhixing_quant.storage.write import WriteReport
 
 #: 抓取边界：一只票、一个闭区间，返回 (不复权, 后复权) 两帧。
@@ -43,6 +44,10 @@ Fetcher = Callable[[str, date, date], Pair]
 Alert = Callable[[str, str], None]
 #: 落盘边界：一批门禁放行的行 → 落盘的账。生产上就是 `storage.write.store_bars`。
 Store = Callable[[Sequence[Bar]], WriteReport]
+#: 隔离区落盘边界：一批被拒收的行 + 它们所属的那次运行（报告日）→ 落盘的账。
+#: 运行日由这里给而不是由适配器闭包持有：补抓昨天的数据时，条目要落进**昨天**那个文件
+#: （ADR-0008 代价二），而那一天只有任务知道。
+QuarantineStore = Callable[[Sequence[QuarantinedRow], date], QuarantineReport]
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,7 @@ class DayResult:
     skipped: tuple[Skipped, ...]
     pool: int
     landed: WriteReport
+    quarantined: QuarantineReport
 
     @property
     def ok(self) -> bool:
@@ -145,6 +151,7 @@ def collect(
     *,
     fetch: Fetcher,
     store: Store,
+    quarantine: QuarantineStore,
     master: SecurityMaster,
     calendar: TradingCalendar,
     previous_days: int = 1,
@@ -153,8 +160,8 @@ def collect(
     breaker: int = 20,
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
-) -> tuple[list[GateOutcome], list[Skipped], WriteReport]:
-    """抓 + 判 + 落一批票：返回逐票结果、最终没拿下来的票、这次进干净区的账。
+) -> tuple[list[GateOutcome], list[Skipped], WriteReport, QuarantineReport]:
+    """抓 + 判 + 落一批票：返回逐票结果、没拿下来的票、进干净区的账、进隔离区的账。
 
     `previous_days` 是往回带几个交易日：1 天够 R007；Step 3 做时间连续性检查时要更多。
     日历判不出上一日（样本区间的第一桶）时按单日批处理，此时 R007 不判——这一点由
@@ -164,14 +171,15 @@ def collect(
     去撞一堵墙，而免费源会把这种撞法当作攻击。剩下的票照样进日报的失败清单，所以收工
     不是掩盖缺数，只是把"今天这个源不行"说得更早。
 
-    `store` 不兜异常：落盘炸了（磁盘满、权限、同批冲突）意味着"今天这批没进干净区"，
-    让它冒出去由退出码说给定时任务，比记下几条 Skipped、再出一份看起来正常的日报好。
+    两个落盘都不兜异常：炸了（磁盘满、权限、同批冲突）意味着"今天这批没进库"，让它冒出去
+    由退出码说给定时任务，比记下几条 Skipped、再出一份看起来正常的日报好。
     """
     start = _window_start(calendar, day, previous_days)
     engine = GateEngine(gate_config.load(config.gate_config_file()), master, calendar)
     outcomes: list[GateOutcome] = []
     skipped: list[Skipped] = []
     written: list[WriteReport] = []
+    recorded: list[QuarantineReport] = []
     consecutive = 0
     for position, symbol in enumerate(symbols):
         if consecutive >= breaker:
@@ -194,9 +202,13 @@ def collect(
         raw, hfq = grabbed
         drafts = akshare_daily.daily_drafts(raw, hfq, symbol=symbol)
         judged = engine.run(drafts)
+        # 两个桶都按**整批**落盘，不裁成报告日：上一日那行也是今天抓到的证据——干净区因此少一次
+        # 联网重抓，隔离区因此不会在"那天到底拒收了什么"上留一个查不到的空洞。裁剪只发生在报给
+        # 日报的那一侧。
         written.append(store(judged.clean_zone))
+        recorded.append(quarantine(judged.quarantined, day))
         outcomes.append(judged.for_day(day))
-    return outcomes, skipped, _total(written)
+    return outcomes, skipped, _total(written), _total_quarantine(recorded)
 
 
 def _total(reports: Sequence[WriteReport]) -> WriteReport:
@@ -208,6 +220,19 @@ def _total(reports: Sequence[WriteReport]) -> WriteReport:
         partitions=sum(r.partitions for r in reports),
         added=sum(r.added for r in reports),
         repaired=sum(r.repaired for r in reports),
+        rewritten=sum(r.rewritten for r in reports),
+    )
+
+
+def _total_quarantine(reports: Sequence[QuarantineReport]) -> QuarantineReport:
+    """逐票的隔离账并成一次运行的账。
+
+    与干净区不同，这里不能相加出一个"累计"：一天只有一个隔离区文件，各次调用的账都是对同一个
+    文件的读写。相加有意义的是条目数与新记数，`rewritten` 因此只表示"改了几次文件"。
+    """
+    return QuarantineReport(
+        entries=sum(r.entries for r in reports),
+        recorded=sum(r.recorded for r in reports),
         rewritten=sum(r.rewritten for r in reports),
     )
 
@@ -229,19 +254,21 @@ def publish(
     outcomes: Sequence[GateOutcome],
     *,
     landed: WriteReport,
+    quarantined: QuarantineReport,
     skipped: Sequence[Skipped] = (),
     directory: Path | None = None,
 ) -> tuple[DataQualityReport, str]:
     """渲染 + 归档 + 分数流水。打印留给调用方：日报的正文同时是定时任务的日志。
 
-    `landed` 是这次运行进干净区的账，日报要把它单独列一行：判成多少行说的是门禁，
-    落进干净区多少行说的才是"明天有没有数据可用"，两者可以差在磁盘、差在落盘代码写坏。
+    `landed` 与 `quarantined` 是这次运行留下的两本账。日报要把它们各列一行：判成多少行说的是
+    门禁，落进干净区多少行说的是"明天有没有数据可用"，拒收的条目落了几条说的才是 04 §四 那句
+    "全量可查"到底成不成立——三件事可以各自出岔子。
     """
     reports = directory if directory is not None else config.reports_dir()
     scores = reports / "scores.csv"
     report = DataQualityReport.from_outcomes(day, outcomes)
     trends = {m.source: daily_report.history_for(scores, m.source, day) for m in report.metrics}
-    body = daily_report.render(report, list(outcomes), trends, landed)
+    body = daily_report.render(report, list(outcomes), trends, landed, quarantined)
     if skipped:
         body += _skipped_section(skipped)
     daily_report.archive(body, day, reports)
@@ -269,6 +296,7 @@ def run(
     *,
     fetch: Fetcher,
     store: Store,
+    quarantine: QuarantineStore,
     master: SecurityMaster,
     calendar: TradingCalendar,
     now: datetime | None = None,
@@ -281,7 +309,7 @@ def run(
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
 ) -> DayResult:
-    """一次盘后运行：定日 → 抓取判定 → 落干净区 → 发布日报。
+    """一次盘后运行：定日 → 抓取判定 → 落干净区与隔离区 → 发布日报。
 
     股票池默认取主数据当天的在册名单，`symbols` / `limit` 用来先在小范围跑通——全市场还是
     指数成分股是 01 路线图留给 Step 2 的待定口径，不在代码里替用户决定。
@@ -291,11 +319,12 @@ def run(
     pool = list(symbols) if symbols is not None else list(master.universe_on(target))
     if limit is not None:
         pool = pool[:limit]
-    outcomes, skipped, landed = collect(
+    outcomes, skipped, landed, quarantined = collect(
         target,
         pool,
         fetch=fetch,
         store=store,
+        quarantine=quarantine,
         master=master,
         calendar=calendar,
         previous_days=previous_days,
@@ -304,7 +333,14 @@ def run(
         sleep=sleep,
         alert=alert,
     )
-    report, body = publish(target, outcomes, landed=landed, skipped=skipped, directory=directory)
+    report, body = publish(
+        target,
+        outcomes,
+        landed=landed,
+        quarantined=quarantined,
+        skipped=skipped,
+        directory=directory,
+    )
     result = DayResult(
         day=target,
         outcomes=tuple(outcomes),
@@ -313,6 +349,7 @@ def run(
         skipped=tuple(skipped),
         pool=len(pool),
         landed=landed,
+        quarantined=quarantined,
     )
     if not result.ok:
         alert(
@@ -327,6 +364,7 @@ def run(
         alert(
             f"整批拒收：{target}",
             f"{count} / {len(result.outcomes)} 只票的批次被 FATAL 拦下，一只都没进干净区。"
-            "原因见日报的 FATAL 栏（多半是源改了列名或给了空表）。",
+            "原因见日报的 FATAL 栏（多半是源改了列名或给了空表）；整批被拦的行不落隔离区——"
+            "FATAL 说的是「这批读不出行」，逐条落证据等于假装它们可读。",
         )
     return result

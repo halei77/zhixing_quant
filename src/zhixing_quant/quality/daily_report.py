@@ -26,10 +26,12 @@ from pathlib import Path
 
 from zhixing_quant.quality.engine import GateOutcome, QuarantinedRow
 from zhixing_quant.quality.report import DataQualityReport, HealthGrade, SourceMetrics
+from zhixing_quant.storage import layout
+from zhixing_quant.storage.quarantine import QuarantineReport
 from zhixing_quant.storage.write import WriteReport
 
 #: 04 §四 "明细 Top10"——**每个源**十条，不是全市场十条：后接入的源不能因为前面的源
-#: 报错多就被挤出日报。全量明细在隔离区（Step 3 落盘后查）。
+#: 报错多就被挤出日报。全量明细在隔离区，按运行日一个 Parquet 文件（ADR-0008）。
 DETAIL_TOP = 10
 #: 隔离区抽样条数。抽样而不是全量：一天真错 3000 行时，全量清单会把手要看的那几条埋掉。
 SAMPLE_ROWS = 5
@@ -97,11 +99,13 @@ def render(
     outcomes: Sequence[GateOutcome],
     trends: Mapping[str, Trend],
     landed: WriteReport,
+    quarantined: QuarantineReport,
 ) -> str:
     """日报正文。`trends` 按源给近 N 日的 (日期, 分数, 等级)，旧在前；没有历史就传空。
 
-    `landed` 是这次运行进干净区的账：门禁判成多少行说的是"源给的数据能不能要"，落盘多少行
-    说的是"明天有没有数据可用"。两个数各报各的，才不会在"判成八千行、磁盘写满"那天报平安。
+    `landed` 与 `quarantined` 是这次运行留下的两本账：门禁判成多少行说的是"源给的数据能不能要"，
+    落盘多少行说的是"明天有没有数据可用"，拒收条目落了几条说的是下一节的抽样之外还有没有东西
+    可查。三个数各报各的，才不会在"判成八千行、磁盘写满"那天报平安。
     """
     lines = [
         f"# 数据质量日报 {report.day.isoformat()}",
@@ -109,6 +113,7 @@ def render(
         f"- 行数 {report.total_rows:,}，源 {len(report.metrics)} 个，"
         f"降级或停用 {len(report.blocked)} 个",
         _landed_line(landed),
+        _quarantine_line(report.day, quarantined),
         "",
         "## 各源",
         "",
@@ -129,8 +134,10 @@ def render(
         lines.append("（今天没有任何规则命中）")
     lines += ["", "## 隔离区抽样", ""]
     samples = [row for outcome in outcomes for row in outcome.quarantined]
+    # 说"报告日"而不是"今天"：抽样来自裁过的那张表，而首行那句落盘账来自整批——两日批里
+    # 上一日被拒收时，两个数本来就不同时为 0，含糊的说法会让其中一句看起来在撒谎。
     lines += [f"- {_sample_line(row)}" for row in samples[:SAMPLE_ROWS]] or [
-        "（隔离区今天没有新条目）"
+        "（报告日没有拒收行，无可抽样；这次运行的全量见首行那句落盘账）"
     ]
     for metrics in report.metrics:
         lines += ["", *_trend_lines(metrics, trends.get(metrics.source, ()))]
@@ -153,6 +160,26 @@ def _landed_line(landed: WriteReport) -> str:
     return (
         f"- 进干净区：新增 {landed.added:,} 行、改写 {landed.repaired:,} 行，"
         f"重写 {landed.rewritten:,}/{landed.partitions:,} 个分区文件"
+    )
+
+
+def _quarantine_line(day: date, quarantined: QuarantineReport) -> str:
+    """隔离区落盘那行：把 04 §四 的"全量在隔离区可查"落到一个具体文件上。
+
+    三种情形分别是三件事：今天没拒收任何行、拒收了但盘上已经有（重跑幂等）、真的新记了几条。
+    把第三种写成"见隔离区"是要人自己去猜有没有写进去，而第二种不写清楚就等于宣称"重跑会重复记"。
+    """
+    path = layout.quarantine_path(day)
+    if not quarantined.entries:
+        return f"- 隔离区：今天没有拒收条目（全量可查于 `{path}`）"
+    if not quarantined.recorded:
+        return (
+            f"- 隔离区：{quarantined.entries:,} 条重跑前就已在盘上"
+            f"（幂等，未改动文件；全量见 `{path}`）"
+        )
+    return (
+        f"- 隔离区：新记 {quarantined.recorded:,}/{quarantined.entries:,} 条拒收条目，"
+        f"全量可查于 `{path}`"
     )
 
 

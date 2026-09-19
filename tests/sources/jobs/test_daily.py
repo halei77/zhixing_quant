@@ -5,6 +5,8 @@
 1. 故障注入时**重试并最终告警**——断网不能表现为"今天没数据也算正常"。
 2. 少掉的票必须可见。抓取失败的票若悄悄从分母里消失，健康分反而上升，那是最坏的失真。
 3. 两日一批换来的 R007 要真的能开火，而日报的分母仍是报告日那天。
+4. 判成 ≠ 落盘。干净区与隔离区各一本账（Step 3b/3c），而"重跑一遍"与"再记一遍"在盘上
+   必须长得不一样——这两本账都是接线的性质，存储层自己的幂等测试替不了它们说话。
 
 网络层不在这里测：`fetch` 是参数，所以全部测试离线可跑（03 §二 L2）。
 """
@@ -24,14 +26,16 @@ from zhixing_quant.quality.facts import Violation
 from zhixing_quant.sources.jobs import daily as job
 from zhixing_quant.sources.rows import Pair, SourceSchemaError
 from zhixing_quant.storage import query
+from zhixing_quant.storage.quarantine import QuarantineReport, entries_on, store_quarantined
 from zhixing_quant.storage.write import WriteReport, store_bars
 
 DAY = date(2024, 1, 3)
 PREV = date(2024, 1, 2)
 
 CALENDAR = TradingCalendar([PREV, DAY, date(2024, 1, 4), date(2024, 1, 5)])  # 周四、周五
-#: 不关心落盘的测试用这个 store：它们问的是判定与告警，不是磁盘上有没有文件。
+#: 不关心落盘的测试用这两个 sink：它们问的是判定与告警，不是磁盘上有没有文件。
 NO_LANDING = WriteReport(0, 0, 0, 0)
+NO_QUARANTINE = QuarantineReport(0, 0, 0)
 MASTER = SecurityMaster([Listing(code="600519", name="贵州茅台", listed_on=date(2001, 8, 27))])
 
 
@@ -59,9 +63,18 @@ def _no_landing(*_rows: Any) -> WriteReport:
     return NO_LANDING
 
 
+def _no_quarantine(*_args: Any) -> QuarantineReport:
+    return NO_QUARANTINE
+
+
 def landing(root: Path) -> job.Store:
     """把落盘指向 tmp 的真存储层：这些测试要验的是"进了盘"，不是"进了哪块盘"。"""
     return partial(store_bars, root=root)
+
+
+def quarantine_landing(root: Path) -> job.QuarantineStore:
+    """同上，隔离区那本账。"""
+    return lambda rows, run_on: store_quarantined(rows, run_on, root=root)
 
 
 def test_retry_succeeds_without_alerting() -> None:
@@ -140,7 +153,15 @@ def test_the_window_carries_the_previous_trading_day_for_r007() -> None:
         asked.append((symbol, start, end))
         return two_days(100.0, 101.0)
 
-    job.collect(DAY, ["600519"], fetch=spy, store=_no_landing, master=MASTER, calendar=CALENDAR)
+    job.collect(
+        DAY,
+        ["600519"],
+        fetch=spy,
+        store=_no_landing,
+        quarantine=_no_quarantine,
+        master=MASTER,
+        calendar=CALENDAR,
+    )
     assert asked == [("600519", PREV, DAY)]
 
 
@@ -150,8 +171,14 @@ def test_r007_actually_fires_on_a_two_day_batch() -> None:
         bars(PREV, 100.0) + bars(DAY, 200.0),
         bars(PREV, 100.0) + bars(DAY, 200.0),
     )
-    outcomes, skipped, _ = job.collect(
-        DAY, ["600519"], fetch=fetch, store=_no_landing, master=MASTER, calendar=CALENDAR
+    outcomes, skipped, _, _ = job.collect(
+        DAY,
+        ["600519"],
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=_no_quarantine,
+        master=MASTER,
+        calendar=CALENDAR,
     )
     assert skipped == []
     quarantined = outcomes[0].quarantined
@@ -167,11 +194,12 @@ def test_a_skipped_symbol_does_not_lose_the_others() -> None:
             raise ConnectionError("断网")
         return two_days(100.0, 101.0)
 
-    outcomes, skipped, _ = job.collect(
+    outcomes, skipped, _, _ = job.collect(
         DAY,
         ["bad", "600519"],
         fetch=fetch,
         store=_no_landing,
+        quarantine=_no_quarantine,
         master=MASTER,
         calendar=CALENDAR,
         attempts=1,
@@ -183,15 +211,18 @@ def test_a_skipped_symbol_does_not_lose_the_others() -> None:
 
 
 def test_publish_writes_the_report_and_the_scores_log(tmp_path: Path) -> None:
-    outcomes, _, landed = job.collect(
+    outcomes, _, landed, quarantined = job.collect(
         DAY,
         ["600519"],
         fetch=lambda *_a: two_days(100.0, 101.0),
         store=landing(tmp_path),
+        quarantine=quarantine_landing(tmp_path),
         master=MASTER,
         calendar=CALENDAR,
     )
-    report, body = job.publish(DAY, outcomes, landed=landed, directory=tmp_path)
+    report, body = job.publish(
+        DAY, outcomes, landed=landed, quarantined=quarantined, directory=tmp_path
+    )
     assert (tmp_path / "2024-01-03.md").read_text(encoding="utf-8") == body
     assert report.source("akshare_daily").total == 1  # 分母是报告日那天，两日批被裁过
     assert (tmp_path / "scores.csv").is_file()
@@ -200,7 +231,9 @@ def test_publish_writes_the_report_and_the_scores_log(tmp_path: Path) -> None:
 def test_the_failure_list_is_capped_but_still_counts_everything(tmp_path: Path) -> None:
     """三千只票全列出来等于把日报撑爆；只列前十但报总数，才既看得清又不撒谎。"""
     skipped = [job.Skipped(symbol=f"{i:06d}", reason="断网") for i in range(DETAIL_TOP + 3)]
-    _, body = job.publish(DAY, [], landed=NO_LANDING, skipped=skipped, directory=tmp_path)
+    _, body = job.publish(
+        DAY, [], landed=NO_LANDING, quarantined=NO_QUARANTINE, skipped=skipped, directory=tmp_path
+    )
     assert "重试后仍失败 13 只" in body
     assert body.count("：断网") == DETAIL_TOP
     assert "其余 3 只同因" in body
@@ -223,6 +256,7 @@ def test_run_uses_the_master_universe_and_honours_the_limit(tmp_path: Path) -> N
         DAY,
         fetch=fetch,
         store=_no_landing,
+        quarantine=_no_quarantine,
         master=master,
         calendar=CALENDAR,
         limit=1,
@@ -244,6 +278,7 @@ def test_run_that_judges_nothing_alerts_and_is_not_ok(tmp_path: Path) -> None:
         DAY,
         fetch=fetch,
         store=_no_landing,
+        quarantine=_no_quarantine,
         master=MASTER,
         calendar=CALENDAR,
         symbols=["600519"],
@@ -281,6 +316,7 @@ def test_a_fatal_batch_alerts_even_when_the_day_otherwise_worked(
         DAY,
         fetch=half_broken,
         store=_no_landing,
+        quarantine=_no_quarantine,
         master=master,
         calendar=CALENDAR,
         directory=tmp_path,
@@ -306,11 +342,12 @@ def test_a_broken_source_stops_instead_of_grinding_the_whole_pool() -> None:
         raise ConnectionError("源不可用")
 
     symbols = [f"{600000 + i}" for i in range(10)]
-    outcomes, skipped, _ = job.collect(
+    outcomes, skipped, _, _ = job.collect(
         DAY,
         symbols,
         fetch=dead,
         store=_no_landing,
+        quarantine=_no_quarantine,
         master=MASTER,
         calendar=CALENDAR,
         attempts=1,
@@ -337,11 +374,12 @@ def test_a_success_resets_the_breaker_counter() -> None:
             raise ConnectionError("源不可用")
         return two_days(100.0, 101.0)
 
-    outcomes, skipped, _ = job.collect(
+    outcomes, skipped, _, _ = job.collect(
         DAY,
         ["600511", "600512", "600513", "600514"],
         fetch=flaky,
         store=_no_landing,
+        quarantine=_no_quarantine,
         master=MASTER,
         calendar=CALENDAR,
         attempts=1,
@@ -358,7 +396,9 @@ def test_the_failure_section_tells_grabbed_and_never_tried_apart(tmp_path: Path)
         job.Skipped(symbol="600519", reason="ConnectionError: 断网"),
         job.Skipped(symbol="600520", reason="熔断：源连续失败，未再抓取"),
     ]
-    _, body = job.publish(DAY, [], landed=NO_LANDING, skipped=skipped, directory=tmp_path)
+    _, body = job.publish(
+        DAY, [], landed=NO_LANDING, quarantined=NO_QUARANTINE, skipped=skipped, directory=tmp_path
+    )
     assert "重试后仍失败 1 只，熔断后没再抓取 1 只" in body
 
 
@@ -371,11 +411,12 @@ def test_the_rows_that_passed_the_gate_reach_the_clean_zone(tmp_path: Path) -> N
     上一日的行也落：它是 R007 的证据，而断点续传时它少一次联网请求。日报的分母仍只有
     报告日（`for_day` 裁过），所以这里的行数是 2 而不是 1。
     """
-    outcomes, skipped, landed = job.collect(
+    outcomes, skipped, landed, _ = job.collect(
         DAY,
         ["600519"],
         fetch=lambda *_a: two_days(100.0, 101.0),
         store=landing(tmp_path),
+        quarantine=quarantine_landing(tmp_path),
         master=MASTER,
         calendar=CALENDAR,
     )
@@ -392,11 +433,22 @@ def test_a_rerun_of_the_same_day_leaves_the_disk_alone(tmp_path: Path) -> None:
     筛选若哪天改成连隔离区的行一起落盘，第一条重跑就会报出 rewritten>0。
     """
     fetch = lambda *_a: two_days(100.0, 101.0)  # noqa: E731
-    store = landing(tmp_path)
-    job.collect(DAY, ["600519"], fetch=fetch, store=store, master=MASTER, calendar=CALENDAR)
-    _, _, again = job.collect(
-        DAY, ["600519"], fetch=fetch, store=store, master=MASTER, calendar=CALENDAR
-    )
+    store, quarantine = landing(tmp_path), quarantine_landing(tmp_path)
+
+    def twice() -> WriteReport:
+        _, _, landed, _ = job.collect(
+            DAY,
+            ["600519"],
+            fetch=fetch,
+            store=store,
+            quarantine=quarantine,
+            master=MASTER,
+            calendar=CALENDAR,
+        )
+        return landed
+
+    twice()
+    again = twice()
     assert again.added == 0 and again.repaired == 0 and again.rewritten == 0
 
 
@@ -404,18 +456,21 @@ def test_a_fatal_batch_reaches_nothing_but_the_report(tmp_path: Path) -> None:
     """整批被 FATAL 拦下的票一行都不进干净区：干净区的定义就是"判过了"。
 
     它同时是 04 §一 那条不变量的接线证明——`clean_zone` 在 FATAL 时为空，而日报照样
-    记下这一笔，两处都不能假装今天判成过。
+    记下这一笔，两处都不能假装今天判成过。隔离区也一样空：FATAL 说的是"这批读不出行"，
+    逐条落证据等于假装它们可读（ADR-0008），所以整盘上连一个 Parquet 都不该多出来。
     """
-    _, _, landed = job.collect(
+    _, _, landed, quarantined = job.collect(
         DAY,
         ["600519"],
         fetch=lambda *_a: ([], []),
         store=landing(tmp_path),
+        quarantine=quarantine_landing(tmp_path),
         master=MASTER,
         calendar=CALENDAR,
     )
     assert landed.partitions == 0
-    assert not list((tmp_path / "data").rglob("*.parquet"))
+    assert quarantined.entries == 0
+    assert not list(tmp_path.rglob("*.parquet"))
 
 
 def test_the_report_says_what_landed_and_says_it_again_on_a_rerun(tmp_path: Path) -> None:
@@ -428,6 +483,7 @@ def test_the_report_says_what_landed_and_says_it_again_on_a_rerun(tmp_path: Path
         DAY,
         fetch=fetch,
         store=landing(tmp_path),
+        quarantine=quarantine_landing(tmp_path),
         master=MASTER,
         calendar=CALENDAR,
         symbols=["600519"],
@@ -438,6 +494,7 @@ def test_the_report_says_what_landed_and_says_it_again_on_a_rerun(tmp_path: Path
         DAY,
         fetch=fetch,
         store=landing(tmp_path),
+        quarantine=quarantine_landing(tmp_path),
         master=MASTER,
         calendar=CALENDAR,
         symbols=["600519"],
@@ -445,6 +502,152 @@ def test_the_report_says_what_landed_and_says_it_again_on_a_rerun(tmp_path: Path
     )
     assert "行数 1" in second.markdown  # 判成的行数是报告日那一天的 1 行
     assert "进干净区：+0 行" in second.markdown and "已是最新" in second.markdown
+
+
+# --- 隔离区接线（Step 3c）-------------------------------------------------------
+
+
+def broken_previous(today: float = 101.0) -> Pair:
+    """上一日那行 high 低于 low（R001 判死），报告日那行干净。
+
+    坏数据放在**上一日**是故意的：它让日报的 REJECT 栏为 0（`for_day` 裁掉了），而落盘的
+    账上有一条——两边口径不同这件事，只有这样才能被测试看见。
+    """
+    raw: list[dict[str, object]] = [
+        {
+            "date": PREV.isoformat(),
+            "open": 100.0,
+            "high": 99.0,
+            "low": 101.0,
+            "close": 100.0,
+            "volume": 1000.0,
+            "amount": 100000.0,
+        },
+        *bars(DAY, today),
+    ]
+    return raw, raw
+
+
+def test_the_rejected_rows_reach_the_quarantine_file(tmp_path: Path) -> None:
+    """04 §四 那句"全量在隔离区可查"的接线证明：被拒收的草稿真的在盘上，带原始值。
+
+    落的是整批而不是报告日那一天，文件名叫报告日：一天一个文件，键是这次运行
+    （ADR-0008 决定 2、代价二）。
+    """
+    outcomes, _, _, quarantined = job.collect(
+        DAY,
+        ["600519"],
+        fetch=lambda *_a: broken_previous(),
+        store=_no_landing,
+        quarantine=quarantine_landing(tmp_path),
+        master=MASTER,
+        calendar=CALENDAR,
+    )
+    assert outcomes[0].quarantined == ()  # 坏的是上一日，日报的表只说那一天
+    assert (quarantined.entries, quarantined.recorded) == (1, 1)
+    (entry,) = entries_on(DAY, root=tmp_path)
+    assert entry.trade_date == PREV
+    assert entry.rules == ("R001",)
+    assert (entry.high, entry.low) == ("99.0", "101.0")  # 原始值，不是判定文案
+
+
+def test_a_quarantine_rerun_records_the_same_entries_once(tmp_path: Path) -> None:
+    """重跑不产生重复条目：隔离区一旦开始被按日翻账，重复就是篡改历史。
+
+    存储层自己测过，这里钉的是接线——`collect` 逐票调用 sink，若哪天把两次运行的结果
+    当成两批各写一遍文件，`recorded` 就不再是 0。
+    """
+    fetch = lambda *_a: broken_previous()  # noqa: E731
+    sink = quarantine_landing(tmp_path)
+    job.collect(
+        DAY,
+        ["600519"],
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=sink,
+        master=MASTER,
+        calendar=CALENDAR,
+    )
+    _, _, _, again = job.collect(
+        DAY,
+        ["600519"],
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=sink,
+        master=MASTER,
+        calendar=CALENDAR,
+    )
+    assert (again.entries, again.recorded, again.rewritten) == (1, 0, 0)
+    assert len(entries_on(DAY, root=tmp_path)) == 1
+
+
+def test_a_partial_run_does_not_erase_a_full_one(tmp_path: Path) -> None:
+    """`zx-daily --limit 1` 不许抹掉同一天全量运行留下的条目（ADR-0008 决定 4）。
+
+    这是隔离区与干净区最实质的差别：干净区一只票一个文件，部分运行碰不到别人的文件；
+    隔离区一天一个文件，谁都可能重写它——所以合并必须是真的合并，而不是"这次抓到的那些"。
+    """
+
+    def fetch(code: str, _start: date, _end: date) -> Pair:
+        # 600520 不在主数据里：它的两行都吃 R004，正好当"全量运行记下的那些"
+        return two_days(100.0, 101.0) if code == "600519" else broken_previous()
+
+    sink = quarantine_landing(tmp_path)
+    job.collect(
+        DAY,
+        ["600519", "600520"],
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=sink,
+        master=MASTER,
+        calendar=CALENDAR,
+    )
+    full = len(entries_on(DAY, root=tmp_path))
+    job.collect(
+        DAY,
+        ["600519"],
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=sink,
+        master=MASTER,
+        calendar=CALENDAR,
+    )
+    assert full == 2  # 600520 不在主数据里：它的两行都吃 R004
+    assert len(entries_on(DAY, root=tmp_path)) == full
+
+
+def test_the_report_points_at_the_quarantine_file(tmp_path: Path) -> None:
+    """日报要报出"全量在哪、这次记了几条"，重跑时还要报出"没再记"。
+
+    只有抽样五条的日报会让人以为那天就错了五条；那一句路径才是"去查全部"的入口。
+    """
+    fetch = lambda *_a: broken_previous()  # noqa: E731
+    first = job.run(
+        DAY,
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=quarantine_landing(tmp_path),
+        master=MASTER,
+        calendar=CALENDAR,
+        symbols=["600519"],
+        directory=tmp_path / "reports",
+    )
+    assert "- 隔离区：新记 1/1 条拒收条目" in first.markdown
+    assert "quarantine/2024-01-03.parquet" in first.markdown
+    # 坏的是上一日那行：首行那本账按整批记，抽样按报告日裁。两句同时成立才是盘上的事实，
+    # 所以抽样那句必须说"报告日没有"，不能说"今天没有"。
+    assert "（报告日没有拒收行，无可抽样" in first.markdown
+    second = job.run(
+        DAY,
+        fetch=fetch,
+        store=_no_landing,
+        quarantine=quarantine_landing(tmp_path),
+        master=MASTER,
+        calendar=CALENDAR,
+        symbols=["600519"],
+        directory=tmp_path / "reports",
+    )
+    assert "1 条重跑前就已在盘上" in second.markdown
 
 
 # --- GateOutcome.for_day --------------------------------------------------------

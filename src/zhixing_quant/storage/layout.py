@@ -7,6 +7,9 @@
 主键是 `(symbol, trade_date)`，与门禁 R008 用的同一个键（04 §二）：一天一行是干净区
 对策略层的承诺，同一天并排两行会让回测把成交量算两遍。
 
+两个 dataset 两套形状，各在自己的 `*_COLUMNS` 里定一份：干净区一只票一年一个文件、按主键合并；
+隔离区一天一个文件、幂等键是整行（ADR-0008）。相同的是"写和读从同一处取列序"。
+
 代码可能来自命令行（`zx-daily --symbols`），所以路径里的代码一律先过 `normalize_code`：
 它只放行 6 位数字，`../etc/passwd` 这类形状进不了路径。这既是归一，也是路径遍历的防线。
 """
@@ -23,6 +26,9 @@ from zhixing_quant.domain.symbol import normalize_code
 
 #: 数据集名即目录名。分钟线（Step 4）另起名字：布局同构，但体量和口径都不同，不混在一份文件里。
 DAILY = "daily"
+#: 隔离区（ADR-0008）：与干净区同一个数据根、不同 dataset 目录。读写两侧都按 dataset 取目录，
+#: 所以读干净区的代码看不见隔离区，反之也一样。
+QUARANTINE = "quarantine"
 
 #: 列名 + DuckDB 类型。类型只此一份，建表与读回都以它为准（`REAL`/`FLOAT` 是单精度，不用）。
 COLUMNS: tuple[tuple[str, str], ...] = (
@@ -75,6 +81,70 @@ def record_of(bar: Bar) -> Record:
         bar.adj_factor,
         bar.is_suspended,
     )
+
+
+#: 隔离区的列形状（ADR-0008 决定 3）：`BarDraft` 全字段 + 三条等长数组。与干净区最大的不同是
+#: **除 `is_suspended` 外全部可空**——空就是"源没给"，那正是被拒收的那几种行本来的样子。
+#:
+#: 价格与量额存 `VARCHAR` 而不是 `DOUBLE`，理由只有一条：DuckDB 1.5.5 把 Python 侧的 `nan`
+#: 绑定成 `NULL`（实测，`inf` 反而原样保住），而"源给了 NaN"与"源没给这个字段"在这里是两条
+#: 不同的结论——前者命中 R001，后者命中 R010。隔离区是审计证据，把其中一条洗成另一条等于伪造
+#: 现场。代价是要按数值筛时先 `CAST`（`'nan'`、`'inf'` 都能转回去，实测），而审计时的读法本来就是
+#: "那天的原始值是什么"。
+QUARANTINE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("source", "VARCHAR"),
+    ("symbol", "VARCHAR"),
+    ("trade_date", "DATE"),
+    ("open", "VARCHAR"),
+    ("high", "VARCHAR"),
+    ("low", "VARCHAR"),
+    ("close", "VARCHAR"),
+    ("volume", "VARCHAR"),
+    ("amount", "VARCHAR"),
+    ("adj_factor", "VARCHAR"),
+    ("is_suspended", "BOOLEAN"),
+    ("rules", "VARCHAR[]"),
+    ("levels", "VARCHAR[]"),
+    ("reasons", "VARCHAR[]"),
+)
+
+QUARANTINE_NAMES: tuple[str, ...] = tuple(name for name, _ in QUARANTINE_COLUMNS)
+
+
+class Entry(NamedTuple):
+    """一条隔离区条目：被拒收的那条原始行，加"为什么"。
+
+    `rules` / `levels` / `reasons` 位置一一对应，由同一个 `violations` 序列投影出来（ADR-0008
+    决定 3）：等长是构造保证的，不是约定。`symbol` 是源给的**原样**，不归一——归一不出来正是
+    有些行的罪名。数值列存的是它们的 `str()`，`None` 才是"源没给"（理由见上面那段）。
+    """
+
+    source: str
+    symbol: str
+    trade_date: date | None
+    open: str | None
+    high: str | None
+    low: str | None
+    close: str | None
+    volume: str | None
+    amount: str | None
+    adj_factor: str | None
+    is_suspended: bool
+    rules: tuple[str, ...]
+    levels: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+def quarantine_path(run_on: date, *, root: Path | None = None) -> Path:
+    """一次运行的隔离区文件：一天一个，文件名是**运行日**（ADR-0008 决定 2）。
+
+    不按 `year/symbol` 分区：一条被拒收的草稿，它的 `trade_date` 可能恰恰是缺的（R010 就判这个），
+    而运行日永远已知，与行的质量无关。也不做 hive 子目录：一天一文件没有分区可裁剪。
+
+    "运行日"是**那次运行的报告日**，不是墙上时钟那天（ADR-0008 代价二）：十天之后补抓
+    2024-01-03，那条拒收证据仍然落在 01-03 这个文件里，跟当天的日报对得上。
+    """
+    return dataset_dir(QUARANTINE, root) / f"{run_on.isoformat()}.parquet"
 
 
 def dataset_dir(dataset: str, root: Path | None = None) -> Path:

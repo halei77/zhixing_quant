@@ -6,12 +6,14 @@
 2. **没变就不写**：合并结果与文件里已有的一致时直接跳过，不碰 mtime、不留一次重写。
    于是"抓到一半断了、整个重跑一遍"在文件系统层面看不出发生过——这正是断点续传要的形状。
 3. **原子替换**：先写同目录的 `.part`，再 `os.replace`。同目录 rename 是原子操作，
-   断在写一半时旧文件还完整在那儿，不会出现"半个 Parquet"被下游读到。
+   断在写一半时旧文件还完整在那儿，不会出现"半个 Parquet"被下游读到。这个动作连同 DuckDB
+   的几处坑一起在 `partition.py`，因为隔离区（`quarantine.py`）做的是同一件事。
 
 后到覆盖先到：重抓是修复坏数据唯一可行的手段。反过来"已有就不动"会让一个错日子永久
 留在干净区，只能人工删文件——那等于把幂等换成"要幂等请先手工清理"。但同一批里给同一天
 两条**不同**的值不是新旧关系，是冲突（多半是跨源对账没裁决完就交给存储层），直接抛
 `BarConflict`：存储层不替谁对谁错做主（裁决在 04 §五 的门禁里，不在文件系统的写入顺序里）。
+——隔离区正相反，那里的两行是两次各自成立的观测，所以那边合并、不裁决（ADR-0008）。
 
 DuckDB 在本项目里只做它擅长的一段：读写 Parquet。行的合并与比较留在 Python，因为
 "哪条算重复"要跟 `Bar` 讲同一种语言；写进 SQL 之后这条规则就没人能在评审时读懂了。
@@ -28,14 +30,8 @@ from typing import Any
 import duckdb
 
 from zhixing_quant.domain.bar import Bar
-from zhixing_quant.storage import layout
+from zhixing_quant.storage import layout, partition
 from zhixing_quant.storage.layout import NAMES, Record, partition_path, record_of
-
-_COLUMNS = ", ".join(NAMES)
-_TABLE = ", ".join(f"{name} {type_}" for name, type_ in layout.COLUMNS)
-#: 整批一次绑定，按列传。`executemany` 每行重新规划一次语句，250 行的分区要 155ms；
-#: 换成 `UNNEST(?)` 传列向量是 3.7ms——同一个动作，差 40 倍，而全市场一天就是 4430 个分区。
-_INSERT = f"INSERT INTO outgoing SELECT {', '.join('UNNEST(?)' for _ in NAMES)}"
 
 
 class BarConflict(ValueError):
@@ -83,7 +79,7 @@ def store_bars(
                 repaired += changed
                 if merged == existing:
                     continue
-                _rewrite(con, path, merged)
+                partition.rewrite(con, path, layout.COLUMNS, merged)
                 rewritten += 1
     return WriteReport(partitions=len(groups), added=added, repaired=repaired, rewritten=rewritten)
 
@@ -109,34 +105,7 @@ def _merge(existing: Sequence[Record], incoming: dict[date, Bar]) -> tuple[list[
 def _read(con: Any, path: Path) -> list[Record]:
     """整个分区读回。分区文件是"一只票一年"，几百行，读得起。
 
-    DuckDB 交回来的是裸元组，`Record(*row)` 是它变成有名字的东西的那一步：列数一错就
-    `TypeError`，而不是往后带着一列错位的数据安静走下去。
+    顺序在这里定，不在 SQL 里排：`store_bars` 拿它和合并结果比"相等就不写"，而这个判据只有在
+    两边同序时才有意义。共享的读函数不替两个数据集各自的排序键做主（见 `partition` 的模块说明）。
     """
-    if not path.is_file():
-        return []
-    fetched: list[tuple[Any, ...]] = con.execute(
-        f"SELECT {_COLUMNS} FROM read_parquet(?) ORDER BY trade_date", [str(path)]
-    ).fetchall()
-    return [Record(*row) for row in fetched]
-
-
-def _rewrite(con: Any, path: Path, rows: Sequence[Record]) -> None:
-    """整分区重写。增量写要引入 merge 语义与临时状态，而一个分区的体量不值得那点 IO。
-
-    先落一张列类型写死的临时表再 `COPY`：直接从参数 `COPY` 时，一整个全 None 的
-    `adj_factor` 列没有可推断的类型，落出来的 Parquet 列型就跟着猜——而"因子这列变成了
-    BOOLEAN"这种错，要等到第一次复权查询才炸，届时没人会想到是落盘那天的事。
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f"{path.name}.part")
-    con.execute("DROP TABLE IF EXISTS outgoing")
-    con.execute(f"CREATE TEMP TABLE outgoing ({_TABLE})")
-    con.execute(_INSERT, _columns(rows))
-    con.execute(f"COPY (SELECT {_COLUMNS} FROM outgoing) TO ? (FORMAT PARQUET)", [str(partial)])
-    partial.replace(path)
-
-
-def _columns(rows: Sequence[Record]) -> list[list[object]]:
-    """行 → 列。`strict=True` 是有分的：长度不齐时 DuckDB 给短的那列补 NULL 而不是报错，
-    少传一列就变成"那一列整天缺值"，那是最难查的一种落盘错误。"""
-    return [list(column) for column in zip(*rows, strict=True)]
+    return sorted(partition.read(con, path, NAMES, Record), key=lambda row: row.trade_date)

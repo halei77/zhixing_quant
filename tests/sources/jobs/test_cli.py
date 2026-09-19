@@ -17,6 +17,7 @@ from zhixing_quant.sources.akshare import fetch as akshare_fetch
 from zhixing_quant.sources.akshare import master as am
 from zhixing_quant.sources.jobs import cli
 from zhixing_quant.sources.rows import Pair
+from zhixing_quant.storage.quarantine import entries_on
 
 CALENDAR_DAYS = ("2024-01-02", "2024-01-03", "2024-01-04")
 DAY = date(2024, 1, 3)
@@ -74,6 +75,24 @@ def test_a_clean_run_exits_zero_and_prints_the_report(
     # 两票 × 两日 = 4 行，而日报的分母只有报告日那 2 行——两个数不同，才说明各报各的。
     assert (data_root / "data/daily/year=2024/symbol=600519.parquet").is_file()
     assert "- 进干净区：新增 4 行" in out
+    assert "隔离区：今天没有拒收条目" in out
+
+
+def test_a_rejected_row_lands_in_the_quarantine_file(data_root: Path) -> None:
+    """真入口跑出来的隔离区条目要在 `ZX_DATA_ROOT/data/quarantine/` 里（ADR-0008）。
+
+    根是 `config.parquet_dir()` 给的，所以这条测的是接线：传错根的落盘在单测里照样全绿，
+    跑起来却把审计证据写去了别的地方，而没人会去翻一个不存在的文件。
+    """
+
+    def gap(_code: str, _start: date, _end: date) -> Pair:
+        rows = [bar(date(2024, 1, 2), 100.0), bar(DAY, 200.0)]  # 今开偏离昨收 100%
+        return rows, rows
+
+    assert cli.main(["--day", "2024-01-03", "--symbols", "600519"], fetcher=gap) == 0
+    assert (data_root / "data/quarantine/2024-01-03.parquet").is_file()
+    (entry,) = entries_on(DAY, root=data_root / "data")
+    assert entry.symbol == "600519" and "R007" in entry.rules
 
 
 @pytest.mark.usefixtures("data_root")

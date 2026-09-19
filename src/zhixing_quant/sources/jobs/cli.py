@@ -24,6 +24,7 @@ from zhixing_quant.sources.akshare.calendar import load_calendar
 from zhixing_quant.sources.akshare.master import read_master
 from zhixing_quant.sources.jobs import daily as job
 from zhixing_quant.sources.rows import SourceSchemaError
+from zhixing_quant.storage.quarantine import store_quarantined
 from zhixing_quant.storage.write import store_bars
 
 
@@ -83,6 +84,7 @@ def main(argv: list[str] | None = None, *, fetcher: job.Fetcher | None = None) -
             args.day,
             fetch=grab,
             store=store_bars,
+            quarantine=store_quarantined,
             master=SecurityMaster(read_master().listings),
             calendar=calendar,
             symbols=args.symbols,
