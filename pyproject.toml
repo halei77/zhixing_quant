@@ -23,6 +23,7 @@ zx-daily = "zhixing_quant.sources.jobs.cli:main"
 zx-minute = "zhixing_quant.sources.jobs.minute_cli:main"
 zx-backtest = "zhixing_quant.backtest.cli:main"
 zx-site = "zhixing_quant.site.api:main"
+zx-backup = "zhixing_quant.backup.cli:main"
 
 [dependency-groups]
 dev = [

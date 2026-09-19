@@ -67,6 +67,26 @@ def site_recent_file(env: Mapping[str, str] | None = None) -> Path:
     return data_root(env) / "site" / "recent.json"
 
 
+BACKUP_ENV = "ZX_BACKUP_ROOT"
+
+
+def backup_dir(env: Mapping[str, str] | None = None) -> Path:
+    """备份根（ADR-0005 补充决定一）：网盘同步目录里那一个文件夹。
+
+    **没有默认值**，未配置就 `ValueError`——这不是偷懒，是这条路径的性质：数据根有"合理机器上就
+    在那儿"的位置，备份根的位置由网盘挂在哪决定，只有人知道。给一个默认值会造出第二种失败：
+    命令行跑通了、退出码 0、备份落在一个谁都没同步的目录里，而"没配备份"这件事永远不响。
+    `zx-backup` 判的是退出码 2（没开始），话要说成"没配备份根"而不是"没有要备份的文件"。
+    """
+    raw = (os.environ if env is None else env).get(BACKUP_ENV, "").strip()
+    if not raw:
+        raise ValueError(
+            f"没配备份根 {BACKUP_ENV}（ADR-0005 补充决定一）。备份根不设默认值："
+            "网盘挂在哪只有人知道，猜一个出来的目录不会有人同步它"
+        )
+    return Path(raw).expanduser()
+
+
 def repo_root() -> Path:
     """仓库根，由本文件位置反推：写死绝对路径会换机即废，也过不了路径扫描。"""
     return Path(__file__).resolve().parents[2]
