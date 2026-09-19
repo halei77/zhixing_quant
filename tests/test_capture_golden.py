@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 import capture_golden as cg  # noqa: E402  # tools/ 不在包内，按脚本路径导入
 
+from tests.fakes import FakeFrame, Recorder  # noqa: E402  # tests 是包，假帧在几个源测试间共用
 from zhixing_quant.sources.akshare.daily import daily_drafts  # noqa: E402
 from zhixing_quant.sources.rows import to_date  # noqa: E402
 
@@ -134,34 +135,35 @@ def test_ragged_rows_share_one_column_union_in_source_order(tmp_path: Path) -> N
     assert rows[0]["b"] is None and rows[1]["a"] is None
 
 
+WINDOW = (date(2024, 1, 2), date(2024, 1, 31))
+SYMBOLS = ("sh600519", "sz300750")
+
+
 def test_fetcher_keys_encode_the_window_and_the_symbol() -> None:
     """key 就是文件名，所以参数必须写在 key 里：换窗口=换 key，不覆盖已批准的样本。"""
-    fetchers = cg.build_fetchers(("20240102", "20240131"), ("sh600519", "sz300750"))
-    assert "stock_zh_a_daily__sh600519__20240102_20240131__hfq" in fetchers
-    assert "tool_trade_date_hist_sina" in fetchers
+    keys = cg.build_fetchers(WINDOW, SYMBOLS)
+    assert "stock_zh_a_daily__sh600519__20240102_20240131__hfq" in keys
+    assert "tool_trade_date_hist_sina" in keys
+    # 两所各一个 key：合并成一份样本就重放不出"某个交易所今天什么都没给"
+    assert "stock_info_sh_name_code__主板A股" in keys
+    assert "stock_info_sz_name_code__A股列表" in keys
 
 
-def test_each_symbol_binds_its_own_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_symbol_binds_its_own_arguments() -> None:
     """闭包捕获循环变量的经典事故：所有 key 都抓最后一只票，样本名字却全都对得上。"""
-    asked: list[dict[str, object]] = []
-
-    def fake(function: str, **kwargs: object) -> list[dict[str, Any]]:
-        if function == "stock_zh_a_daily":
-            asked.append(kwargs)
-        return []
-
-    monkeypatch.setattr(cg, "_fetch_akshare", fake)
-    fetchers = cg.build_fetchers(("20240102", "20240131"), ("sh600519", "sz300750"))
+    call = Recorder(*[[] for _ in cg.build_fetchers(WINDOW, SYMBOLS)])
+    fetchers = cg.build_fetchers(WINDOW, SYMBOLS, call=call)
     for key, fetcher in fetchers.items():
         assert fetcher() == [], key
-    assert len(asked) == 4  # 两只票 × raw/hfq
-    assert {(str(k["symbol"]), str(k["adjust"])) for k in asked} == {
+    daily = [k for k in call.kwargs if "adjust" in k]
+    assert len(daily) == 4  # 两只票 × raw/hfq
+    assert {(str(k["symbol"]), str(k["adjust"])) for k in daily} == {
         ("sh600519", ""),
         ("sh600519", "hfq"),
         ("sz300750", ""),
         ("sz300750", "hfq"),
     }
-    assert {str(k["start_date"]) for k in asked} == {"20240102"}
+    assert {str(k["start_date"]) for k in daily} == {"20240102"}
 
 
 def test_the_command_line_reports_a_failed_capture_by_its_exit_code(
@@ -170,11 +172,10 @@ def test_the_command_line_reports_a_failed_capture_by_its_exit_code(
     """定时任务与人都只看退出码：源挂了却 exit 0，等于把缺样本写进"成功"那一栏。"""
     monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
 
-    def boom(function: str, **_kwargs: object) -> list[dict[str, Any]]:
-        raise RuntimeError(f"{function} 不可达")
+    def boom(**_kwargs: object) -> FakeFrame:
+        raise RuntimeError("源不可达")
 
-    monkeypatch.setattr(cg, "_fetch_akshare", boom)
-    assert cg.main(["20240102", "20240131", "sh600519"]) == 1
+    assert cg.main(["20240102", "20240131", "sh600519"], call=boom) == 1
     assert "没抓到" in capsys.readouterr().err
     assert (tmp_path / "golden" / cg.MANIFEST_NAME).is_file()  # 失败也要留下可查的清单
 
@@ -184,6 +185,5 @@ def test_a_full_capture_exits_zero(
 ) -> None:
     """成功路径也要有人走一遍：退出码写反了，日报上"抓到"和"没抓到"就反了。"""
     monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
-    monkeypatch.setattr(cg, "_fetch_akshare", lambda *_args, **_kwargs: RAW)
-    assert cg.main(["20240102", "20240131", "sh600519"]) == 0
+    assert cg.main(["20240102", "20240131", "sh600519"], call=lambda **_k: FakeFrame(RAW)) == 0
     assert "需用户批准" in capsys.readouterr().out

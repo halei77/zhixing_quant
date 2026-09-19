@@ -19,10 +19,12 @@ import csv
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from zhixing_quant.config import golden_dir
+from zhixing_quant.sources.akshare import fetch
 
 #: 一行源数据。适配器收到的就是这个形状，样本落盘再读回来也必须是它。
 Row = Mapping[str, Any]
@@ -144,67 +146,58 @@ def write_manifest(records: Iterable[Record], path: Path) -> None:
 
 # --- 真实抓取（只有手动运行时才走到）------------------------------------------------
 
-
-def _fetch_akshare(function: str, **kwargs: object) -> Sequence[Row]:
-    """调 akshare 并把 DataFrame 转成行列表。
-
-    `import akshare` 待在这里而不是模块顶部：样本重放测试、CI 与任何不联网的场合都不该为
-    它付导入代价。akshare 没有类型标注，所以这里立刻落到 `list[dict]`——本模块往下没有
-    pandas 类型要标注。
-    """
-    from importlib import import_module
-
-    ak: Any = import_module("akshare")
-    frame: Any = getattr(ak, function)(**kwargs)
-    return [dict(row) for row in frame.to_dict(orient="records")]
+#: 日线一栏的两帧：`adjust` 参数与它在 key 里的名字。两帧都要落：`adj_factor` 是两者
+#: 相除得来的，只落一帧的样本重放不出因子，R005 就没有判据来源。
+FRAMES = (("", "raw"), ("hfq", "hfq"))
 
 
-def build_fetchers(window: tuple[str, str], symbols: tuple[str, ...]) -> dict[str, Fetcher]:
+def build_fetchers(
+    window: tuple[date, date], symbols: tuple[str, ...], *, call: fetch.AkCall | None = None
+) -> dict[str, Fetcher]:
     """这次抓取要落哪些样本：窗口与代码写在这一处，不散落在调用处。
 
-    不复权帧与后复权帧都要落：`adj_factor` 是两者相除得来的，只落一帧的样本重放不出因子，
-    R005 就没有判据来源。
+    真正发请求的是 `sources/akshare/fetch.py`——每日任务用的就是它。在这里再写一遍参数拼装
+    迟早漂：漂了的样子是"样本重放全绿、线上天天告警"，两边各自都测得过。
 
     key 的约定是 `<函数名>__<参数>`，双下划线分隔：key 直接可做文件名，参数一眼可见。
+    换窗口就是换 key，覆盖同名文件等于把一份已批准的样本悄悄换掉。
     """
     start, end = window
+    tag = f"{start:%Y%m%d}_{end:%Y%m%d}"
     fetchers: dict[str, Fetcher] = {
-        "tool_trade_date_hist_sina": lambda: _fetch_akshare("tool_trade_date_hist_sina"),
-        "stock_info_sh_name_code__主板A股": lambda: _fetch_akshare(
-            "stock_info_sh_name_code", symbol="主板A股"
-        ),
-        "stock_info_sz_name_code__A股列表": lambda: _fetch_akshare(
-            "stock_info_sz_name_code", symbol="A股列表"
-        ),
+        "tool_trade_date_hist_sina": partial(fetch.fetch_calendar, call=call),
     }
+    # `partial` 而不是闭包：闭包捕获循环变量会让所有 key 都抓最后一只票，而 key 的名字
+    # 全对得上——那种错只有 `partial` 的实参绑定才不会犯。
+    for function, group in fetch.LISTINGS:
+        fetchers[f"{function}__{group}"] = partial(fetch.listing_frame, function, group, call=call)
     for symbol in symbols:
-        fetchers[f"stock_zh_a_daily__{symbol}__{start}_{end}__raw"] = _daily_fetcher(
-            symbol, start, end, adjust=""
-        )
-        fetchers[f"stock_zh_a_daily__{symbol}__{start}_{end}__hfq"] = _daily_fetcher(
-            symbol, start, end, adjust="hfq"
-        )
+        for adjust, name in FRAMES:
+            fetchers[f"stock_zh_a_daily__{symbol}__{tag}__{name}"] = partial(
+                fetch.daily_frame, symbol, start, end, adjust=adjust, call=call
+            )
     return fetchers
 
 
-def _daily_fetcher(symbol: str, start: str, end: str, *, adjust: str) -> Fetcher:
-    """把参数绑成闭包的实参，而不是留给循环变量：后者会让所有 key 都抓最后一只票。"""
-    return lambda: _fetch_akshare(
-        "stock_zh_a_daily", symbol=symbol, start_date=start, end_date=end, adjust=adjust
-    )
-
-
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, call: fetch.AkCall | None = None) -> int:
     """`capture_golden.py [start end] [symbols,csv]`，默认抓 2024 年 1 月的两只票。
 
     默认窗口是写死在这里的：黄金样本报的是"源在某个已知窗口里给了什么形状"，窗口跟着日期
     每天变会让样本每次重抓都是新数据，漂移与更新就分不开了。
+
+    `call` 是抓取边界的注入点，测试用它换掉真网络；命令行上不暴露——手滑打错一个参数
+    就该去改代码，而不是让一个只写着 `--call fake` 的选项把"抓的是真响应"这句话变得含糊。
     """
     args = list(sys.argv[1:] if argv is None else argv)
-    window = (args[0], args[1]) if len(args) >= 2 else ("20240102", "20240131")
+    window = (
+        (datetime.strptime(args[0], "%Y%m%d").date(), datetime.strptime(args[1], "%Y%m%d").date())
+        if len(args) >= 2
+        else (date(2024, 1, 2), date(2024, 1, 31))
+    )
     symbols = tuple(args[2].split(",")) if len(args) >= 3 else ("sh600519", "sz300750")
     out_dir = golden_dir()
-    records = capture(build_fetchers(window, symbols), out_dir, captured_at=datetime.now())
+    fetchers = build_fetchers(window, symbols, call=call)
+    records = capture(fetchers, out_dir, captured_at=datetime.now())
     for record in records:
         print(f"{record['status']:5} {record['key']} rows={record['rows']}")
     bad = [r for r in records if r["status"] != "ok"]

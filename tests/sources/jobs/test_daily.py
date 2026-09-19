@@ -20,7 +20,7 @@ from zhixing_quant.quality.daily_report import DETAIL_TOP
 from zhixing_quant.quality.engine import GateOutcome
 from zhixing_quant.quality.facts import Violation
 from zhixing_quant.sources.jobs import daily as job
-from zhixing_quant.sources.rows import SourceSchemaError
+from zhixing_quant.sources.rows import Pair, SourceSchemaError
 
 DAY = date(2024, 1, 3)
 PREV = date(2024, 1, 2)
@@ -44,7 +44,7 @@ def bars(day: date, close: float) -> list[dict[str, object]]:
     ]
 
 
-def two_days(previous: float, today: float) -> job.Pair:
+def two_days(previous: float, today: float) -> Pair:
     raw = bars(PREV, previous) + bars(DAY, today)
     return raw, raw
 
@@ -53,7 +53,7 @@ def test_retry_succeeds_without_alerting() -> None:
     """限流后第二次就成：惊动人一次的告警，第二天就不会有人再看了。"""
     failures = [1]
 
-    def flaky() -> job.Pair:
+    def flaky() -> Pair:
         if failures:
             failures.pop()
             raise ConnectionResetError("连接重置")
@@ -73,7 +73,7 @@ def test_backoff_doubles_between_attempts() -> None:
     """免费源的失败大多是限流：等固定秒数等于用同样的节奏再撞三次。"""
     slept: list[float] = []
 
-    def always_fail() -> job.Pair:
+    def always_fail() -> Pair:
         raise TimeoutError("超时")
 
     got = job.with_retry(always_fail, "600519", attempts=3, backoff=2.0, sleep=slept.append)
@@ -85,7 +85,7 @@ def test_the_last_attempt_alerts_once_and_names_the_symbol() -> None:
     """验收 4 的"最终告警"：重试次数、最后错误、后果都要在正文里，不是一句"失败了"。"""
     alerts: list[tuple[str, str]] = []
 
-    def failing() -> job.Pair:
+    def failing() -> Pair:
         raise ConnectionError("断网")
 
     got = job.with_retry(
@@ -121,7 +121,7 @@ def test_the_window_carries_the_previous_trading_day_for_r007() -> None:
     """两日一批是 R007 能开火的前提：昨收只能由批次里上一日的行现算。"""
     asked: list[tuple[str, date, date]] = []
 
-    def spy(symbol: str, start: date, end: date) -> job.Pair:
+    def spy(symbol: str, start: date, end: date) -> Pair:
         asked.append((symbol, start, end))
         return two_days(100.0, 101.0)
 
@@ -145,7 +145,7 @@ def test_r007_actually_fires_on_a_two_day_batch() -> None:
 def test_a_skipped_symbol_does_not_lose_the_others() -> None:
     """一只票的网络失败牵连其余几千只，是采集任务最不能有的性质。"""
 
-    def fetch(symbol: str, _start: date, _end: date) -> job.Pair:
+    def fetch(symbol: str, _start: date, _end: date) -> Pair:
         if symbol == "bad":
             raise ConnectionError("断网")
         return two_days(100.0, 101.0)
@@ -186,7 +186,7 @@ def test_the_failure_list_is_capped_but_still_counts_everything(tmp_path: Path) 
 def test_run_uses_the_master_universe_and_honours_the_limit(tmp_path: Path) -> None:
     asked: list[str] = []
 
-    def fetch(symbol: str, _start: date, _end: date) -> job.Pair:
+    def fetch(symbol: str, _start: date, _end: date) -> Pair:
         asked.append(symbol)
         return two_days(100.0, 101.0)
 
@@ -213,7 +213,7 @@ def test_run_that_judges_nothing_alerts_and_is_not_ok(tmp_path: Path) -> None:
     """空报告照样落盘，但必须另响一声：定时任务里"写了文件"和"今天没问题"是两件事。"""
     alerts: list[str] = []
 
-    def fetch(_s: str, _a: date, _b: date) -> job.Pair:
+    def fetch(_s: str, _a: date, _b: date) -> Pair:
         raise ConnectionError("源不可用")
 
     result = job.run(
@@ -230,6 +230,108 @@ def test_run_that_judges_nothing_alerts_and_is_not_ok(tmp_path: Path) -> None:
     assert result.ok is False
     assert "今日无数据：2024-01-03" in alerts
     assert (tmp_path / "2024-01-03.md").is_file()
+
+
+def test_a_fatal_batch_alerts_even_when_the_day_otherwise_worked(
+    tmp_path: Path,
+) -> None:
+    """源给了一只票空表：那天判成了，但这只票一条都没进干净区，必须单独响一声。
+
+    混在"今日无数据"里不行——那只票出问题，和整个源出问题，是两条不同的处置。
+    """
+    alerts: list[tuple[str, str]] = []
+
+    def half_broken(code: str, _start: date, _end: date) -> Pair:
+        if code == "600520":
+            return [], []  # 空表：R006 判"本批无有效日期"
+        return two_days(100.0, 101.0)
+
+    master = SecurityMaster(
+        [
+            Listing(code="600519", name="贵州茅台", listed_on=date(2001, 8, 27)),
+            Listing(code="600520", name="测试二", listed_on=date(2001, 8, 27)),
+        ]
+    )
+    result = job.run(
+        DAY,
+        fetch=half_broken,
+        master=master,
+        calendar=CALENDAR,
+        directory=tmp_path,
+        alert=lambda t, b: alerts.append((t, b)),
+    )
+    assert result.ok and result.fatal
+    title, body = alerts[0]
+    assert title == "整批拒收：2024-01-03"
+    # 数量必须在正文里："一只出问题"和"全部出问题"差三个数量级，处置也完全不同
+    assert body.startswith("1 / 2 只票的批次被 FATAL 拦下")
+
+
+def test_a_broken_source_stops_instead_of_grinding_the_whole_pool() -> None:
+    """连败到熔断线就收工：4430 只 × 3 次 × 指数退避等于用十几个小时撞一堵墙。
+
+    免费源把这种撞法当作攻击，代价是用户的 IP。收工不等于掩盖——剩下的票照样进日报的
+    失败清单，只是原因写的是"没再抓取"而不是"抓不到"。
+    """
+    asked: list[str] = []
+
+    def dead(code: str, _start: date, _end: date) -> Pair:
+        asked.append(code)
+        raise ConnectionError("源不可用")
+
+    symbols = [f"{600000 + i}" for i in range(10)]
+    outcomes, skipped = job.collect(
+        DAY,
+        symbols,
+        fetch=dead,
+        master=MASTER,
+        calendar=CALENDAR,
+        attempts=1,
+        breaker=2,
+        sleep=lambda _s: None,
+        alert=lambda _t, _b: None,
+    )
+    assert asked == symbols[:2]
+    assert outcomes == []
+    assert [s.reason for s in skipped[:2]] == ["ConnectionError: 源不可用"] * 2
+    # 熔断后没去抓的票也要在清单上，但原因必须写成"没试"而不是"抓不到"
+    assert [s.symbol for s in skipped[2:]] == symbols[2:]
+    assert all("熔断" in s.reason and "ConnectionError" not in s.reason for s in skipped[2:])
+
+
+def test_a_success_resets_the_breaker_counter() -> None:
+    """熔断数的是**连**败：一只只坏、隔一只好，那是零散故障，源还活着。
+
+    不清零的话，"每三只里坏一只"的池子会在第 20 只停摆，而当天其实一只都没漏判。
+    """
+
+    def flaky(code: str, _start: date, _end: date) -> Pair:
+        if code in ("600511", "600513"):
+            raise ConnectionError("源不可用")
+        return two_days(100.0, 101.0)
+
+    outcomes, skipped = job.collect(
+        DAY,
+        ["600511", "600512", "600513", "600514"],
+        fetch=flaky,
+        master=MASTER,
+        calendar=CALENDAR,
+        attempts=1,
+        breaker=2,
+        sleep=lambda _s: None,
+        alert=lambda _t, _b: None,
+    )
+    assert len(outcomes) == 2 and len(skipped) == 2  # 四只全都试过
+
+
+def test_the_failure_section_tells_grabbed_and_never_tried_apart(tmp_path: Path) -> None:
+    """两种失败在日报上必须分开：4000 只"没试"混进 30 只"抓不到"，看的人只会修错地方。"""
+    skipped = [
+        job.Skipped(symbol="600519", reason="ConnectionError: 断网"),
+        job.Skipped(symbol="600520", reason="熔断：源连续失败，未再抓取"),
+    ]
+    _, body = job.publish(DAY, [], skipped=skipped, directory=tmp_path)
+    assert "重试后仍失败 1 只，熔断后没再抓取 1 只" in body
 
 
 # --- GateOutcome.for_day --------------------------------------------------------

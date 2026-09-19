@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from functools import partial
@@ -30,14 +30,9 @@ from zhixing_quant.quality import daily_report, gate_config
 from zhixing_quant.quality.engine import GateEngine, GateOutcome
 from zhixing_quant.quality.report import DataQualityReport
 from zhixing_quant.sources.akshare import daily as akshare_daily
-from zhixing_quant.sources.rows import SourceSchemaError
+from zhixing_quant.sources.rows import Pair, SourceSchemaError
 
-Rows = Sequence[Mapping[str, object]]
-#: 一组 (不复权, 后复权) 源行。抓取一次要同时带回两组：R002 的涨跌停判据看不复权价，
-#: 干净区存的是后复权价，两者只能一起交进来。
-Pair = tuple[Rows, Rows]
-
-#: 抓取边界：一只票、一个闭区间。
+#: 抓取边界：一只票、一个闭区间，返回 (不复权, 后复权) 两帧。
 Fetcher = Callable[[str, date, date], Pair]
 #: 告警边界：标题 + 正文。iOS 推送通道接在这里，本模块只调用不实现。
 Alert = Callable[[str, str], None]
@@ -66,8 +61,22 @@ class DayResult:
 
     @property
     def ok(self) -> bool:
-        """一只票都没判成 = 这次运行没成。空报告不能当"今天满分"。"""
-        return bool(self.outcomes)
+        """这次运行有没有判出东西。空报告不能当"今天满分"。
+
+        两种都不算判成：一只票都没产出批次（全网络失败），以及产出了批次却一行都没有
+        （源今天给的是空表——引擎里 R006 的"本批无有效日期"就是它）。后者尤其要拦：
+        它带着一个 FATAL 结果，`bool(outcomes)` 会为真，退出码于是替一个宕掉的源报成功。
+        """
+        return any(outcome.total for outcome in self.outcomes)
+
+    @property
+    def fatal(self) -> bool:
+        """有没有批次被整批拒收。
+
+        它不改变"运行成了没"——4430 只里有一只 FATAL 是那只票的事，全 FATAL 才是源的事。
+        两者在数量上差 3 个数量级，却共用同一个 FATAL 标记，所以告警里必须带数量。
+        """
+        return any(outcome.has_fatal for outcome in self.outcomes)
 
 
 def stdout_alert(title: str, body: str) -> None:
@@ -132,6 +141,7 @@ def collect(
     previous_days: int = 1,
     attempts: int = 3,
     backoff: float = 5.0,
+    breaker: int = 20,
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
 ) -> tuple[list[GateOutcome], list[Skipped]]:
@@ -140,12 +150,21 @@ def collect(
     `previous_days` 是往回带几个交易日：1 天够 R007；Step 3 做时间连续性检查时要更多。
     日历判不出上一日（样本区间的第一桶）时按单日批处理，此时 R007 不判——这一点由
     分母不变来保证可见：少了昨收的行仍然在批里，只是没有偏差可算。
+
+    `breaker` 是连败几只就收工：源整体宕掉时，4430 只 × 3 次 × 指数退避等于用十几个小时
+    去撞一堵墙，而免费源会把这种撞法当作攻击。剩下的票照样进日报的失败清单，所以收工
+    不是掩盖缺数，只是把"今天这个源不行"说得更早。
     """
     start = _window_start(calendar, day, previous_days)
     engine = GateEngine(gate_config.load(config.gate_config_file()), master, calendar)
     outcomes: list[GateOutcome] = []
     skipped: list[Skipped] = []
-    for symbol in symbols:
+    consecutive = 0
+    for position, symbol in enumerate(symbols):
+        if consecutive >= breaker:
+            left = symbols[position:]
+            skipped += [Skipped(symbol=s, reason=_BREAKER) for s in left]
+            break
         grabbed = with_retry(
             partial(fetch, symbol, start, day),
             symbol,
@@ -156,11 +175,18 @@ def collect(
         )
         if isinstance(grabbed, Skipped):
             skipped.append(grabbed)
+            consecutive += 1
             continue
+        consecutive = 0
         raw, hfq = grabbed
         drafts = akshare_daily.daily_drafts(raw, hfq, symbol=symbol)
         outcomes.append(engine.run(drafts).for_day(day))
     return outcomes, skipped
+
+
+#: 熔断之后没去抓的票，在日报的失败清单上写这一句。它们不是"抓不到"而是"没试"，
+#: 混进同一个原因里，看日报的人就会以为源只对其中一部分失败了。
+_BREAKER = "熔断：源连续失败，未再抓取"
 
 
 def _window_start(calendar: TradingCalendar, day: date, previous_days: int) -> date:
@@ -193,7 +219,12 @@ def publish(
 def _skipped_section(skipped: Sequence[Skipped]) -> str:
     """抓取失败清单：列前 `DETAIL_TOP` 只加总数。三千只票全列出来等于把日报撑爆。"""
     cap = daily_report.DETAIL_TOP
-    lines = ["", "## 抓取失败", "", f"- 重试后仍失败 {len(skipped)} 只（不计入上面的分母）："]
+    untouched = sum(1 for item in skipped if item.reason == _BREAKER)
+    failed = len(skipped) - untouched
+    headline = f"- 重试后仍失败 {failed} 只"
+    if untouched:
+        headline += f"，熔断后没再抓取 {untouched} 只"
+    lines = ["", "## 抓取失败", "", f"{headline}（都不计入上面的分母）："]
     lines += [f"- {item.symbol}：{item.reason}" for item in skipped[:cap]]
     if len(skipped) > cap:
         lines.append(f"- 其余 {len(skipped) - cap} 只同因，见任务日志")
@@ -210,7 +241,9 @@ def run(
     symbols: Sequence[str] | None = None,
     limit: int | None = None,
     directory: Path | None = None,
+    previous_days: int = 1,
     attempts: int = 3,
+    breaker: int = 20,
     sleep: Callable[[float], None] = time.sleep,
     alert: Alert = stdout_alert,
 ) -> DayResult:
@@ -230,18 +263,14 @@ def run(
         fetch=fetch,
         master=master,
         calendar=calendar,
+        previous_days=previous_days,
         attempts=attempts,
+        breaker=breaker,
         sleep=sleep,
         alert=alert,
     )
     report, body = publish(target, outcomes, skipped=skipped, directory=directory)
-    if not outcomes:
-        alert(
-            f"今日无数据：{target}",
-            f"股票池 {len(pool)} 只，一只都没判成（跳过 {len(skipped)} 只）。"
-            "日报已落盘，内容是空报告——别把它当「今天一切正常」。",
-        )
-    return DayResult(
+    result = DayResult(
         day=target,
         outcomes=tuple(outcomes),
         report=report,
@@ -249,3 +278,19 @@ def run(
         skipped=tuple(skipped),
         pool=len(pool),
     )
+    if not result.ok:
+        alert(
+            f"今日无数据：{target}",
+            f"股票池 {len(pool)} 只，一只都没判成（抓取失败 {len(skipped)} 只）。"
+            "日报已落盘，内容是空报告——别把它当「今天一切正常」。",
+        )
+    elif result.fatal:
+        # 判成了，但有票整批被拦：那只票今天不进干净区，而"一只"与"全部"的处置完全不同，
+        # 所以告警里带数量。
+        count = sum(1 for outcome in result.outcomes if outcome.has_fatal)
+        alert(
+            f"整批拒收：{target}",
+            f"{count} / {len(result.outcomes)} 只票的批次被 FATAL 拦下，一只都没进干净区。"
+            "原因见日报的 FATAL 栏（多半是源改了列名或给了空表）。",
+        )
+    return result

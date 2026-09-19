@@ -10,12 +10,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 
 
 class SourceSchemaError(ValueError):
     """源给了没见过的形状：列名全变、一行都没解析出来。"""
+
+
+#: 一组源行。**抓取层与适配层的共同词汇**，所以住在这里而不是某个源的子包里：
+#: `jobs.daily.Fetcher` 的返回值与 `akshare.daily.daily_drafts` 的入参必须是同一个形状，
+#: 各写一遍迟早漂成两份契约，而漂了的那份只会在真网络上出错——CI 里两边各自都"对"。
+Rows = Sequence[Mapping[str, object]]
+#: (不复权, 后复权) 两帧。R002 判涨跌停要看不复权价，干净区存后复权价，只能一起交进来。
+Pair = tuple[Rows, Rows]
 
 
 def to_float(value: object) -> float | None:

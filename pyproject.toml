@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 zx-task = "zhixing_quant.tasks.cli:main"
+zx-daily = "zhixing_quant.sources.jobs.cli:main"
 
 [dependency-groups]
 dev = [
