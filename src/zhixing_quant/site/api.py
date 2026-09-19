@@ -1,9 +1,10 @@
-"""站点壳：搜索 / 模板 / 生成 / 最近搜索四个端点（ADR-0013）。
+"""站点壳：一张页 + 四个端点（ADR-0013 决定 1、3、4）。
 
-壳里没有口径（ADR-0013 决定 5）：token 数、价格口径行、"盘上 N 天而模板要 M 天"那句缺口，全部
-由 `prompt.build` 的返回值原样搬进响应。这里只判三件事——口令（决定 3）、留痕（决定 4）、请求里的
-字段到调用的对应。写在这里的东西一旦被允许变多，站点就会长出第二套口径，而 ADR-0011 决定 3 那句
-"口径行由代码跟着配置生成，模板作者删不掉"就白立了。
+`/` 发 `site/static/` 里那三件静态件，`/api/*` 回数据。壳里没有口径（ADR-0013 决定 5）：token
+数、价格口径行、"盘上 N 天而模板要 M 天"那句缺口，全部由 `prompt.build` 的返回值原样搬进响应，
+页面只是把它们摆出来。这里只判三件事——口令（决定 3）、留痕（决定 4）、请求里的字段到调用的
+对应。写在这里的东西一旦被允许变多，站点就会长出第二套口径，而 ADR-0011 决定 3 那句"口径行由
+代码跟着配置生成，模板作者删不掉"就白立了。
 
 数据根与采集端同一个根（ADR-0012 决定 1）：站点读的是**发布过来**的干净区（ADR-0006 决定 1/2），
 不是另抓一份。所以这个进程不需要采集能力，也不许在生成之路上联网（ADR-0012 决定 2）。
@@ -22,6 +23,8 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from zhixing_quant import config
@@ -39,6 +42,9 @@ SEARCH_LIMIT = 20
 SEARCH_MAX = 50
 #: 06 §二 那句"固定口令"的环境变量名（ADR-0013 决定 3）。
 TOKEN_ENV = "ZX_SITE_TOKEN"
+#: 前端那三件静态件的位置：包内目录，路径由本文件反推（与 `config.repo_root()` 同一手法——
+#: 写死绝对路径换机即废，也过不了 02 §六 的路径扫描）。
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 #: 鉴权中间件的下一个处理器。这一版 FastAPI 没导出这个别名，所以自己写。
 _Dispatch = Callable[[Request], Awaitable[Response]]
@@ -136,6 +142,18 @@ def create_app(
         if not request.url.path.startswith("/api") or _authorized(request, token):
             return await call_next(request)
         return Response(status_code=401, content="口令不对")
+
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
+
+    @app.get("/")
+    def index() -> FileResponse:
+        """站点那张页（06 §八-1 的全流程在这里走）。
+
+        它不在 `/api` 前缀下，于是中间件天然放行（决定 3 那句"回壳本身的不必"）：口令框就画在页
+        上，被拒的人得先看见这张页，才知道要往里面填什么。服务端不注口令——它不认人，无会话无
+        账号，代价记在 ADR-0013 代价六。
+        """
+        return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/api/search")
     def api_search(q: str, limit: int = Query(SEARCH_LIMIT, ge=1, le=SEARCH_MAX)) -> Any:

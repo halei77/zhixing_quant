@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- 知行 · 提示词站点（06 §四 一期、§八-1/5）。零依赖、无构建步骤：能 fetch 的浏览器就够了。
+     这里不放任何口径：token 估算、价格口径、"盘上 N 天而模板要 M 天"那句缺口，全部由服务器给
+     （ADR-0013 决定 5）。页面上出现的每个数字都读自 /api/* 的响应体。 -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>知行 · 提示词站点</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>知行 · 提示词站点</h1>
+      <div id="auth">
+        <label for="token">口令</label>
+        <input id="token" type="password" placeholder="ZX_SITE_TOKEN" autocomplete="off" />
+        <span id="auth-state">未验证</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="pick">
+        <h2>1 · 选股</h2>
+        <input id="search" type="search" placeholder="代码 / 名称 / 拼音首字母，如 600519、贵州、gzmt" autocomplete="off" />
+        <ul id="hits" class="list"></ul>
+        <h3>最近搜索</h3>
+        <ul id="recent" class="list"></ul>
+        <p id="symbol" class="muted">还没选票</p>
+      </section>
+
+      <section id="setup">
+        <h2>2 · 选模板</h2>
+        <select id="templates"></select>
+        <p id="template-note" class="muted"></p>
+        <label for="asof">截止日期（可空＝今天）</label>
+        <input id="asof" type="date" />
+        <button id="generate" type="button">生成提示词</button>
+      </section>
+
+      <section id="out">
+        <h2>3 · 预览与复制</h2>
+        <p id="meter"><span id="tokens">—</span> token<span id="warn" class="warn"></span></p>
+        <button id="copy" type="button">一键复制</button>
+        <span id="status" class="muted"></span>
+        <pre id="preview" class="preview">选一只票、一个模板，然后生成。</pre>
+      </section>
+    </main>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -165,13 +166,62 @@ def client(trace: Path) -> TestClient:
 # ── 决定 3：口令 ──────────────────────────────────────────────────────────────
 
 
-def test_a_non_api_path_is_not_gated(trace: Path) -> None:
-    """静态壳不鉴权（决定 3）：口令是为了不让公网把全市场扫一遍，壳本身不是数据。
+def test_the_page_and_its_assets_are_public(trace: Path) -> None:
+    """静态壳不鉴权（决定 3）：口令是为了不让公网把全市场扫一遍，页本身不是数据。
 
-    现在是 404 而不是 200——前端页面是下一件事。这条判的是"它没被挡在门口"：404 说明请求
-    走到了路由，401 才说明走到了中间件的拒绝分支。
+    页面上就有口令输入框，被拒的人得先看见它才能填——把 `/` 也 gate 掉的话，第一次访问的人
+    对着一个 401 的空白页，永远走不进 06 §八-1 那条流程。
     """
-    assert make_client(trace, headers={}).get("/assets/app.js").status_code == 404
+    anonymous = make_client(trace, headers={})
+    page = anonymous.get("/")
+    assert page.status_code == 200
+    assert 'id="preview"' in page.text
+    assert TOKEN not in page.text
+    for asset in ("/assets/app.js", "/assets/style.css"):
+        served = anonymous.get(asset)
+        assert served.status_code == 200, asset
+        assert TOKEN not in served.text, "静态件是公用的、明文可取的，口令的值一个字符都不许写进去"
+
+
+def test_no_asset_path_escapes_the_package_directory(trace: Path) -> None:
+    """`/assets/../…` 的三种写法都拿不到包里的其它文件：这一格是公网服务，路径即攻击面。
+
+    `%2e%2e` 与 `..%2f` 分开写：浏览器与 http 客户端各自会规范化一部分，只测一种的话，另一种
+    到底是谁挡住的都说不清。
+    """
+    anonymous = make_client(trace, headers={})
+    for sneaky in ("/assets/../config.py", "/assets/%2e%2e/config.py", "/assets/..%2fconfig.py"):
+        response = anonymous.get(sneaky)
+        assert response.status_code == 404, sneaky
+        assert "parquet_dir" not in response.text
+
+
+def test_the_page_writes_text_and_never_markup() -> None:
+    """票名与提示词正文一律走 `textContent`：那两段文字一个来自 akshare、一个来自表格里的数据。
+
+    `innerHTML` 把"数据"当"标记"读，是这一层唯一能把外部内容变成代码的路。页面没有账号也没有
+    会话，口令就存在 `sessionStorage` 里——一次 XSS 换走的正是那串东西（代价六）。所以这条
+    不是风格检查：它挡住的是这个站点唯一一条提权路径。
+    """
+    script = (api.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "innerHTML" not in script
+    assert "document.write" not in script
+    assert script.count("textContent") >= 5
+
+
+def test_every_id_the_script_reaches_for_exists_in_the_page() -> None:
+    """JS 里每个 `$("x")` 都要在 HTML 里有 `id="x"`：改名只改一边时浏览器不报错，只白屏。
+
+    这条是这一层唯一能做的集成判定——没有浏览器可跑。反向（HTML 里的 id 全被用到）不判：
+    `#out`、`#pick` 这类是排版容器，不是引用点。下限那句是防空转：正则一旦不匹配，前两条
+    断言就集体变成真。
+    """
+    script = (api.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    page = (api.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    wanted = set(re.findall(r'\$\("([a-z][\w-]*)"\)', script))
+    declared = set(re.findall(r'id="([\w-]+)"', page))
+    assert len(wanted) >= 12, f"正则没抓到东西，这条测试在空转：{sorted(wanted)}"
+    assert wanted - declared == set()
 
 
 @pytest.mark.parametrize(
