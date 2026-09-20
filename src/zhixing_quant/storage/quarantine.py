@@ -43,11 +43,17 @@ _ARRAYS = 3
 
 @dataclass(frozen=True)
 class QuarantineReport:
-    """一次落隔离区的账。`recorded=0` 而 `entries>0` 就是"这些条目盘上已经有了"。"""
+    """一次落隔离区的账。`recorded=0` 而 `entries>0` 就是"这些条目盘上已经有了"。
+
+    `total` 是另一个口径：那天那个文件里**一共**几条，与这次交来几条无关。日报此前只有前三个
+    数，于是"这次运行没拒收"被写成了"今天没有拒收条目"，而同一句话指着的文件里有 2 条前一跑
+    留下的行（独立审计 O4）。两个口径分开摆，那句"没有"才有出处。
+    """
 
     entries: int
     recorded: int
     rewritten: int
+    total: int
 
 
 def entry_of(draft: BarDraft, violations: Sequence[Violation]) -> Entry:
@@ -78,26 +84,31 @@ def entry_of(draft: BarDraft, violations: Sequence[Violation]) -> Entry:
 def store_quarantined(
     rows: Sequence[QuarantinedRow], run_on: date, *, root: Path | None = None
 ) -> QuarantineReport:
-    """落一次运行的隔离条目。空批次什么都不做——不建目录，更不建一个空文件。
+    """落一次运行的隔离条目。空批次不改盘——不建目录，更不建一个空文件。
 
     收的是门禁的输出（`GateOutcome.quarantined`）而不是本模块的 `Entry`：把"一条拒收变成一行"
     这件事留在写盘这一处，任务层就不必替它排一次列序（排错了没人会在日报上看出来）。
 
     不兜落盘异常：这里没有"今天没有拒收"和"今天没记下拒收"两种结果的容身之处，让磁盘错误冒到
     退出码，比静默留下一份少了几条证据的日报好（ADR-0008 决定 5）。
+
+    空批次也要把那个文件读一次：不读，`total` 就没有出处，日报只能说"这次运行没拒收"，而"今天
+    累计几条"是另一件事（O4）。读不改盘——`partition.read` 遇到不存在的文件给空列表。
     """
     entries = [entry_of(row.draft, row.violations) for row in rows]
-    if not entries:
-        return QuarantineReport(entries=0, recorded=0, rewritten=0)
     path = layout.quarantine_path(run_on, root=root)
     with duckdb.connect() as con:
         existing = partition.read(con, path, layout.QUARANTINE_NAMES, _from_row)
+        if not entries:
+            return QuarantineReport(entries=0, recorded=0, rewritten=0, total=len(existing))
         merged, recorded = _merge(existing, entries)
         rewritten = 0
         if merged != existing:
             partition.rewrite(con, path, layout.QUARANTINE_COLUMNS, merged)
             rewritten = 1
-    return QuarantineReport(entries=len(entries), recorded=recorded, rewritten=rewritten)
+    return QuarantineReport(
+        entries=len(entries), recorded=recorded, rewritten=rewritten, total=len(merged)
+    )
 
 
 def entries_on(run_on: date, *, root: Path | None = None) -> tuple[Entry, ...]:

@@ -225,9 +225,24 @@ def test_a_row_without_a_date_sits_next_to_one_with(tmp_path: Path) -> None:
 def test_an_empty_batch_creates_no_directory_and_no_file(tmp_path: Path) -> None:
     """干净的几天不该在数据根里长出 `quarantine/`：那会让"今天有没有拒收"看起来像个目录问题。"""
     report = quarantine.store_quarantined([], RUN, root=tmp_path)
-    assert report == quarantine.QuarantineReport(entries=0, recorded=0, rewritten=0)
+    assert report == quarantine.QuarantineReport(entries=0, recorded=0, rewritten=0, total=0)
     assert entries(tmp_path) == ()  # 文件不在就是空，不抛：那几天确实什么都没有
     assert not tmp_path.exists() or list(tmp_path.rglob("*")) == []
+
+
+def test_an_empty_batch_still_counts_what_the_day_already_holds(tmp_path: Path) -> None:
+    """O4 的出处：`entries=0` 说的是这次运行，而那一天的文件里可能已经躺着前一跑的 2 条。
+
+    日报要说"当日累计几条"，这个数只能从盘上来。空批次不读文件就等于让日报去猜，而"今天没
+    拒收"与"今天已经拒收过两条"在猜错时长得一模一样。
+    """
+    quarantine.store_quarantined([row()], RUN, root=tmp_path)
+    quarantine.store_quarantined([row(symbol="600520")], RUN, root=tmp_path)
+
+    report = quarantine.store_quarantined([], RUN, root=tmp_path)
+    assert (report.entries, report.recorded, report.rewritten, report.total) == (0, 0, 0, 2)
+    assert file_on(tmp_path).stat().st_size  # 读不改盘：文件还是那一家的，一条没多
+    assert len(entries(tmp_path)) == 2
 
 
 def test_no_partial_file_is_left_behind(tmp_path: Path) -> None:

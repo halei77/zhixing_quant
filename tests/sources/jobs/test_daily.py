@@ -37,7 +37,7 @@ PREV = date(2024, 1, 2)
 CALENDAR = TradingCalendar([PREV, DAY, date(2024, 1, 4), date(2024, 1, 5)])  # 周四、周五
 #: 不关心落盘的测试用这两个 sink：它们问的是判定与告警，不是磁盘上有没有文件。
 NO_LANDING = WriteReport(0, 0, 0, 0)
-NO_QUARANTINE = QuarantineReport(0, 0, 0)
+NO_QUARANTINE = QuarantineReport(0, 0, 0, 0)
 MASTER = SecurityMaster([Listing(code="600519", name="贵州茅台", listed_on=date(2001, 8, 27))])
 
 
@@ -728,6 +728,37 @@ def test_the_report_points_at_the_quarantine_file(tmp_path: Path) -> None:
         directory=tmp_path / "reports",
     )
     assert "1 条重跑前就已在盘上" in second.markdown
+
+
+def test_a_clean_run_after_a_rejecting_one_speaks_for_itself_not_for_the_day(
+    tmp_path: Path,
+) -> None:
+    """O4 的现场还原：前一趟拒收过 1 条，后一趟一条没有——"今天没有拒收条目"在这天是假话。
+
+    独立审计在真数据根上撞到的就是这个形状：`reports/2026-09-18.md` 说没有，而同一句话指着的
+    那个文件里有 2 行。一天可以跑好几趟，而隔离区按运行日落成一个文件，所以日报只能说清两件
+    事："这次运行几条"与"那天累计几条"。把前者写成后者，报告与它自己指的路径互相打脸。
+    """
+
+    def markdown(fetch: Any) -> str:
+        return job.run(
+            DAY,
+            fetch=fetch,
+            store=_no_landing,
+            quarantine=quarantine_landing(tmp_path),
+            master=MASTER,
+            calendar=CALENDAR,
+            symbols=["600519"],
+            directory=tmp_path / "reports",
+        ).markdown
+
+    dirty = markdown(lambda *_a: broken_previous())
+    assert "新记 1/1 条拒收条目" in dirty
+    assert "当日累计 1 条" in dirty
+
+    clean = markdown(lambda *_a: two_days(100.0, 101.0))
+    assert "今天没有拒收条目" not in clean
+    assert "本次运行没有拒收条目（当日累计 1 条" in clean
 
 
 # --- GateOutcome.for_day --------------------------------------------------------

@@ -237,11 +237,15 @@ def sum_quarantines(reports: Sequence[QuarantineReport]) -> QuarantineReport:
 
     与干净区不同，这里不能相加出一个"累计"：一天只有一个隔离区文件，各次调用的账都是对同一个
     文件的读写。相加有意义的是条目数与新记数，`rewritten` 因此只表示"改了几次文件"。
+
+    `total` 是那个文件的行数，相加会变成"同一批行被数了 N 遍"：每只票落盘时读写的都是同一个
+    文件，后一批看到的行数含着前一批。合批只增不减，所以取最大就是最终那份。
     """
     return QuarantineReport(
         entries=sum(r.entries for r in reports),
         recorded=sum(r.recorded for r in reports),
         rewritten=sum(r.rewritten for r in reports),
+        total=max((r.total for r in reports), default=0),
     )
 
 

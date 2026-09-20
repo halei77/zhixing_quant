@@ -22,7 +22,7 @@ from zhixing_quant.storage.write import WriteReport
 DAY = date(2024, 1, 19)
 #: 绝大多数版式测试不关心落盘那两行，给它们"什么都没写"的账；落盘行自己有专门的测试。
 NO_LANDED = WriteReport(0, 0, 0, 0)
-NO_RECORDS = QuarantineReport(0, 0, 0)
+NO_RECORDS = QuarantineReport(0, 0, 0, 0)
 
 
 def _draft(**over: object) -> BarDraft:
@@ -199,22 +199,48 @@ def test_nothing_at_all_landed_gets_its_own_sentence() -> None:
 
 def test_the_quarantine_line_names_the_file_a_reader_can_open() -> None:
     """抽样只有五条，所以"全量在哪"必须写在日报上：那一句路径是 04 §四 唯一的出口。"""
-    body = dr.render(_report_of(_outcome()), [_outcome()], {}, NO_LANDED, QuarantineReport(2, 2, 1))
+    body = dr.render(
+        _report_of(_outcome()), [_outcome()], {}, NO_LANDED, QuarantineReport(2, 2, 1, 2)
+    )
     assert "隔离区：新记 2/2 条拒收条目" in body
+    assert "当日累计 2 条" in body
     assert "quarantine/2024-01-19.parquet" in body
 
 
 def test_a_quarantine_rerun_reports_that_nothing_new_was_recorded() -> None:
-    """`recorded=0` 要说成"重跑幂等"：写成"新记 0/3 条"看起来像落盘坏了。"""
-    body = dr.render(_report_of(_outcome()), [_outcome()], {}, NO_LANDED, QuarantineReport(3, 0, 0))
+    """`recorded=0` 要说成"重跑幂等"：写成"新记 0/3 条"看起来像落盘坏了。
+
+    `total` 故意给成一个比 `entries` 大的数（7 > 3）：这一行同时报"这次几条"和"那天累计几条"，
+    两个数相等时测试分不清日报读的是哪一个。
+    """
+    body = dr.render(
+        _report_of(_outcome()), [_outcome()], {}, NO_LANDED, QuarantineReport(3, 0, 0, 7)
+    )
     assert "隔离区：3 条重跑前就已在盘上" in body
     assert "未改动文件" in body
+    assert "当日累计 7 条" in body
+
+
+def test_a_quiet_run_does_not_declare_the_whole_day_clean() -> None:
+    """O4：14:00 那趟拒收过 2 条，16:12 那趟一条没有——"今天没有拒收条目"在这天是假话。
+
+    日报的每一句都要能指出出处，而这里的出处就是那个被指着的路径：文件里有 2 行，句子却说没有。
+    分成"本次运行"与"当日累计"两个口径，两句才各自为真。
+    """
+    body = dr.render(
+        _report_of(_outcome()), [_outcome()], {}, NO_LANDED, QuarantineReport(0, 0, 0, 2)
+    )
+    assert "今天没有拒收条目" not in body
+    assert "本次运行没有拒收条目（当日累计 2 条" in body
 
 
 def test_a_day_without_rejections_still_says_where_the_quarantine_is() -> None:
-    """ "今天没有拒收"与"今天没记下拒收"在日报上要能分开，所以那句路径一直都在。"""
+    """ "今天没有拒收"与"今天没记下拒收"在日报上要能分开，所以那句路径一直都在。
+
+    只有 `total` 也是 0 时，"今天"这个口径才敢说：那次运行之后文件里确实一行没有。
+    """
     body = dr.render(_report_of(_outcome()), [_outcome()], {}, NO_LANDED, NO_RECORDS)
-    assert "隔离区：今天没有拒收条目" in body
+    assert "本次运行没有拒收条目（当日累计 0 条" in body
 
 
 def test_a_quarantine_sample_carries_rule_ids_and_raw_values() -> None:

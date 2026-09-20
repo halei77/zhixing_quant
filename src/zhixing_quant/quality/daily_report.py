@@ -166,20 +166,26 @@ def _landed_line(landed: WriteReport) -> str:
 def _quarantine_line(day: date, quarantined: QuarantineReport) -> str:
     """隔离区落盘那行：把 04 §四 的"全量在隔离区可查"落到一个具体文件上。
 
-    三种情形分别是三件事：今天没拒收任何行、拒收了但盘上已经有（重跑幂等）、真的新记了几条。
+    "这次运行"与"那一天"是两本账（独立审计 O4）：一天可以跑好几趟，而隔离区按运行日落成一个
+    文件。只报前者却写成"今天没有拒收条目"，指着的又是那个装着前一跑 2 行的文件——读者不必推理
+    就能抓到日报自相矛盾。所以这一行无论哪种情形都带上"当日累计"那个数，它来自 `total`，也就是
+    落盘之后那个文件的真实行数。
+
+    三种情形分别是三件事：这次没拒收任何东西、拒收了但盘上已经有（重跑幂等）、真的新记了几条。
     把第三种写成"见隔离区"是要人自己去猜有没有写进去，而第二种不写清楚就等于宣称"重跑会重复记"。
     """
     path = layout.quarantine_path(day)
+    total = f"当日累计 {quarantined.total:,} 条"
     if not quarantined.entries:
-        return f"- 隔离区：今天没有拒收条目（全量可查于 `{path}`）"
+        return f"- 隔离区：本次运行没有拒收条目（{total}，全量可查于 `{path}`）"
     if not quarantined.recorded:
         return (
             f"- 隔离区：{quarantined.entries:,} 条重跑前就已在盘上"
-            f"（幂等，未改动文件；全量见 `{path}`）"
+            f"（幂等，未改动文件；{total}，全量见 `{path}`）"
         )
     return (
         f"- 隔离区：新记 {quarantined.recorded:,}/{quarantined.entries:,} 条拒收条目，"
-        f"全量可查于 `{path}`"
+        f"{total}，全量可查于 `{path}`"
     )
 
 

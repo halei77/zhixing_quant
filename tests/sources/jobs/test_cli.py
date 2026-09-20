@@ -63,7 +63,7 @@ def test_a_clean_run_exits_zero_and_prints_the_report(
     # 两票 × 两日 = 4 行，而日报的分母只有报告日那 2 行——两个数不同，才说明各报各的。
     assert (data_root / "data/daily/year=2024/symbol=600519.parquet").is_file()
     assert "- 进干净区：新增 4 行" in out
-    assert "隔离区：今天没有拒收条目" in out
+    assert "隔离区：本次运行没有拒收条目（当日累计 0 条" in out
 
 
 def test_a_rejected_row_lands_in_the_quarantine_file(data_root: Path) -> None:
