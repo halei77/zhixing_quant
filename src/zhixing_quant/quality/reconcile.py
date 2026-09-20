@@ -177,6 +177,22 @@ def reconcile_day(
     return tuple(out)
 
 
+def daily_gap(minute_bars: Sequence[Bar], daily: Bar | None) -> float | None:
+    """合成日K 的成交量相对日线的**有符号**偏差（百分数，负 = 分钟侧偏少）。
+
+    与 `reconcile_day` 里那条 `volume` 判据同源，但带符号：判据要的是"超没超容差"（取绝对值），
+    全量重扫要的是"偏哪一边"——实测 3,895 个组合里偏差**恒为负**这件事，只有带符号才看得见，
+    而"恒为负"恰恰是"源少给了"与"两边随机噪声"的分界。
+
+    任何一边缺、或日线量为 0 时给 None：那是"问不出这个数"，不是"偏差为 0"。
+    """
+    if daily is None or not minute_bars or not daily.volume:
+        return None
+    synthetic = daily_from_minutes(minute_bars)
+    assert synthetic is not None  # 上面已保证非空
+    return (synthetic.volume - daily.volume) / daily.volume * 100.0
+
+
 def _relative(got: float, want: float) -> float:
     """相对偏差（比例，0.0864 = 8.64%，全量实测的最大一档）。
 

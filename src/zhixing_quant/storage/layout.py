@@ -231,12 +231,17 @@ def dataset_dir(dataset: str, root: Path | None = None) -> Path:
     return (config.parquet_dir() if root is None else root) / dataset
 
 
+#: 分区文件名里代码那一段的前缀。`partition_path` 用它写，`dataset_symbols` 用它读——
+#: 一个形状两处认，布局改名时不会有一边安静地扫到空集合。
+_SYMBOL_PREFIX = "symbol="
+
+
 def partition_path(
     symbol: str, year: int, *, dataset: str = DAILY, root: Path | None = None
 ) -> Path:
     """一只票一年的文件。`symbol=NNNNNN.parquet` 这个写法照 ADR-0003 决定 1 原样落地。"""
     code = normalize_code(symbol)
-    return dataset_dir(dataset, root) / f"year={year}" / f"symbol={code}.parquet"
+    return dataset_dir(dataset, root) / f"year={year}" / f"{_SYMBOL_PREFIX}{code}.parquet"
 
 
 def partitions(
@@ -252,6 +257,25 @@ def partitions(
 def year_of(path: Path) -> int:
     """从 `year=YYYY` 目录名取年份。分区是代码建的，解不出来就是目录被人手改过。"""
     return int(path.parent.name.removeprefix("year="))
+
+
+def symbol_of(path: Path) -> str:
+    """从 `symbol=NNNNNN.parquet` 文件名取代码。与 `year_of` 是同一对里的那个。"""
+    return path.stem.removeprefix(_SYMBOL_PREFIX)
+
+
+def dataset_symbols(dataset: str, *, root: Path | None = None) -> tuple[str, ...]:
+    """一个 dataset 在盘上有行的全部代码，去重升序。
+
+    从 `dataset_partitions` 的结果反解而不是再 glob 一遍：布局的知识只许住在 `layout`，读的一侧
+    自己拼 `symbol=*` 的话，布局一改它就扫到空集合，而"这条管道还没数据"与"目录改名了"在结果里
+    长得一模一样。
+
+    给全量重扫（`tools/reconcile_history.py`）当票池。它审的是**已经落盘的东西**，一次抓取都不
+    发起，所以 ADR-0009 代价四那句"池子范围待裁决前只用显式 `--symbols` 跑小样"管不到它——
+    那句防的是替用户决定跑多大，不是防人看盘上已经有什么。
+    """
+    return tuple(sorted({symbol_of(p) for p in dataset_partitions(dataset, root=root)}))
 
 
 def dataset_partitions(dataset: str, *, root: Path | None = None) -> tuple[Path, ...]:
