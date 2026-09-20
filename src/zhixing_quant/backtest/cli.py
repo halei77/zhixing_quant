@@ -112,25 +112,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_strategy(dotted: str) -> Strategy:
-    """`包.模块:类名` → 一个实例。没有默认策略：装一个"看起来会动"的桩来自欺。"""
+def load_strategy(dotted: str) -> Callable[[], Strategy]:
+    """`包.模块:类名` → **造策略的函数**，不是一个策略实例。
+
+    交出去的是工厂：一次运行要跑三档成本，而每一档必须从一个没被问过话的实例开始。共用一个
+    实例时，×0.5 那一跑已经把有状态策略的内部计数改写完，作为主报告的那一档 ×1.0 继承的是
+    "做过一遍"的策略——成本缩放只动费率，本来不可能改变成交与配对，于是那一格的数字跟着
+    `FACTORS` 的排列顺序走（独立审计 B1）。
+    """
     module_name, _, class_name = dotted.partition(":")
     if not module_name or not class_name:
         raise ScopeError(f"策略要写成 模块:类名，收到 {dotted!r}")
     try:
-        factory: Any = getattr(importlib.import_module(module_name), class_name)
+        candidate: Any = getattr(importlib.import_module(module_name), class_name)
     except ImportError as exc:
         raise ScopeError(f"导入不了 {module_name}：{exc}") from exc
     except AttributeError as exc:
         raise ScopeError(f"{module_name} 里没有 {class_name}：{exc}") from exc
+
+    def build() -> Strategy:
+        built: Strategy = candidate()
+        return built
+
     try:
-        strategy: Strategy = factory()
+        prototype = build()
     except TypeError as exc:
         # 需要构造参数的策略是 Step 7 候选池的事（那一步要先定义"参数怎么进台账"）。
         raise ScopeError(f"{dotted} 不能无参构造：这一步的策略必须零参数，{exc}") from exc
-    if not callable(getattr(strategy, "signals", None)) or not getattr(strategy, "name", ""):
+    if not callable(getattr(prototype, "signals", None)) or not getattr(prototype, "name", ""):
         raise ScopeError(f"{dotted} 不是策略：既要有 name，也要有 signals(view)")
-    return strategy
+    return build
 
 
 def check_dataset(dataset: str) -> str:
@@ -453,9 +464,9 @@ def main(argv: Sequence[str] | None = None, *, now: Callable[[], datetime] = dat
     try:
         dataset = check_dataset(args.dataset)
         check_range(args.start, args.end)
-        strategy = load_strategy(args.strategy)
+        make_strategy = load_strategy(args.strategy)
         con = db.connect(config.taskdb_file())
-        return _execute(args, strategy=strategy, dataset=dataset, store=Store(con), now=now)
+        return _execute(args, strategies=make_strategy, dataset=dataset, store=Store(con), now=now)
     except (
         ScopeError,
         spec.BacktestConfigError,
@@ -476,17 +487,19 @@ def main(argv: Sequence[str] | None = None, *, now: Callable[[], datetime] = dat
 def _execute(
     args: argparse.Namespace,
     *,
-    strategy: Strategy,
+    strategies: Callable[[], Strategy],
     dataset: str,
     store: Store,
     now: Callable[[], datetime],
 ) -> int:
     assumptions = spec.load(config.backtest_config_file())
+    # 台账与报告要的是"哪套策略"，不是那三个跑过的实例之一，所以另起一个不喂K线的实例来拿名字。
+    name = strategies().name
     if args.task is not None:
         # 先验一票：跑完几分钟才发现任务号是敲错的，那几分钟白烧。抛出去就是退出码 3。
         store.get_task(args.task)
     params = params_hash(
-        strategy=strategy.name,
+        strategy=name,
         version=args.version,
         dataset=dataset,
         start=args.start,
@@ -502,8 +515,12 @@ def _execute(
     bands = _bands(args.end, prev)
     blind = blind_days(minute, prev)
     runs = {
+        # 每档一个新实例：三档是三个独立实验，共用的话后一档读到的是前一档用过的策略（B1）。
         factor: run(
-            bars, strategy=strategy, assumptions=assumptions.with_cost_scaled(factor), bands=bands
+            bars,
+            strategy=strategies(),
+            assumptions=assumptions.with_cost_scaled(factor),
+            bands=bands,
         )
         for factor in FACTORS
     }
@@ -516,7 +533,7 @@ def _execute(
     out.mkdir(parents=True)
     row = _register(
         store,
-        strategy=strategy.name,
+        strategy=name,
         version=args.version,
         task=args.task,
         start=args.start,
@@ -531,7 +548,7 @@ def _execute(
         render(
             page.Report(
                 identity=Identity(
-                    strategy=strategy.name,
+                    strategy=name,
                     version=args.version,
                     params_hash=row.params_hash,
                     backtest_id=row.id,
@@ -565,7 +582,7 @@ def _execute(
     (out / "equity.csv").write_text(equity_csv(result), encoding="utf-8")
     expectancy = page.NA if base.expectancy is None else f"{base.expectancy:+.4f} 元"
     print(
-        f"#{row.id} 第 {row.run_no} 次回测 · {strategy.name} v{args.version} · "
+        f"#{row.id} 第 {row.run_no} 次回测 · {name} v{args.version} · "
         f"{row.status_label} · 回合 {base.trips} · 期望 {expectancy}"
     )
     print(f"报告：{out / 'report.md'}")

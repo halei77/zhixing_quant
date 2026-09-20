@@ -11,13 +11,16 @@
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from tests.fakes import Scripted, bar, minutes, snapshot_root
 from zhixing_quant import config
 from zhixing_quant.backtest import cli
+from zhixing_quant.backtest.engine import Signal, View
 from zhixing_quant.backtest.limits import PriceBand
+from zhixing_quant.backtest.spec import Side
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Listing, SecurityMaster
 from zhixing_quant.storage import layout
@@ -63,6 +66,28 @@ class Toggler(Scripted):
 
     def __init__(self) -> None:
         super().__init__({("600519", 0): "sell", ("600519", 2): "buy"})
+
+
+class FirstRoundOnly:
+    """做过一轮就不动的策略：状态记在实例身上，不看 `view.index`。
+
+    `Toggler` 的剧本按"该票第几根"给信号，问多少次答的都是同一格，所以它是无状态的——三档
+    共用一个实例也测不出差别。这一只不同：第 1 次被问卖、第 2 次被问买，之后沉默，于是
+    "这一档是不是第一次跑"直接写进成交笔数里。
+    """
+
+    name = "first_round_only"
+
+    #: 第几次被问 → 做什么。卖在买前：底仓 3 手当日可卖，反过来的话第一笔买会被 T+1 拒掉。
+    PLAN: ClassVar[dict[int, Side]] = {1: "sell", 2: "buy"}
+
+    def __init__(self) -> None:
+        self.asks = 0
+
+    def signals(self, _view: View, /) -> Signal | None:
+        self.asks += 1
+        side = self.PLAN.get(self.asks)
+        return None if side is None else Signal(side=side, lots=1)
 
 
 class NotAStrategy:
@@ -192,6 +217,25 @@ def test_a_losing_run_is_recorded_as_fail_and_still_exits_zero() -> None:
     assert row.status == "fail"
     assert row.status_label == "失败"
     assert json.loads(row.metrics_in)["trips"] == 1
+
+
+def test_the_three_cost_tiers_each_start_from_a_fresh_strategy_instance() -> None:
+    """B1：三档成本共用一个实例时，主报告那一格不是"新起一次运行会得到的结果"。
+
+    `FirstRoundOnly` 把"第几次被问"记在实例身上。跑一遍 = 一个回合，可 ×0.5 那一跑先问完、
+    把状态用光，紧接着的主跑 ×1.0 就一单不发——台账于是记成 `void`、退出 1，而这套信号明明
+    做成了一个回合。成本缩放只动 `[cost]` 五项，不可能改变成交与配对，所以三档的回合数必须
+    相等；不等，唯一的自由变量就是策略实例被上一档用过（03-4.1 在三档之间也得成立）。
+    """
+    assert zx("--strategy", f"{__name__}:FirstRoundOnly") == 0
+    tiers = [
+        [cell.strip() for cell in line.split("|")]
+        for line in page().splitlines()
+        if line.startswith("| ×")
+    ]
+    assert [tier[1] for tier in tiers] == ["×0.5", "×1.0", "×1.5"]
+    assert [tier[3] for tier in tiers] == ["1", "1", "1"]
+    assert json.loads(ledger()[-1].metrics_in)["trips"] == 1
 
 
 def test_a_void_run_exits_one_while_a_losing_one_still_exits_zero(
