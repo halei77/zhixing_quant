@@ -25,7 +25,8 @@ import duckdb
 
 from zhixing_quant.domain.adjust import (
     AdjustmentFactor,
-    factor_on,
+    factor_at,
+    ladder_days,
     sorted_factors,
     to_backward,
     to_forward,
@@ -151,10 +152,11 @@ def adjusted_bars(
         raise Unadjustable(
             f"{bars[0].symbol} 没有可用复权因子，给不出 {adjust} 价：先确认 hfq 帧抓到了"
         )
-    base = factor_on(series, bars[-1].trade_date) if adjust == "forward" else 1.0
+    days = ladder_days(series)
+    base = factor_at(series, days, bars[-1].trade_date) if adjust == "forward" else 1.0
     out: list[Bar] = []
     for bar in bars:
-        factor = factor_on(series, bar.trade_date)
+        factor = factor_at(series, days, bar.trade_date)
         raw = (bar.open, bar.high, bar.low, bar.close)
         if adjust == "backward":
             scaled = tuple(to_backward(value, factor) for value in raw)
@@ -182,9 +184,10 @@ def _factors(
     而区间之后那次除权不该回头改区间内的价格，否则同一天的后复权价会随着"这只票后来又
     除权了"而变化，回测就再也复现不出来。
 
-    只留变化点是因为 `factor_on` 是线性扫：五年日线逐日全给 ≈ 1250 行 × 1250 个点，
-    第一个撞破验收 1 那 100ms 的会是这里，而不是磁盘。阶梯函数只有一处台阶，读它的人
-    不需要看见每一天。
+    留变化点（`!=` 而不是逐日全给）压的是"连续几天同一个因子"那种形状。它压不动真数据：盘上的
+    因子是 hfq收盘 ÷ 原始收盘 的商，两个都只到分，商在第 6-7 位小数上每天抖一下，于是阶梯点数
+    约等于日线行数（600519：63 行 63 点，坑 #37 就是这么量出来的）。所以查询侧的代价不靠这里
+    兜，靠 `adjust` 那一段一次排序 + 每根K线二分（`domain.adjust.factor_at`）。
     """
     paths = [
         path

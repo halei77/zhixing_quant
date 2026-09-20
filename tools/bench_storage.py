@@ -4,8 +4,11 @@
 随机读"，塞进 CI 要么把 CI 拖成几分钟，要么缩水成"三个文件里查一行很快"——后者测的是
 Python 循环，不是验收标准。所以这里手动跑，数字进任务账本（09 §五）。
 
-默认落到临时目录，且**永远用 `bench_daily` 这个数据集名**：基准要写两万个分区文件，落在
-真数据的 `daily/` 旁边一旦清不干净，下次查询就会读到合成K线。
+默认落到临时目录，并且**拒绝落在真数据根里面**：基准要写几十万个合成分区文件，混进真数据的
+`daily/` 一旦清不干净，下次查询就会读到假K线。dataset 用的就是真的 `daily`——存储层的注册表只认
+那四个名字（ADR-0009 决定 2），而前一阵这里写着 `bench_daily`，于是这条命令整个跑不起来过
+（`ValueError: 未知 dataset`）。它是 01 §Step 3 验收 1 的唯一出处：**没人跑的 tools/ 脚本会烂掉**。
+所以隔开靠根，不靠一个假名字；真名字配上一条判据，比假名字配一句口头约定可靠。
 
 `--symbols` 决定目录宽度（`existing_partitions` 的 glob 成本），`--bars` 决定单文件大小
 （Parquet 读取消本）。两个都拉满是 4430 × 1250 ≈ 550 万行；本机跑一次十几分钟，日常按
@@ -23,19 +26,24 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
+from zhixing_quant import config
 from zhixing_quant.domain.bar import Bar
 from zhixing_quant.storage import layout, query, write
 
 #: 01 §Step 3 验收 1 的原文数字。改它等于改验收口径，要先改文档。
 TARGET_MS = 100.0
 
-#: 与真数据隔开的数据集名（见模块文档）。
-BENCH = "bench_daily"
+#: 合成行的署名：查过基准的人能在 `daily/` 里认出哪几行是假的（数据集名不能假，见模块文档）。
+BENCH_SOURCE = "bench_daily"
 
 
 def synth(symbol: str, days: int) -> list[Bar]:
-    """一只票 `days` 根K线：周末跳过，每约 250 天来一次除权（因子是阶梯函数，台阶数
-    决定 `factor_on` 的扫描量，全给同一个因子测不出真实形状）。"""
+    """一只票 `days` 根K线：周末跳过，每约 250 天来一次除权，而**每天的因子都带一点末位抖动**。
+
+    抖动不是随手加的：真盘上的 `adj_factor` 是 hfq收盘 ÷ 原始收盘，两个都只到分，商在第 6-7 位
+    小数上每天不同，于是 `_factors` 的"只留变化点"压不动它——阶梯点数等于日线行数（坑 #37）。
+    原来这里给的是精确重复的因子，台阶真是 5 级，基准测的是那个想象中的形状：把扫描量换成按天
+    抖动的形状，验收 1 那 100ms 才是被同一种输入量出来的。"""
     out: list[Bar] = []
     day = date(2019, 1, 2)
     price = 10.0
@@ -48,7 +56,7 @@ def synth(symbol: str, days: int) -> list[Bar]:
         price *= 1.001
         out.append(
             Bar(
-                source=BENCH,
+                source=BENCH_SOURCE,
                 symbol=symbol,
                 trade_date=day,
                 open=price,
@@ -57,7 +65,7 @@ def synth(symbol: str, days: int) -> list[Bar]:
                 close=price,
                 volume=1000.0,
                 amount=price * 1000,
-                adj_factor=factor,
+                adj_factor=factor + index * 1e-7,
             )
         )
         day += timedelta(days=1)
@@ -65,6 +73,17 @@ def synth(symbol: str, days: int) -> list[Bar]:
 
 
 ADJUSTMENTS: tuple[query.Adjust, ...] = ("raw", "backward", "forward")
+
+
+def _inside_real_root(root: Path) -> Path | None:
+    """基准的落点与真数据根有任何套叠就把那个根交出来（判据在调用方）。
+
+    这一判以前不存在：隔开靠的是用一个假数据集名 `bench_daily`，而存储层的注册表只认四个名字
+    （ADR-0009 决定 2），于是脚本烂了一阵没人发现。名字换成真的 `daily`，防混就只剩这一条路径判断。
+    """
+    real = config.parquet_dir().resolve()
+    here = root.resolve()
+    return real if here == real or here in real.parents or real in here.parents else None
 
 
 def sample_reads(root: Path, symbols: list[str], runs: int) -> dict[query.Adjust, list[float]]:
@@ -76,7 +95,7 @@ def sample_reads(root: Path, symbols: list[str], runs: int) -> dict[query.Adjust
         for i in range(runs):
             symbol = symbols[i % len(symbols)]
             started = time.perf_counter()
-            query.read_bars(symbol, *span, adjust=adjust, dataset=BENCH, root=root)
+            query.read_bars(symbol, *span, adjust=adjust, dataset=layout.DAILY, root=root)
             timings[adjust].append((time.perf_counter() - started) * 1000)
     return timings
 
@@ -92,8 +111,15 @@ def main(argv: list[str] | None = None) -> int:
 
     scratch = args.root is None
     root = args.root if args.root is not None else Path(tempfile.mkdtemp(prefix="zx-bench-"))
+    real = _inside_real_root(root)
+    if real is not None:
+        print(
+            f"基准落点 {root} 与真数据根 {real} 套叠：换一个目录（不传 --root 就是临时目录）",
+            file=sys.stderr,
+        )
+        return 2
     symbols = [f"{600000 + i:06d}" for i in range(args.symbols)]
-    print(f"落盘 {len(symbols)} 票 × {args.bars} 根 → {root / BENCH}")
+    print(f"落盘 {len(symbols)} 票 × {args.bars} 根 → {root / layout.DAILY}")
 
     rows = 0
     started = time.perf_counter()
@@ -101,9 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     for symbol in symbols:
         bars = synth(symbol, args.bars)
         rows += len(bars)
-        write.store_bars(bars, dataset=BENCH, root=root)
+        write.store_bars(bars, dataset=layout.DAILY, root=root)
     elapsed = time.perf_counter() - started
-    partitions = sum(1 for _ in layout.dataset_dir(BENCH, root).rglob("*.parquet"))
+    partitions = sum(1 for _ in layout.dataset_dir(layout.DAILY, root).rglob("*.parquet"))
     per_partition = elapsed / partitions * 1000
     print(f"  {rows} 行 / {elapsed:.1f}s / {partitions} 个分区 / 每分区 {per_partition:.1f} ms")
 

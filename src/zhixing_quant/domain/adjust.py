@@ -16,6 +16,7 @@ float 往返不闭合（乘除顺序影响末位），所以还原性质用相�
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -48,14 +49,27 @@ def sorted_factors(factors: Sequence[AdjustmentFactor]) -> tuple[AdjustmentFacto
     return tuple(sorted(factors, key=lambda f: f.effective_on))
 
 
+def ladder_days(series: Sequence[AdjustmentFactor]) -> tuple[date, ...]:
+    """排好的阶梯抽出日期一列，给 `factor_at` 二分用。与 `series` 同序是调用方的责任。"""
+    return tuple(item.effective_on for item in series)
+
+
+def factor_at(series: Sequence[AdjustmentFactor], days: Sequence[date], on: date) -> float:
+    """阶梯已经排好序时查当天因子：二分，不重排也不线扫。
+
+    口径与 `factor_on` 同一句：当天及以前最后一个生效，早于首个按 1.0。分成两个函数只为了
+    "排序与抽日期"能提到K线循环之外——坑 #37 量出来的形状：真数据上一只票的阶梯点数等于它的
+    日线行数（因子是 hfq ÷ 原始价的商，末位每天抖动，压不出台阶），于是五万根分钟K线每根各自
+    重排加线扫一遍，一次 2.29 秒（每票）。
+    """
+    at = bisect_right(days, on)
+    return 1.0 if at == 0 else series[at - 1].factor
+
+
 def factor_on(factors: Sequence[AdjustmentFactor], on: date) -> float:
     """on 当天及之前最后一个有效因子；早于首个因子按 1.0（未发生过除权除息）。"""
-    current = 1.0
-    for item in sorted_factors(factors):
-        if item.effective_on > on:
-            break
-        current = item.factor
-    return current
+    series = sorted_factors(factors)
+    return factor_at(series, ladder_days(series), on)
 
 
 def to_backward(raw: float, factor: float) -> float:
