@@ -22,7 +22,9 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 import reconcile_history as rh  # noqa: E402  # tools/ 不在包内，按脚本路径导入
 
 from tests.fakes import daily_span, minute_span, snapshot_root  # noqa: E402
+from zhixing_quant.quality.reconcile import daily_gap  # noqa: E402
 from zhixing_quant.storage import layout  # noqa: E402
+from zhixing_quant.storage.query import read_bars  # noqa: E402
 from zhixing_quant.storage.write import store_bars  # noqa: E402
 
 D1, D2, D3 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
@@ -36,12 +38,19 @@ def one_bar(day: date, **override: Any) -> Any:
     return base.model_copy(update=override)
 
 
-def land(symbol: str = "600519", *, volume_d3: float = 100.0, open_d3: float = 10.0) -> None:
+def land(
+    symbol: str = "600519",
+    *,
+    volume_d1: float = 100.0,
+    volume_d3: float = 100.0,
+    open_d3: float = 10.0,
+) -> None:
     """三天日线 + 三天分钟线，落进 `ZX_DATA_ROOT` 下的干净区。
 
     D1/D2 两边完全对得上；D3 默认也对得上。两种坏法是参数：`volume_d3` 改日线那一侧的量
     （分钟侧恒为 100），`open_d3` 改日线那一侧的开盘（高低区间跟着放宽，所以它不会顺带把
-    `extremes` 也点了——两条判据混在一条断言里就分不出谁是谁）。首日不进 `combos`。
+    `extremes` 也点了——两条判据混在一条断言里就分不出谁是谁）。`volume_d1` 造的是"首日只有
+    尾巴一段"那个形状，它不进 `combos`。
     """
     store_bars(
         [
@@ -52,7 +61,7 @@ def land(symbol: str = "600519", *, volume_d3: float = 100.0, open_d3: float = 1
                 high=10.2,
                 low=9.9,
                 close=10.0,
-                volume=100.0,
+                volume=volume_d1,
                 amount=1000.0,
             ),
             daily_span(
@@ -95,9 +104,19 @@ def isolated_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_first_day_on_disk_is_not_scored() -> None:
-    """首日不算：它在盘上可能只有尾巴那一段，拿它跟整天比是探针自己造的偏差。"""
-    land()
-    assert rh.scan(["5"]).combos == 2
+    """首日不算：它在盘上可能只有尾巴那一段，拿它跟整天比是探针自己造的偏差。
+
+    家里那份盘上这不止是修辞：三个 dataset 的首日各只有尾盘 2 根，实测偏差 -48%~-96.9%，
+    会把整批读数的下限从 -8.64% 一路拉到 -96.9%，首当其冲就是那张分档表。所以这里既验它不在
+    账上，也验它**本来会有多大**——删掉 `[1:]` 的那位得先让这条变红。
+    """
+    land(volume_d1=5000.0)
+    result = rh.scan(["5"])
+    assert result.combos == 2
+    assert {g[3] for g in result.gaps} == {D2, D3}
+    tail = read_bars("600519", D1, D1, dataset=layout.minute_dataset("5"))
+    line = read_bars("600519", D1, D1, dataset=layout.DAILY)[0]
+    assert daily_gap(tail, line) == pytest.approx(-98.0)
 
 
 def test_a_volume_shortfall_alone_still_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:

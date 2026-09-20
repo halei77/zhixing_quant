@@ -86,7 +86,8 @@ def scan(
             for bar in read_bars(symbol, LO, HI, dataset=dataset, root=root):
                 by_day[bar.trade_date].append(bar)
             # 首日不含：区间是从盘上那一刻起的，那天的分钟根可能只有尾巴一段，
-            # 拿它跟整天比是探针自己造的偏差，不是源的。
+            # 拿它跟整天比是探针自己造的偏差，不是源的。家里这份盘上它不是假设：三个
+            # dataset 的首日各只有尾盘 2 根，对出来 -48%~-96.9%，足以压弯下面那张分档表。
             for day in sorted(by_day)[1:]:
                 out.combos += 1
                 bars = by_day[day]
