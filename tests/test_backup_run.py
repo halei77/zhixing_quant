@@ -229,6 +229,9 @@ def test_a_second_run_on_the_same_day_keeps_what_the_first_one_copied(
     assert set(manifest.files) == {"新.txt", "又一天.txt"}
     assert manifest.deleted == ("新.txt",), "当天先加后删：加记在清单里，删记在 deleted，恢复时删赢"
     assert report.copied == 1, "第二次只拷它自己看见的那一个变化"
+    assert "两个数不必相等" in report.markdown, (
+        "M2：清单 2 项与拷了 1 个并排印在同一页，得有一句解释"
+    )
     kept = backup / "delta" / "2026-09-21" / "新.txt"
     assert kept.read_text(encoding="utf-8") == "一", "第一次拷过去的那份不许被合并写没"
 

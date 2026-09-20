@@ -17,12 +17,14 @@ import pytest
 from tests.fakes import bar
 from zhixing_quant.backup import state
 from zhixing_quant.backup.restore import (
+    NON_DATASET,
     NoGeneration,
     NothingToVerify,
     _dataset_of,
     pick_dataset,
     plan,
     restore,
+    surfaces,
     verify,
 )
 from zhixing_quant.backup.run import full, incremental
@@ -229,6 +231,21 @@ def test_the_drill_picks_the_fullest_dataset_not_a_random_one(data: Path, backup
     assert pick_dataset(backup, clean_zone=ZONE, as_of=D0) == layout.DAILY
 
 
+def test_the_coverage_face_counts_a_file_once_across_generations(data: Path, backup: Path) -> None:
+    """覆盖面那格数的是"树上的文件"，不是各代清单相加：全量里有、增量又改过的只算一次。
+
+    它是报告里唯一一处**不来自恢复结果**的数（`verify` 只恢复一个 dataset，其余那些只能从清单数），
+    所以这一条判的是叠代语义在数数上也成立：删掉的不算，改过的算一份。
+    """
+    full(D0, data=data, backup=backup)
+    write_tree(data, {"reports/2026-09-19.md": "日报改过一笔"})
+    incremental(D1, data=data, backup=backup)
+    assert surfaces(backup, clean_zone=ZONE, as_of=D1) == {layout.DAILY: 1, NON_DATASET: 2}
+    (data / "data/master/master.parquet").unlink()
+    incremental(D2, data=data, backup=backup)
+    assert surfaces(backup, clean_zone=ZONE, as_of=D2) == {layout.DAILY: 1, NON_DATASET: 1}
+
+
 def test_the_drill_prefers_the_dataset_with_more_partitions(data: Path, backup: Path) -> None:
     """两个 dataset 都在时挑文件多的那个：演练要挑的是"最可能读出东西"的那一侧。"""
     write_tree(
@@ -273,6 +290,32 @@ def test_the_drill_reads_the_restored_parquet_with_the_query_layer(tmp_path: Pat
     assert "恢复演练 · 2026-09-20 · 通过" in result.markdown
     assert f"用查询层读 `{layout.DAILY}`" in result.markdown
     assert "有行的交易日 3 天" in result.markdown
+
+
+def test_the_page_says_which_face_of_the_backup_the_drill_actually_verified(
+    tmp_path: Path,
+) -> None:
+    """O2：一次演练只验一个 dataset，而报告页上"通过"两个字的射程只有那一个。
+
+    真数据根上那次就是这么被读成全量的：`daily` 302 个文件验过了，minute 与任务库/产物/快照
+    一个没读，报告却只有一句"恢复演练通过"。覆盖面不写出来，读报告的人没有别的办法知道少了
+    哪几块——文件数比"验了几个 dataset"更能让人停下手，所以两个都印。
+    """
+    root = real_root(tmp_path / "zhixing_data", (D0,))
+    write_tree(
+        root,
+        {
+            "data/minute_5/year=2026/symbol=600519.parquet": "分钟",
+            "taskdb/tasks.duckdb": "任务库",
+        },
+    )
+    where = tmp_path / "网盘"
+    full(D0, data=root, backup=where)
+    result = verify(where, clean_zone=ZONE, into=tmp_path / "演练", dataset=layout.DAILY, as_of=D0)
+    assert result.dataset == layout.DAILY
+    assert dict(result.unverified) == {layout.MINUTE_5: 1, NON_DATASET: 1}
+    assert "这次只验了 `daily`" in result.markdown
+    assert f"`{NON_DATASET}` 1 个文件" in result.markdown
 
 
 def test_a_corrupted_parquet_fails_the_drill_even_though_the_file_is_there(tmp_path: Path) -> None:

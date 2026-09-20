@@ -256,5 +256,9 @@ def incremental(when: date, *, data: Path, backup: Path) -> Report:
         copied=len(changes.to_copy),
         total_bytes=total_bytes,
         seconds=time.monotonic() - started,
-        notes=(f"这一代清单 {len(files)} 项，累计删掉 {len(deleted)} 项",),
+        notes=(
+            f"这一代清单 {len(files)} 项，累计删掉 {len(deleted)} 项——两个数不必相等："
+            "清单数的是这一代目录里现在有什么，「拷了几遍」那句数的是这一次搬了什么，"
+            "同一天跑第二遍时，第一次搬过去的文件（包括上一份备份报告自己）在清单里而不在本次拷贝里",
+        ),
     )

@@ -70,6 +70,12 @@ class Restored:
         return not self.bad
 
 
+#: 备份里那些不属于任何 dataset 的路径（任务库、回测产物、golden 快照、隔离区）合在这一格。
+#: `verify` 那句"用查询层真读一段"只对 dataset 成立，它们注定进不了验证面——但报告的覆盖面
+#: 声明必须点名它们，否则"演练通过"会被读成"整个数据根都能拼回来且读得动"（独立审计 O2）。
+NON_DATASET = "非 dataset"
+
+
 @dataclass(frozen=True)
 class Verification:
     """恢复演练的结论。`ok` 的判据是可读，不是存在（补充决定四）。
@@ -77,12 +83,16 @@ class Verification:
     `read_error` 非空表示"字节都拷过去了，查询层却读不出行"——Parquet 被同步客户端在半截处补齐、
     footer 坏了都是这种坏法，它抛的是 duckdb 的异常而不是返回值。演练的职责是把这句话变成报告，
     不是变成一个 traceback：一个会崩的演练与一个没有演练只差在崩的那次有人盯着看。
+
+    `unverified` 是那几代里**这次没验**的东西：`(验证面, 文件数)`，多则在前。一次演练只挑一个
+    dataset，而报告页上"通过"两个字的射程只有那一个。
     """
 
     restored: Restored
     dataset: str
     cover: Cover | None
     read_error: str = ""
+    unverified: tuple[tuple[str, int], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -106,12 +116,22 @@ class Verification:
             f"{self.restored.total_bytes / 1024 / 1024:.2f} MiB，"
             f"哈希对不上 {len(self.restored.bad)} 个",
             f"- 用查询层读 `{self.dataset}`：{self._cover_line()}",
+            f"- 验证面：这次只验了 `{self.dataset}`，{self._face_line()}",
         ]
         if self.restored.bad:
             lines.append("")
             lines.append("## 备份里那些读坏了的文件")
             lines += [f"- `{path}`" for path in self.restored.bad]
         return "\n".join(lines) + "\n"
+
+    def _face_line(self) -> str:
+        if not self.unverified:
+            return "那几代里没有别的东西，上面那一句就是全部"
+        faces = "、".join(f"`{name}` {n} 个文件" for name, n in self.unverified)
+        return (
+            f"未验的有 {faces}：dataset 要各跑一次 `--dataset`，"
+            f"而 `{NON_DATASET}` 那一格（任务库、回测产物、快照、隔离区）不在演练口径里"
+        )
 
     def _cover_line(self) -> str:
         if self.read_error:
@@ -223,6 +243,25 @@ def pick_dataset(backup: Path, *, clean_zone: CleanZone, as_of: date) -> str | N
     return max(names, key=lambda name: (names[name], name)) if names else None
 
 
+def surfaces(backup: Path, *, clean_zone: CleanZone, as_of: date) -> dict[str, int]:
+    """那几代拼出来的那棵树里有什么，按验证面分组：dataset 名 → 文件数，外加 `NON_DATASET`。
+
+    只数"这一代结束时还在树上"的路径：清单是逐代的，把各代相加等于把"全量里有、增量又改过"的
+    那个文件数两遍。这份账只用于报告的覆盖面声明（O2），恢复出的文件数另有出处——`Restored.files`。
+    """
+    zone = PurePosixPath(clean_zone)
+    present: set[str] = set()
+    for kind, when in plan(backup, as_of).generations:
+        manifest = load_manifest(backup, kind, when)
+        present.update(manifest.files)
+        present.difference_update(manifest.deleted)
+    out: dict[str, int] = {}
+    for path in present:
+        name = _dataset_of(path, zone) or NON_DATASET
+        out[name] = out.get(name, 0) + 1
+    return out
+
+
 def verify(
     backup: Path,
     *,
@@ -251,6 +290,13 @@ def verify(
         )
     only = f"{zone.as_posix()}/{picked}/"
     restored = restore(backup, into, what, only=only)
+    faces = surfaces(backup, clean_zone=zone, as_of=when)
+    unverified = tuple(
+        sorted(
+            ((name, n) for name, n in faces.items() if name != picked),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+    )
     try:
         cover = depth(picked, root=into.joinpath(*zone.parts))
         read_error = ""
@@ -258,4 +304,10 @@ def verify(
         # 恢复出来的字节读不出行。这正是演练存在的理由，所以它变成一个结论，不是一个 traceback。
         read_error = f"{type(exc).__name__}: {exc}"
         cover = None
-    return Verification(restored=restored, dataset=picked, cover=cover, read_error=read_error)
+    return Verification(
+        restored=restored,
+        dataset=picked,
+        cover=cover,
+        read_error=read_error,
+        unverified=unverified,
+    )
