@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import secrets
@@ -225,8 +226,25 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """`zx-site` 的参数表，一张空表——**空表不等于不判**。
+
+    这个进程的可调项全在环境变量里（`ZX_SITE_TOKEN`/`ZX_SITE_HOST`/`ZX_SITE_PORT`），所以没有
+    flag 可选；而 `parse_args` 对多出来的参数直接退 2，于是 `zx-site --port 8765` 的结局是"这条
+    命令写错了"，不是"起了一个监听 8000 的服务"（独立审计 M1）。忽略参数的那条路在 systemd 里
+    一定会走一遍：写单位文件的人照别的服务的习惯加 `--port`，然后端口就对不上反代，而日志上说服务
+    起来了。
+    """
+    return argparse.ArgumentParser(
+        prog="zx-site",
+        description="提示词站点：一张页 + 四个端点。可调项只有 ZX_SITE_TOKEN / "
+        "ZX_SITE_HOST / ZX_SITE_PORT 这三个环境变量，没有任何命令行参数",
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """进程入口（`zx-site`）。默认只绑本机：公网那一步在阿里云侧由反代给出（ADR-0006）。"""
+    build_parser().parse_args(argv)
     cfg = templates.load(config.prompt_templates_file())
     app = create_app(
         listings=read_master().listings,

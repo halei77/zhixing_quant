@@ -621,7 +621,7 @@ def test_the_entry_point_assembles_from_the_published_data(
         else:
             monkeypatch.setenv(name, value)
 
-    api.main()
+    api.main([])
 
     assert (served["host"], served["port"]) == (want_host, want_port)
     assert untils == [date.today()]
@@ -633,6 +633,25 @@ def test_the_entry_point_assembles_from_the_published_data(
     served_client.post("/api/recent", json={"code": "600519"})
     assert trace == tmp_path / "site" / "recent.json"
     assert trace.is_file()
+
+
+def test_an_unknown_command_line_argument_stops_the_process_before_it_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`zx-site --port 8765` 是"这条命令写错了"，不是"起了个 8000 的服务"（独立审计 M1）。
+
+    这个入口没有可调的 flag（全在环境变量里），所以多出来的一律算笔误。忽略它的代价不在命令行上，
+    在 systemd 里：照别的服务的习惯写一句 `--port`，进程报 started，而端口对不上反代，外面看到的
+    是 502。判两件事——非零退出，以及 `uvicorn.run` 一次都没被叫到：先判参数再起服务，才有"没起来"。
+    """
+    served: list[object] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **_kwargs: served.append(app))
+
+    with pytest.raises(SystemExit) as gone:
+        api.main(["--port", "8765"])
+
+    assert gone.value.code == 2
+    assert served == [], "服务照起了：那句 --port 被吃了"
 
 
 #: 改 YAML 追加的那一条：这个名字在任何 `.py` 里都没出现过，`days: 2` 与真表的 `days: 120`
@@ -674,7 +693,7 @@ def test_a_new_yaml_row_reaches_the_prompt_with_no_code_change(
     monkeypatch.setattr(config, "prompt_templates_file", lambda **_kwargs: edited)
     monkeypatch.setenv(api.TOKEN_ENV, TOKEN)
 
-    api.main()
+    api.main([])
     app = served["app"]
     assert isinstance(app, FastAPI)
     shell = TestClient(app, headers=AUTH)
