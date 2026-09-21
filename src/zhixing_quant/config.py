@@ -69,6 +69,27 @@ def site_recent_file(env: Mapping[str, str] | None = None) -> Path:
 
 BACKUP_ENV = "ZX_BACKUP_ROOT"
 
+RELAY_KEY_ENV = "ZX_RELAY_KEY_DIR"
+
+
+def relay_key_dir(env: Mapping[str, str] | None = None) -> Path:
+    """有偿转接源（ADR-0014）key 的目录。git 外、家目录下、chmod 600——不进数据根：
+
+    数据根会被 zx-backup 整树拷进网盘，key 跟着进去等于密钥上了同步盘；家目录不是备份
+    面，丢 key 的后果是"该源停更并响"，不是"密钥随网盘扩散"。
+    """
+    raw = (os.environ if env is None else env).get(RELAY_KEY_ENV, "").strip()
+    return Path(raw).expanduser() if raw else Path("~/.zhixing_secrets").expanduser()
+
+
+def relay_key_file(name: str, env: Mapping[str, str] | None = None) -> Path:
+    """某一源的 key 文件（如 `rds.key` / `promax.key`）。文件不存在由调用方响成自己的错话，
+    这里不猜不兜底——key 缺失要的是"这一个源接不了"，不是"所有源静默用不了"。
+    """
+    if not name.endswith(".key"):
+        raise ValueError(f"key 文件名要以 .key 结尾，收到的是 {name!r}")
+    return relay_key_dir(env) / name
+
 
 def backup_dir(env: Mapping[str, str] | None = None) -> Path:
     """备份根（ADR-0005 补充决定一）：网盘同步目录里那一个文件夹。
