@@ -125,6 +125,7 @@ RELAY_PROBES: Sequence[tuple[str, str, str]] = (
     ("index_daily", "指数日线", "index_daily"),
     ("stk_holdernumber", "股东户数", "stk_holdernumber"),
     ("cyq_perf", "筹码胜率", "cyq_perf"),
+    ("daily_basic", "估值每日指标（PE/PB/市值）", "daily_basic"),
 )
 
 RELAY_PARAMS: Mapping[str, Mapping[str, str]] = {
@@ -135,6 +136,7 @@ RELAY_PARAMS: Mapping[str, Mapping[str, str]] = {
     "index_daily": {"ts_code": "000001.SH", "start_date": "20260914", "end_date": "20260918"},
     "stk_holdernumber": {"ts_code": "600519.SH", "limit": "5"},
     "cyq_perf": {"ts_code": "600519.SH", "limit": "5"},
+    "daily_basic": {"ts_code": "600519.SH", "limit": "5"},
 }
 
 
