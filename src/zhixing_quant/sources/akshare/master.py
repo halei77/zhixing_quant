@@ -27,11 +27,20 @@ from zhixing_quant.domain.security import Interval, Listing, SecurityMaster
 from zhixing_quant.domain.symbol import UnknownCode, board_of, normalize_code
 from zhixing_quant.sources.rows import SourceSchemaError, pick, to_date
 
-CODE_ALIASES = ("证券代码", "A股代码", "code")
+# ts_code：relay stock_basic 那份 BSE 名单（akshare 没有 BSE 名单接口）。
+CODE_ALIASES = ("证券代码", "A股代码", "ts_code", "code")
 NAME_ALIASES = ("证券简称", "A股简称", "name")
 LISTED_ALIASES = ("上市日期", "A股上市日期", "list_date")
 #: 两份交易所名单的文件名，与 `tools/capture_golden.py` 的 key 一致：两处不同名就是两份主数据。
-SNAPSHOT_NAMES = ("stock_info_sh_name_code__主板A股", "stock_info_sz_name_code__A股列表")
+#: 四份名单（2026-09-22 用户裁决扩板：主板/创业板/科创板/北交所一个不能少——ADR-0013
+#: 补充决定三的待裁决就此了结）。北交所那份来自 relay 的 stock_basic（akshare 没有 BSE
+#: 名单接口），列名 ts_code/name/list_date 落在 ALIASES 的英文兜底里，不用特判。
+SNAPSHOT_NAMES = (
+    "stock_info_sh_name_code__主板A股",
+    "stock_info_sz_name_code__A股列表",
+    "stock_info_sh_name_code__科创板",
+    "relay_stock_basic__BJ",
+)
 #: 抓取清单的文件名，同样与 `tools/capture_golden.py` 一致。ST 判定要读它：没有抓取日期，
 #: "这名字挂着帽"就是一条不知道从哪天起生效的断言，而 PIT 模型不接受没有时点的状态。
 MANIFEST_NAME = "manifest.csv"

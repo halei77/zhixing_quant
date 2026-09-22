@@ -197,12 +197,21 @@ def snapshot_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (golden / "tool_trade_date_hist_sina.csv").write_text(
         "trade_date\n" + "\n".join(CALENDAR_DAYS) + "\n", encoding="utf-8"
     )
-    (golden / f"{akshare_master.SNAPSHOT_NAMES[0]}.csv").write_text(
-        "证券代码,证券简称,上市日期\n600519,贵州茅台,2001-08-27\n", encoding="utf-8"
-    )
-    (golden / f"{akshare_master.SNAPSHOT_NAMES[1]}.csv").write_text(
-        "A股代码,A股简称,A股上市日期\n300750,宁德时代,2018-06-11\n", encoding="utf-8"
-    )
+    #: 四份名单（主数据 2026-09-22 扩板）：这里只给 0/1 装真实行——需要科创板/北交所
+    #: 行的测试自己往 golden 里再写，缺省形状保证 read_master 的完整性检查能过。
+    _master_rows = {
+        0: "600519,贵州茅台,2001-08-27\n",
+        1: "300750,宁德时代,2018-06-11\n",
+    }
+    for i, name in enumerate(akshare_master.SNAPSHOT_NAMES):
+        header = (
+            "证券代码,证券简称,上市日期"
+            if i in (0, 2)
+            else ("A股代码,A股简称,A股上市日期" if i == 1 else "ts_code,name,list_date")
+        )
+        (golden / f"{name}.csv").write_text(
+            f"{header}\n{_master_rows.get(i, '')}", encoding="utf-8"
+        )
     rows = [
         f"{name},{name}.csv,2,,2024-01-03T08:56:05,ok," for name in akshare_master.SNAPSHOT_NAMES
     ]

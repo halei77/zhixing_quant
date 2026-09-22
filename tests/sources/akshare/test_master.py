@@ -116,12 +116,29 @@ def test_duplicates_are_left_for_the_master_to_refuse() -> None:
 # --- 快照文件 → 主数据（每日任务的离线入口）--------------------------------------
 
 
+_HEADERS = {
+    0: "证券代码,证券简称,上市日期",  # SH 主板
+    1: "A股代码,A股简称,A股上市日期",  # SZ
+    2: "证券代码,证券简称,上市日期",  # SH 科创板（列形与主板同）
+    3: "ts_code,name,list_date",  # relay stock_basic 那份 BSE
+}
+
+
 def write_listings(tmp_path: Path, index: int, body: str) -> None:
+    """只写 `index` 那一份。主数据 2026-09-22 扩成四份后，read_master 缺任何一份都拒收——
+    要一次写全的用 `write_listings_all`。"""
     tmp_path.mkdir(parents=True, exist_ok=True)
-    header = "证券代码,证券简称,上市日期" if index == 0 else "A股代码,A股简称,A股上市日期"
     (tmp_path / f"{am.SNAPSHOT_NAMES[index]}.csv").write_text(
-        f"{header}\n{body}\n", encoding="utf-8"
+        f"{_HEADERS[index]}\n{body}\n", encoding="utf-8"
     )
+
+
+def write_listings_all(tmp_path: Path, bodies: Mapping[int, str]) -> None:
+    """四份名单全写：`bodies` 给到的装内容，缺的只给表头（零行）——
+    夹具不许再造"两份名单"的老形状，那形状现在过不了 read_master 的完整性检查。"""
+    for i in range(len(am.SNAPSHOT_NAMES)):
+        body = bodies.get(i, "")
+        write_listings(tmp_path, i, body)
 
 
 #: 快照的抓取日：ST 帽那段区间的起点，只能来自这里。
@@ -145,14 +162,16 @@ def test_the_snapshot_paths_follow_the_data_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
-    assert [p.parent.name for p in am.snapshot_paths()] == ["golden"] * 2
+    assert [p.parent.name for p in am.snapshot_paths()] == ["golden"] * 4
     assert [p.name for p in am.snapshot_paths()] == [f"{n}.csv" for n in am.SNAPSHOT_NAMES]
 
 
 def test_read_master_merges_both_exchange_lists(tmp_path: Path) -> None:
     """两个入口迟早被用成一个：合读一份"那天在册的全市场"，才不会再出现少一半票的日报。"""
-    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27")
-    write_listings(tmp_path, 1, "300750,宁德时代,2018-06-11")
+    write_listings_all(
+        tmp_path,
+        {0: "600519,贵州茅台,2001-08-27", 1: "300750,宁德时代,2018-06-11"},
+    )
     write_manifest(tmp_path)
     load = am.read_master(tmp_path)
     assert [x.code for x in load.listings] == ["600519", "300750"]
@@ -161,17 +180,23 @@ def test_read_master_merges_both_exchange_lists(tmp_path: Path) -> None:
 
 
 def test_a_single_missing_list_is_rejected_not_partial(tmp_path: Path) -> None:
-    """只有一份名单在，看起来"还能用"：深市两千只票凭空消失而健康分照样满分，所以拒收。"""
-    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27")
+    """只有三份名单在，看起来"还能用"：缺的那一份的票凭空消失而健康分照样满分，所以拒收。"""
+    write_listings_all(tmp_path, dict.fromkeys(range(4), "600519,贵州茅台,2001-08-27"))
     write_manifest(tmp_path)
+    (tmp_path / f"{am.SNAPSHOT_NAMES[3]}.csv").unlink()
     with pytest.raises(SourceSchemaError, match="没有主数据快照"):
         am.read_master(tmp_path)
 
 
 def test_skips_survive_the_round_trip_from_a_file(tmp_path: Path) -> None:
     """跳过的行必须一路带到日报：B 股/债券不入库是对的，"对地少了 3 行"得说得出原文。"""
-    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27\n900901,B股示例,1992-02-21")
-    write_listings(tmp_path, 1, "300750,宁德时代,2018-06-11")
+    write_listings_all(
+        tmp_path,
+        {
+            0: "600519,贵州茅台,2001-08-27\n900901,B股示例,1992-02-21",
+            1: "300750,宁德时代,2018-06-11",
+        },
+    )
     write_manifest(tmp_path)
     load = am.read_master(tmp_path)
     assert [(x.raw_code, x.position) for x in load.skipped] == [("900901", 1)]
@@ -183,8 +208,13 @@ def test_a_hatted_name_becomes_an_st_period_from_the_snapshot_day(tmp_path: Path
     帽的生效日期只能取自快照的抓取时间，所以区间是 `[抓取日, 持续中]`：往前不判（帽可能是那天
     之后才戴上的），往后判到下一次抓取为止（摘帽没有源可查，但下一次重抓会把它截断）。
     """
-    write_listings(tmp_path, 0, "600519,贵州茅台,2001-08-27\n600119,*ST长投,1998-01-15")
-    write_listings(tmp_path, 1, "000016,*ST康佳A,1992-03-27\n000001,平安银行,1991-04-03")
+    write_listings_all(
+        tmp_path,
+        {
+            0: "600519,贵州茅台,2001-08-27\n600119,*ST长投,1998-01-15",
+            1: "000016,*ST康佳A,1992-03-27\n000001,平安银行,1991-04-03",
+        },
+    )
     write_manifest(tmp_path)
     master = am.read_master(tmp_path).to_master()
     assert master.st_on("000016", CAPTURED) and master.st_on("600119", CAPTURED)
@@ -199,8 +229,10 @@ def test_the_hat_stays_on_until_the_next_capture(tmp_path: Path) -> None:
 
     这条也是"主数据要定期重抓"被写进代码的地方：ST 档的上限只对最近一次抓取负责。
     """
-    write_listings(tmp_path, 0, "600119,*ST长投,1998-01-15")
-    write_listings(tmp_path, 1, "000001,平安银行,1991-04-03")
+    write_listings_all(
+        tmp_path,
+        {0: "600119,*ST长投,1998-01-15", 1: "000001,平安银行,1991-04-03"},
+    )
     write_manifest(tmp_path)
     master = am.read_master(tmp_path).to_master()
     assert master.st_on("600119", date(2024, 6, 30))
@@ -213,11 +245,18 @@ def test_the_newer_capture_is_the_only_one_we_vouch_for(tmp_path: Path) -> None:
     深市那份是 2023-10-01 抓的，此后这只票的名字我们没见过：替它把区间提前到那天，就是判那些
     并没有证据的日子。少判几天看得见（日报上是按宽档判的），多判看不见。
     """
-    write_listings(tmp_path, 0, "600119,*ST长投,1998-01-15")
-    write_listings(tmp_path, 1, "000016,*ST康佳A,1992-03-27")
+    write_listings_all(
+        tmp_path,
+        {0: "600119,*ST长投,1998-01-15", 1: "000016,*ST康佳A,1992-03-27"},
+    )
     write_manifest(
         tmp_path,
-        {am.SNAPSHOT_NAMES[0]: date(2024, 1, 3), am.SNAPSHOT_NAMES[1]: date(2023, 10, 1)},
+        {
+            am.SNAPSHOT_NAMES[0]: date(2024, 1, 3),
+            am.SNAPSHOT_NAMES[1]: date(2023, 10, 1),
+            am.SNAPSHOT_NAMES[2]: date(2024, 1, 3),
+            am.SNAPSHOT_NAMES[3]: date(2024, 1, 3),
+        },
     )
     master = am.read_master(tmp_path).to_master()
     assert master.st_on("000016", date(2024, 1, 2)) is False
