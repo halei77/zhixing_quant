@@ -113,6 +113,20 @@ class HolderNumberRow(NamedTuple):
     holder_num: float
 
 
+class IndexDailyRow(NamedTuple):
+    """与 `sources.relay.tables.IndexDailyRow` 同形同序（结构互认见模块说明）。"""
+
+    source: str
+    symbol: str
+    trade_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None
+    amount: float | None
+
+
 SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="stk_limit",
@@ -176,6 +190,23 @@ SPECS: tuple[TableSpec, ...] = (
         order=("ann_date", "end_date"),
         row=HolderNumberRow,
         date_field="ann_date",
+    ),
+    TableSpec(
+        name="index_daily",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("trade_date", "DATE"),
+            ("open", "DOUBLE"),
+            ("high", "DOUBLE"),
+            ("low", "DOUBLE"),
+            ("close", "DOUBLE"),
+            ("volume", "DOUBLE"),
+            ("amount", "DOUBLE"),
+        ),
+        key=("trade_date",),
+        order=("trade_date",),
+        row=IndexDailyRow,
     ),
     TableSpec(
         name="daily_basic",

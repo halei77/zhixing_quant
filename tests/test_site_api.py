@@ -84,6 +84,7 @@ PROMPT_NO_DATE: dict[str, object] = {"code": "600519", "template": "短期投资
 #: 拿真路由表核对它，逼我在新加端点时回来加一格。
 ENDPOINTS: tuple[tuple[str, str, Callable[[TestClient], httpx.Response]], ...] = (
     ("搜索", "GET /api/search", lambda c: c.get("/api/search", params={"q": "600"})),
+    ("K线", "GET /api/kline", lambda c: c.get("/api/kline", params={"code": "600519"})),
     ("模板", "GET /api/templates", lambda c: c.get("/api/templates")),
     ("生成", "POST /api/prompt", lambda c: c.post("/api/prompt", json=PROMPT_OK)),
     ("留痕·读", "GET /api/recent", lambda c: c.get("/api/recent")),
@@ -320,9 +321,50 @@ def test_search_answers_from_the_dictionary(client: TestClient) -> None:
     """
     assert client.get("/api/search", params={"q": "茅台"}).json() == {
         "hits": [
-            {"code": "600519", "name": "贵州茅台", "listed_on": "2001-08-27", "by": "name"},
+            {
+                "code": "600519",
+                "name": "贵州茅台",
+                "listed_on": "2001-08-27",
+                "by": "name",
+                "kind": "stock",
+            },
         ]
     }
+
+
+def test_search_returns_index_hits_with_kind_index(client: TestClient) -> None:
+    """指数在搜索里与个股并肩（2026-09-22 用户要求"能查指数"）；kind 是前端分流的依据。"""
+    hits = client.get("/api/search", params={"q": "上证"}).json()["hits"]
+    assert {"code": "000001.SH", "name": "上证指数", "by": "name", "kind": "index"} in hits
+    hits = client.get("/api/search", params={"q": "hs300"}).json()["hits"]
+    assert hits[0] == {"code": "000300.SH", "name": "沪深300", "by": "name", "kind": "index"}
+
+
+def test_kline_serves_stocks_from_the_clean_zone(client: TestClient, root: Path) -> None:
+    """个股 K线：不复权口径（查行情看真实价），升序、字段齐全。
+
+    夹具的三根K线落在 2024-01，而 K线的窗口从今天往回数——这里种一根"今天"的K线，
+    顺带把"最新一根在窗口里"这件事实也钉住。
+    """
+    from tests.fakes import bar as fake_bar
+
+    today = date.today()
+    store_bars([fake_bar(today, 99.5)], dataset=layout.DAILY, root=root)
+    body = client.get("/api/kline", params={"code": "600519", "days": 5}).json()
+    assert body["kind"] == "stock" and body["code"] == "600519"
+    assert len(body["bars"]) >= 1
+    assert {"date", "open", "high", "low", "close", "volume", "amount"} <= set(body["bars"][-1])
+
+
+def test_kline_serves_indexes_from_the_reference_table(client: TestClient) -> None:
+    """指数 K线出自参考表 index_daily；未知指数是 404 不是空表。"""
+    body = client.get("/api/kline", params={"code": "000001.SH", "kind": "index"}).json()
+    assert body["kind"] == "index"
+    assert isinstance(body["bars"], list)
+    unknown = client.get("/api/kline", params={"code": "999999.SH", "kind": "index"})
+    assert unknown.json()["bars"] == []
+    bad = client.get("/api/kline", params={"code": "600519", "kind": "weird"})
+    assert bad.status_code == 422
 
 
 def test_the_search_limit_is_clamped_at_both_ends(client: TestClient) -> None:
@@ -347,7 +389,7 @@ def test_the_template_list_keeps_pending_rows_visible(client: TestClient) -> Non
     assert [row["name"] for row in rows] == ["短期投资", "长期投资"]
     assert [row["status"] for row in rows] == ["ready", "pending"]
     assert "Forward PE" in rows[1]["waiting_on"]
-    assert rows[0]["data"] == [{"dataset": "daily", "days": 120}]
+    assert rows[0]["data"] == [{"dataset": "daily", "days": 120, "fields": None}]
 
 
 # ── 决定 5：生成端点不产生口径 ───────────────────────────────────────────────

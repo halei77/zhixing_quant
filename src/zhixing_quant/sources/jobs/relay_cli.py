@@ -253,6 +253,7 @@ ANCHORS: dict[str, AnchorFn] = {
     "forecast": _anchor_forecast,
     "fina_audit": _anchor_forecast,
     "stk_holdernumber": _anchor_forecast,
+    "index_daily": _anchor_forecast,  # OHLC 不变量在解析器；行情日没有"报告期"概念，行级可验即全部
 }
 
 #: 档位查询注入点：真跑用 `_limit_pct_of`（主数据 + gate.toml），测试注入常数表。

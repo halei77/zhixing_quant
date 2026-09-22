@@ -1,52 +1,77 @@
 <!doctype html>
-<!-- 知行 · 提示词站点（06 §四 一期、§八-1/5）。零依赖、无构建步骤：能 fetch 的浏览器就够了。
-     这里不放任何口径：token 估算、价格口径、"盘上 N 天而模板要 M 天"那句缺口，全部由服务器给
-     （ADR-0013 决定 5）。页面上出现的每个数字都读自 /api/* 的响应体。 -->
+<!-- 知行 · 提示词站点（06 §四 一期、§八-1/5；2026-09-22 iOS 风格重设计）。
+     零依赖、无构建步骤：能 fetch 的浏览器就够了。这里不放任何口径：token 估算、
+     价格口径、缺口句全部由服务器给（ADR-0013 决定 5）。页面上出现的每个数字都读自 /api/*。 -->
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>知行 · 提示词站点</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <title>知行</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d5453c'/%3E%3Ctext x='16' y='22' font-size='14' font-family='sans-serif' font-weight='700' fill='white' text-anchor='middle'%3E知%3C/text%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="/assets/style.css" />
   </head>
   <body>
-    <header>
-      <h1>知行 · 提示词站点</h1>
-      <div id="auth">
-        <label for="token">口令</label>
-        <input id="token" type="password" placeholder="ZX_SITE_TOKEN" autocomplete="off" />
-        <span id="auth-state">未验证</span>
+    <header class="bar">
+      <div class="seal" aria-hidden="true">知行</div>
+      <div class="token-field">
+        <input id="token" type="password" placeholder="输入口令连接" autocomplete="off" />
+        <span id="auth-state" class="dot" title="未连接"></span>
       </div>
     </header>
 
     <main>
-      <section id="pick">
-        <h2>1 · 选股</h2>
-        <input id="search" type="search" placeholder="代码 / 名称 / 拼音首字母，如 600519、贵州、gzmt" autocomplete="off" />
-        <ul id="hits" class="list"></ul>
-        <h3>最近搜索</h3>
-        <ul id="recent" class="list"></ul>
-        <p id="symbol" class="muted">还没选票</p>
+      <section class="glass search-zone">
+        <div class="search-wrap">
+          <input
+            id="search"
+            type="search"
+            placeholder="搜代码 / 名称 / 拼音，如 600519、茅台、gzmt"
+            autocomplete="off"
+            enterkeyhint="search"
+          />
+          <ul id="suggest" class="suggest" hidden></ul>
+        </div>
+        <p id="search-hint" class="hint">输入至少一个字开始搜索，指数直接搜名字</p>
       </section>
 
-      <section id="setup">
-        <h2>2 · 选模板</h2>
-        <select id="templates"></select>
-        <p id="template-note" class="muted"></p>
-        <label for="asof">截止日期（可空＝今天）</label>
-        <input id="asof" type="date" />
-        <button id="generate" type="button">生成提示词</button>
+      <section id="quote-card" class="glass quote" hidden>
+        <div class="quote-head">
+          <div>
+            <p id="q-name" class="q-name">—</p>
+            <p id="q-code" class="q-code">—</p>
+          </div>
+          <div class="q-last">
+            <p id="q-close" class="q-close">—</p>
+            <p id="q-change" class="q-change">—</p>
+          </div>
+        </div>
+        <canvas id="kline" height="260" aria-label="K线图"></canvas>
+        <dl id="q-stats" class="q-stats">
+          <div><dt>开</dt><dd id="q-open">—</dd></div>
+          <div><dt>高</dt><dd id="q-high">—</dd></div>
+          <div><dt>低</dt><dd id="q-low">—</dd></div>
+          <div><dt>量</dt><dd id="q-vol">—</dd></div>
+        </dl>
       </section>
 
-      <section id="out">
-        <h2>3 · 预览与复制</h2>
-        <p id="meter"><span id="tokens">—</span> token<span id="warn" class="warn"></span></p>
-        <button id="copy" type="button">一键复制</button>
-        <span id="status" class="muted"></span>
-        <pre id="preview" class="preview">选一只票、一个模板，然后生成。</pre>
+      <section id="prompt-zone" class="glass sheet" hidden>
+        <p id="template-note" class="hint"></p>
+        <div class="prompt-actions">
+          <select id="templates" aria-label="模板"></select>
+          <input id="asof" type="date" aria-label="截止日期" />
+          <button id="generate" type="button" class="primary">生成</button>
+        </div>
+        <p id="meter" class="hint"><span id="tokens">—</span> token<span id="warn"></span></p>
+        <pre id="preview" class="preview">选一只票，点生成。</pre>
+        <button id="copy" type="button" class="primary wide">复制提示词</button>
       </section>
     </main>
 
+    <p id="status" class="status" role="status"></p>
     <script src="/assets/app.js"></script>
   </body>
 </html>

@@ -22,6 +22,19 @@ from pypinyin import Style, lazy_pinyin
 
 from zhixing_quant.domain.security import Listing
 
+#: 主要指数名册（站点"查指数"的固定入口；2026-09-22 用户要求指数可查）。
+#: 代码带市场后缀——个股与指数的 6 位数字空间重叠（000001 是平安银行也是上证指数），
+#: 后缀是唯一无歧义的写法。
+INDEXES: tuple[tuple[str, str, str], ...] = (
+    ("000001.SH", "上证指数", "szzs"),
+    ("399001.SZ", "深证成指", "szcz"),
+    ("399006.SZ", "创业板指", "cybz"),
+    ("000688.SH", "科创50", "kc50"),
+    ("000300.SH", "沪深300", "hs300"),
+    ("000905.SH", "中证500", "zz500"),
+    ("000016.SH", "上证50", "sz50"),
+)
+
 #: 三档的名字。`Matched` 定义在前：`RANKS` 的元素类型要用它。
 Matched = Literal["code", "name", "pinyin"]
 
@@ -120,3 +133,29 @@ def _score(row: _Row, query: _Query) -> tuple[int, int] | None:
     if query.letters and (at := row.initials.find(query.letters)) >= 0:
         return (2, at)
     return None
+
+
+class IndexHit(NamedTuple):
+    """一条指数搜索结果。`code` 带市场后缀（/api/kline 的 kind=index 就吃它）。"""
+
+    code: str
+    name: str
+    by: Matched
+    kind: str = "index"
+
+
+def search_indexes(query: str) -> tuple[IndexHit, ...]:
+    """指数的两路匹配：数字串（忽略后缀与市场前缀）与名称子串/别名。
+
+    指数只有 7 只，不做拼音全拼——别名表（szzs/hs300 这类惯用缩写）比拼音实用，
+    名称子串兜底（"创业"中创业板指）保证另一路落空时仍能回来（与个股三路的同一哲学）。
+    """
+    stripped = _MARKET.sub("", query.strip())
+    digits = re.sub(r"\D", "", stripped)
+    hits: list[IndexHit] = []
+    for code, name, alias in INDEXES:
+        if digits and code[:6].startswith(digits):
+            hits.append(IndexHit(code, name, "code"))
+        elif query.strip() and (query.strip() in name or query.strip().lower() == alias):
+            hits.append(IndexHit(code, name, "name"))
+    return tuple(hits)

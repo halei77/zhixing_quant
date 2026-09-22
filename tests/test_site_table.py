@@ -210,3 +210,48 @@ def test_the_selectable_fields_and_the_header_table_cannot_drift() -> None:
     """
     assert set(FIELDS) == set(table.HEADERS) - {"time"}
     assert all(table.HEADERS[name] for name in FIELDS)
+
+
+def test_render_valuation_nulls_units_and_csv() -> None:
+    """ADR-0016：null 渲染成 '—'（禁 0 填充的渲染侧）；市值万元取整不用科学计数法；
+    csv 模式的口径行走注释。"""
+    from datetime import date
+
+    from zhixing_quant.site.table import render_valuation
+    from zhixing_quant.sources.relay.tables import DailyBasicRow
+
+    rows = [
+        DailyBasicRow(
+            "rds",
+            "600519",
+            date(2026, 9, 18),
+            1257.12,
+            0.2,
+            None,
+            1.14,
+            19.2469,
+            None,
+            6.2381,
+            9.2115,
+            4.1492,
+            4.1262,
+            4.1,
+            125008.16,
+            125008.16,
+            56879.87,
+            156735231.008,
+            156735231.0,
+        ),
+        # 19 列：source, symbol, trade_date, close, turnover_rate, turnover_rate_f,
+        # volume_ratio, pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm, total_share,
+        # float_share, free_share, total_mv, circ_mv
+    ]
+    text = render_valuation(
+        rows, fields=["close", "pe_ttm", "pb", "dv_ttm", "total_mv"], format="markdown"
+    )
+    assert "—" in text and "0.0" not in text.split("口径")[1].split("\n")[0]
+    assert "156,735,231" in text, "市值万元取整千分位，不许科学计数法"
+    assert "6.24" in text and "4.10" in text
+    assert "| — |" in text, "pe_ttm 是 null：渲染成 '—'，不是 0"
+    csv_text = render_valuation(rows, fields=["close", "pe_ttm"], format="csv")
+    assert csv_text.startswith("# 估值口径"), "csv 模式口径行走注释（ADR-0011 决定 4 同款）"

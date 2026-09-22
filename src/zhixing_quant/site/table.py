@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from zhixing_quant.domain.bar import Bar, stamp_of
 from zhixing_quant.site.templates import Adjust, Format
@@ -79,6 +80,58 @@ def render(
         f"|{'---|' * len(titles)}",
     ]
     lines.extend(f"| {' | '.join(row)} |" for row in rows)
+    return "\n".join(lines)
+
+
+#: 估值表（ADR-0016）：参考表 daily_basic 的字段 → 表头。比率两位、金额取整、
+#: 空值渲染为 "—"（源未提供 ≠ 数为零——银行/保险的科目常态，禁 0 填充的渲染侧）。
+VALUATION_HEADERS: dict[str, str] = {
+    "time": "时间",
+    "close": "收盘",
+    "pe": "PE",
+    "pe_ttm": "PE(TTM)",
+    "pb": "PB",
+    "ps_ttm": "PS(TTM)",
+    "dv_ttm": "股息率(%)",
+    "total_mv": "总市值(万元)",
+    "circ_mv": "流通市值(万元)",
+    "turnover_rate": "换手率(%)",
+}
+
+VALUATION_LABEL = (
+    "估值口径：不复权收盘；pe/pb/ps 为倍数，dv_ttm 与换手率为 %，"
+    "total_mv/circ_mv 为万元，来源转接源 rds；'—' 表示源未提供"
+)
+
+
+def render_valuation(
+    rows: Sequence[Any],
+    *,
+    fields: Sequence[str],
+    format: Format = "markdown",
+) -> str:
+    """daily_basic 参考表 → 估值表（ADR-0016）。口径行由代码给，模板删不掉（决定 4 同款）。"""
+    columns = ["time", *fields]
+    headers = [VALUATION_HEADERS.get(c, c) for c in columns]
+    body_rows = []
+    for row in rows:
+        cells = [row.trade_date.isoformat()]
+        for name in fields:
+            value = getattr(row, name, None)
+            if value is None:
+                cells.append("—")
+            elif name in ("total_mv", "circ_mv"):
+                # 万元的量级到 1e8，科学计数法会让大模型把 1.9 万亿读丢
+                cells.append(f"{value:,.0f}")
+            else:
+                cells.append(f"{value:.2f}")
+        body_rows.append(cells)
+    if format == "csv":
+        lines = [f"# {VALUATION_LABEL}", ",".join(headers)]
+        lines += [",".join(r) for r in body_rows]
+        return "\n".join(lines)
+    lines = [f"> {VALUATION_LABEL}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
+    lines += [f"| {' | '.join(row)} |" for row in body_rows]
     return "\n".join(lines)
 
 

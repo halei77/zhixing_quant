@@ -15,15 +15,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 from zhixing_quant import config
 from zhixing_quant.domain.calendar import TradingCalendar
-from zhixing_quant.site import table, tokens
+from zhixing_quant.site import table, templates, tokens
 from zhixing_quant.site.compose import Section, assemble
 from zhixing_quant.site.templates import Selection, Template
 from zhixing_quant.storage import layout
 from zhixing_quant.storage.query import read_bars
+from zhixing_quant.storage.tables import read_table
 
 #: `minute_` 这个前缀从 `layout.MINUTE_5` 反推，不再抄一遍字符串：分钟线加一个周期（ADR-0009
 #: 决定 7 那个目录）时，这一层不需要第二处改动。
@@ -58,12 +60,56 @@ class Prompt:
     warn: str | None
 
 
+def read_kline(
+    code: str, *, days: int, kind: str = "stock", root: Path | None = None
+) -> list[dict[str, object]]:
+    """K线查询（站点 2026-09-22 用户要求"能查个股与指数"）。**不复权口径**——查行情的
+    人要看的是当日真实价，与提示词模板的后复权口径（ADR-0011 决定 3）是两个用途两个口径。
+
+    `kind="index"` 时 `code` 是带市场后缀的指数代码（000001.SH，搜索结果的 kind=index
+    行给的就是它），数据出自参考表 `index_daily`（ADR-0015）；个股出自干净区日线。
+    返回按日期升序的 dict 序列，直接是 /api/kline 的 payload 形状。
+    """
+    end = date.today()
+    start = end - timedelta(days=days * 2 + 10)  # 日历天多留一倍：节假日吃掉近一半
+    if kind == "index":
+        rows = read_table("index_daily", code, start, end, root=root)
+        return [
+            {
+                "date": row.trade_date.isoformat(),
+                "open": row.open,
+                "high": row.high,
+                "low": row.low,
+                "close": row.close,
+                "volume": row.volume,
+                "amount": row.amount,
+            }
+            for row in rows[-days:]
+        ]
+    bars = read_bars(code, start, end, adjust="raw", dataset=layout.DAILY, root=root)
+    return [
+        {
+            "date": bar.trade_date.isoformat(),
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+            "amount": bar.amount,
+        }
+        for bar in bars[-days:]
+    ]
+
+
 def title_of(dataset: str) -> str:
     """一段数据的小标题。周期就是名字里那个数，第二份"盘上有哪几个 dataset"的名单不写。"""
     if dataset == layout.DAILY:
         return "日K"
     if dataset.startswith(_MINUTE):
         return f"{dataset[len(_MINUTE) :]} 分K"
+    if dataset in templates.TABLE_DATASETS:
+        # 参考表（ADR-0016）：小标题由表自己的中文名给，不编。
+        return {"daily_basic": "估值（每日指标）"}.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
 
 
@@ -111,6 +157,20 @@ def build(
     sections: list[Section] = []
     for selection in template.data:
         start, end = window(calendar, as_of, selection.days)
+        if selection.dataset in templates.TABLE_DATASETS:
+            # 参考表条目（ADR-0016）：不走 Bar 查询，也没有复权口径。
+            rows = read_table(selection.dataset, code, start, end, root=config.parquet_dir())
+            sections.append(
+                Section(
+                    title=heading(selection, len(rows)),
+                    body=table.render_valuation(
+                        rows,
+                        fields=selection.fields or (),
+                        format=template.format,
+                    ),
+                )
+            )
+            continue
         bars = read_bars(
             code,
             start,

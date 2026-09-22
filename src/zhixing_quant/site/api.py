@@ -33,6 +33,7 @@ from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Listing
 from zhixing_quant.domain.symbol import UnknownCode, normalize_code
 from zhixing_quant.site import prompt, search, templates
+from zhixing_quant.site.search import search_indexes
 from zhixing_quant.sources.akshare.calendar import load_calendar
 from zhixing_quant.sources.akshare.master import read_master
 
@@ -158,7 +159,11 @@ def create_app(
 
     @app.get("/api/search")
     def api_search(q: str, limit: int = Query(SEARCH_LIMIT, ge=1, le=SEARCH_MAX)) -> Any:
-        return {"hits": list(book.match(q, limit=limit))}
+        stocks = [{**asdict(hit), "kind": "stock"} for hit in book.match(q, limit=limit)]
+        indexes = [
+            {"code": h.code, "name": h.name, "by": h.by, "kind": h.kind} for h in search_indexes(q)
+        ]
+        return {"hits": [*indexes, *stocks]}
 
     @app.get("/api/templates")
     def api_templates() -> Any:
@@ -166,6 +171,7 @@ def create_app(
 
     @app.post("/api/prompt")
     def api_prompt(body: PromptBody) -> Any:
+        """生成提示词。指数不走这里——模板是股票口径（06 §四），指数有自己的 K线查询。"""
         """生成一条提示词。失败一律 400 带上原来那句话，不改写、不翻译。
 
         收口成一条 `except ValueError` 是因为生成路上**可预期**的失败全是它的子类——pending 模板、
@@ -185,6 +191,21 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"text": built.text, "tokens": built.tokens, "warn": built.warn}
+
+    @app.get("/api/kline")
+    def api_kline(
+        code: str,
+        kind: str = Query("stock", pattern="^(stock|index)$"),
+        days: int = Query(120, ge=5, le=500),
+    ) -> Any:
+        """K线查询（不复权；指数走参考表）。数据的口径与形状由 `prompt.read_kline` 定。"""
+        if kind == "stock":
+            code = _known(code, names)
+        return {
+            "kind": kind,
+            "code": code,
+            "bars": prompt.read_kline(code, days=days, kind=kind),
+        }
 
     @app.get("/api/recent")
     def api_recent_list() -> Any:

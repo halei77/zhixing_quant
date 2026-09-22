@@ -42,12 +42,12 @@ templates:
 
   # 以下三条是 06 §五 的草案，等对应组件落地才进一期。
   - name: 长期投资
-    status: pending
-    waiting_on: 二期财务数据组件（06 §四：Forward PE、PE(TTM)/PB/PS 历史、ROE、增速、分红）
+    status: ready
     role: 你是资深 A 股基本面分析师
     task: 评估估值水平与基本面趋势
     data:
       - {dataset: daily, days: 750}
+      - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
     format: markdown
     fields: [open, high, low, close, volume, amount]
     adjust: backward
@@ -56,7 +56,7 @@ templates:
 
   - name: 建仓价分析
     status: pending
-    waiting_on: 二期财务数据组件（合理建仓区间的分母要 earnings/PE 序列）
+    waiting_on: earnings/ROE/增速序列（A 桶财务指标组件验收后落地，daily_basic 只有估值没有盈利）
     role: 你是资深 A 股基本面分析师
     task: 测算合理建仓区间，并给出区间对应的假设
     data:

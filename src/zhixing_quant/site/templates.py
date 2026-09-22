@@ -31,6 +31,20 @@ STATUSES: tuple[str, ...] = ("ready", "pending")
 #: 06 §四 K线组件的可选字段。`turnover` 的分子在K线上、分母（流通股本）不在，所以"请求了
 #: 它却没给分母"是拒绝而不是悄悄少一列（ADR-0011 决定 5）。
 FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "amount", "turnover")
+#: 参考表类 dataset（ADR-0016）：字段清单按表各自声明，装载时按 dataset 类别校验。
+TABLE_DATASETS: dict[str, tuple[str, ...]] = {
+    "daily_basic": (
+        "close",
+        "pe",
+        "pe_ttm",
+        "pb",
+        "ps_ttm",
+        "dv_ttm",
+        "total_mv",
+        "circ_mv",
+        "turnover_rate",
+    ),
+}
 
 
 class TemplateConfigError(ValueError):
@@ -43,10 +57,14 @@ class Selection:
 
     天数按交易日数，与 `storage.query.Cover.days` 同一口径（06 §四 说的"每周期独立选天数"要的
     是"能切出多少根样本"，不是日历跨度）。换算成区间起点是 5b 的事：纯层不感知盘上深度。
+
+    `fields` 是 ADR-0016 加的：参考表条目**必须**自带列清单（估值列与K线列是两套，
+    模板级的那份服务不了两种表），Bar 条目为 None（用模板级 fields）。
     """
 
     dataset: str
     days: int
+    fields: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -155,24 +173,38 @@ def _selections(rows: object, *, where: str) -> tuple[Selection, ...]:
         days = _int(_require(item, "days", where=where), "days")
         if days <= 0:
             raise TemplateConfigError(f"{where} 要 {dataset} 的 {days} 天：天数得是正数")
+        fields: tuple[str, ...] | None = None
+        if dataset in TABLE_DATASETS:
+            # 参考表条目（ADR-0016）：列清单必须自带，且只许选这张表自己的列。
+            given = item.get("fields")
+            if given is None:
+                raise TemplateConfigError(
+                    f"{where} 的参考表 {dataset} 要自带 fields：估值列与K线列是两套，"
+                    "模板级那份服务不了它"
+                )
+            names = tuple(
+                _text(x, "字段名", where=where)
+                for x in _fields(given, where=where, allowed=TABLE_DATASETS[dataset])
+            )
+            fields = names
         if any(selection.dataset == dataset for selection in out):
             raise TemplateConfigError(
                 f"{where} 的 {dataset} 出现了两次：同一周期给两条深度不是组合，是笔误"
             )
-        out.append(Selection(dataset=dataset, days=days))
+        out.append(Selection(dataset=dataset, days=days, fields=fields))
     return tuple(out)
 
 
-def _fields(value: object, *, where: str) -> tuple[str, ...]:
+def _fields(value: object, *, where: str, allowed: tuple[str, ...] = FIELDS) -> tuple[str, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise TemplateConfigError(f"{where} 的 fields 要是一个列表")
     names = tuple(_text(item, "字段名", where=where) for item in value)
     if not names:
         raise TemplateConfigError(f"{where} 的 fields 是空的：一张没有列的表不是表")
     for name in names:
-        if name not in FIELDS:
+        if name not in allowed:
             raise TemplateConfigError(
-                f"{where} 请求了没有的字段 {name!r}，可选：{'、'.join(FIELDS)}"
+                f"{where} 请求了没有的字段 {name!r}，可选：{'、'.join(allowed)}"
             )
     if len(set(names)) != len(names):
         raise TemplateConfigError(f"{where} 的 fields 有重复：同一列印两遍只会让 token 翻倍")

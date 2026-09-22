@@ -303,10 +303,63 @@ def parse_holder_number(
     return rows
 
 
+class IndexDailyRow(NamedTuple):
+    """`index_daily` 一行：一只指数的日线 OHLC（站点"查指数"的数据底座）。
+
+    指数不是股票：R004 的涨跌幅限值、R005 的因子对它都不适用——它走 ADR-0015 的
+    表级校验，OHLC 不变量在解析器里逐行验（与 R001 同一条不等式，表内自己的那一份）。
+    vol=手、amount=千元（Tushare 谱系口径，2026-09-22 实测：上证当日 amount 1.008e9 千元）。
+    """
+
+    source: str
+    symbol: str  # 指数代码带市场后缀（000001.SH / 399006.SZ）——它与个股代码空间重叠，必须带
+    trade_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None
+    amount: float | None
+
+
+def parse_index_daily(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[IndexDailyRow]:
+    rows: list[IndexDailyRow] = []
+    seen: set[tuple[str, date]] = set()
+    for raw in items:
+        symbol = _field(raw, fields, "ts_code")
+        trade_date = _as_date(_field(raw, fields, "trade_date"))
+        o, h = float(_field(raw, fields, "open")), float(_field(raw, fields, "high"))
+        low, close = float(_field(raw, fields, "low")), float(_field(raw, fields, "close"))
+        # R001 同一条不等式的表内版本：指数没有涨跌停语义，但 OHLC 不变量一样是硬的。
+        if not h >= max(o, close) >= min(o, close) >= low > 0:
+            raise ValueError(f"{symbol}@{trade_date} OHLC 不成立：O={o} H={h} L={low} C={close}")
+        key = (symbol, trade_date)
+        if key in seen:
+            raise ValueError(f"{symbol}@{trade_date} 同一页里出现两次（分页重叠）")
+        seen.add(key)
+        rows.append(
+            IndexDailyRow(
+                source,
+                symbol,
+                trade_date,
+                o,
+                h,
+                low,
+                close,
+                _opt(raw, fields, "vol"),
+                _opt(raw, fields, "amount"),
+            )
+        )
+    return rows
+
+
 PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], list[Any]]] = {
     "stk_limit": parse_stk_limit,
     "daily_basic": parse_daily_basic,
     "forecast": parse_forecast,
     "fina_audit": parse_fina_audit,
     "stk_holdernumber": parse_holder_number,
+    "index_daily": parse_index_daily,
 }

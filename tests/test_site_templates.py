@@ -53,7 +53,8 @@ def test_the_shipped_table_loads() -> None:
     cfg = templates.load(config.prompt_templates_file())
     assert cfg.token_warn_above == 100000
     ready = [t.name for t in cfg.templates if t.status == "ready"]
-    assert ready == ["短期投资", "波段"]
+    # 长期投资 2026-09-22 翻 ready（ADR-0016 估值组件）；建仓价分析等 earnings 序列仍 pending
+    assert ready == ["短期投资", "波段", "长期投资"]
     assert [(s.dataset, s.days) for s in cfg.by_name("短期投资").data] == [
         ("daily", 120),
         ("minute_60", 60),
@@ -230,3 +231,48 @@ def test_selections_keep_the_declared_order() -> None:
         root(row(data=[{"dataset": "daily", "days": 5}, {"dataset": "minute_5", "days": 2}]))
     )
     assert [s.dataset for s in cfg.templates[0].data] == ["daily", "minute_5"]
+
+
+def test_a_table_entry_requires_its_own_fields(tmp_path: Path) -> None:
+    """ADR-0016：参考表条目必须自带 fields——估值列与K线列是两套，模板级那份服务不了它。"""
+    body = """
+token_warn_above: 100000
+templates:
+  - name: 测试
+    status: ready
+    role: r
+    task: t
+    data:
+      - {dataset: daily, days: 10}
+      - {dataset: daily_basic, days: 10}
+    format: markdown
+    fields: [close]
+    adjust: backward
+    output: o
+"""
+    path = tmp_path / "t.yaml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(TemplateConfigError, match="要自带 fields"):
+        templates.load(path)
+
+
+def test_a_table_entry_rejects_bar_only_fields(tmp_path: Path) -> None:
+    body = """
+token_warn_above: 100000
+templates:
+  - name: 测试
+    status: ready
+    role: r
+    task: t
+    data:
+      - {dataset: daily, days: 10}
+      - {dataset: daily_basic, days: 10, fields: [open, pe]}
+    format: markdown
+    fields: [close]
+    adjust: backward
+    output: o
+"""
+    path = tmp_path / "t.yaml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(TemplateConfigError, match="可选"):
+        templates.load(path)

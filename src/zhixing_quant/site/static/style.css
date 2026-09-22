@@ -1,160 +1,168 @@
-/* 知行 · 提示词站点（一期唯一一份样式表）。
-   没有框架、没有 CDN：站点在公网上给一个人用（06 §一），样式只需让四件事看得出边界——
-   选票区、模板区、正文区、口令状态。 */
+/* 知行 · 提示词站点 — iOS 27 liquid glass（2026-09-22 重设计）。
+   三条铁律：玻璃只给浮层；红涨绿跌不反着来；数字等宽。零依赖零字体文件。 */
 
 :root {
-  --line: #d8d3c8;
-  --ink: #1d1b16;
-  --muted: #6d675d;
-  --accent: #1c5c8e;
-  --warn: #a1301f;
-  --paper: #f7f5f0;
+  --ink: #0b0e14;
+  --glass-dark: rgba(255, 255, 255, 0.07);
+  --glass-line: rgba(255, 255, 255, 0.14);
+  --text: #eef1f6;
+  --text-dim: #8d94a3;
+  --up: #e8463f;   /* A股：红涨 */
+  --down: #1fa97a; /* A股：绿跌 */
+  --seal: #d5453c;
+  --radius: 22px;
+  --blur: blur(28px) saturate(160%);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --ink: #f2f4f8;
+    --glass-dark: rgba(255, 255, 255, 0.66);
+    --glass-line: rgba(15, 23, 42, 0.08);
+    --text: #101623;
+    --text-dim: #5b6472;
+  }
 }
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; margin: 0; }
 
 body {
-  margin: 0 auto;
-  max-width: 64rem;
-  padding: 1.25rem 1rem 4rem;
-  background: var(--paper);
-  color: var(--ink);
-  font: 15px/1.6 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  background:
+    radial-gradient(120% 90% at 85% -10%, rgba(213, 69, 60, 0.12), transparent 60%),
+    radial-gradient(120% 90% at 0% 110%, rgba(31, 169, 122, 0.08), transparent 55%),
+    var(--ink);
+  color: var(--text);
+  font: 400 17px/1.5 -apple-system, "SF Pro Text", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+  min-height: 100dvh;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
-header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  align-items: baseline;
-  justify-content: space-between;
-  border-bottom: 2px solid var(--ink);
-  padding-bottom: 0.5rem;
+main { max-width: 640px; margin: 0 auto; padding: 0 16px 48px; display: grid; gap: 14px; }
+
+/* ── 吸顶玻璃条：层级 1 ─────────────────────────────── */
+.bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 12px;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  background: var(--glass-dark);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--glass-line);
+}
+.seal {
+  font-weight: 700; font-size: 15px; letter-spacing: 2px;
+  color: #fff; background: var(--seal);
+  width: 44px; height: 44px; border-radius: 12px;
+  display: grid; place-items: center; line-height: 1.1;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.22);
+  writing-mode: vertical-rl; text-orientation: upright;
+}
+.token-field { position: relative; flex: 1; display: flex; align-items: center; gap: 8px; }
+#token {
+  flex: 1; height: 40px; padding: 0 14px; border-radius: 12px;
+  border: 1px solid var(--glass-line);
+  background: var(--glass-dark); color: var(--text);
+  font-size: 15px;
+}
+#token:focus { outline: 2px solid var(--seal); outline-offset: 1px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); }
+.dot.on { background: var(--down); }
+.dot.off { background: var(--up); }
+
+/* ── 玻璃卡：只给浮起的内容块 ───────────────────────── */
+.glass {
+  background: var(--glass-dark);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--radius);
+  padding: 16px;
 }
 
-h1 {
-  margin: 0;
-  font-size: 1.25rem;
-}
-
-h2 {
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
-}
-
-h3 {
-  margin: 1rem 0 0.25rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-  font-weight: 600;
-}
-
-section {
-  margin: 1.5rem 0;
-  padding-bottom: 1.25rem;
-  border-bottom: 1px solid var(--line);
-}
-
-#auth {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
-#auth-state {
-  min-width: 4em;
-  font-variant-numeric: tabular-nums;
-}
-
-input,
-select,
-button {
-  font: inherit;
-  color: inherit;
-}
-
-input,
-select {
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: #fff;
-}
-
+.search-zone { position: relative; padding: 10px; }
+.search-wrap { position: relative; }
 #search {
-  width: 100%;
+  width: 100%; height: 46px; padding: 0 16px;
+  border-radius: 16px; border: 1px solid var(--glass-line);
+  background: var(--glass-dark); color: var(--text); font-size: 17px;
+  -webkit-appearance: none; appearance: none;
 }
+#search:focus { outline: 2px solid var(--seal); outline-offset: 1px; }
+#search::-webkit-search-cancel-button { -webkit-appearance: none; }
 
-button {
-  padding: 0.35rem 0.9rem;
-  border: 1px solid var(--ink);
-  border-radius: 3px;
-  background: #fff;
-  cursor: pointer;
+.suggest {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px);
+  margin: 0; padding: 6px; list-style: none;
+  background: var(--glass-dark);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-line); border-radius: 18px;
+  max-height: 44vh; overflow: auto; z-index: 20;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
 }
+.suggest li { margin: 0; }
+.suggest button {
+  all: unset; display: flex; justify-content: space-between; align-items: center;
+  width: 100%; padding: 11px 12px; border-radius: 12px; cursor: pointer;
+  color: var(--text); font-size: 16px;
+}
+.suggest button:focus-visible, .suggest button:hover { background: rgba(213, 69, 60, 0.16); }
+.suggest .kind { font-size: 12px; color: var(--text-dim); }
+.suggest .kind.index { color: var(--seal); }
 
-button:hover {
-  background: var(--ink);
-  color: #fff;
-}
+.hint { font-size: 13px; color: var(--text-dim); margin-top: 8px; }
 
-.list {
-  list-style: none;
-  margin: 0.5rem 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
+/* ── 行情卡 ─────────────────────────────────────────── */
+.quote-head { display: flex; justify-content: space-between; align-items: flex-start; }
+.q-name { font-size: 22px; font-weight: 650; }
+.q-code { font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.q-last { text-align: right; }
+.q-close { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.q-change { font-size: 15px; font-variant-numeric: tabular-nums; }
+.up { color: var(--up); }
+.down { color: var(--down); }
 
-.list li {
-  display: flex;
-  align-items: center;
-  gap: 0.2rem;
-}
+#kline { width: 100%; height: 260px; display: block; margin-top: 12px; border-radius: 14px; }
 
-.list button {
-  padding: 0.2rem 0.55rem;
-  font-size: 0.9rem;
+.q-stats {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px;
 }
+.q-stats div { text-align: center; }
+.q-stats dt { font-size: 12px; color: var(--text-dim); }
+.q-stats dd { font-size: 15px; font-variant-numeric: tabular-nums; }
 
-.tag {
-  font-size: 0.7rem;
-  color: var(--muted);
-  text-transform: uppercase;
+/* ── 提示词抽屉 ─────────────────────────────────────── */
+.prompt-actions { display: flex; gap: 8px; }
+#templates {
+  flex: 1; height: 42px; padding: 0 10px; border-radius: 12px;
+  border: 1px solid var(--glass-line); background: var(--glass-dark); color: var(--text);
 }
-
-.muted {
-  color: var(--muted);
-  font-size: 0.85rem;
+#asof {
+  height: 42px; padding: 0 8px; border-radius: 12px;
+  border: 1px solid var(--glass-line); background: var(--glass-dark); color: var(--text);
 }
-
-.warn {
-  color: var(--warn);
-  font-size: 0.85rem;
+button.primary {
+  height: 42px; padding: 0 18px; border: none; border-radius: 14px;
+  background: var(--seal); color: #fff; font-size: 16px; font-weight: 600; cursor: pointer;
 }
-
-#tokens {
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--accent);
-}
+button.primary:active { transform: scale(0.97); }
+button.primary:disabled { opacity: 0.45; cursor: default; }
+button.wide { width: 100%; margin-top: 10px; }
 
 .preview {
-  margin-top: 0.6rem;
-  padding: 0.9rem;
-  max-height: 34rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: #fff;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 0.82rem;
-  line-height: 1.45;
+  margin-top: 10px; padding: 14px; border-radius: 14px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--glass-line);
+  font: 400 13px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+  max-height: 46vh; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  color: var(--text);
+}
+@media (prefers-color-scheme: light) {
+  .preview { background: rgba(15, 23, 42, 0.05); }
+}
+
+.status {
+  max-width: 640px; margin: 0 auto; padding: 0 16px;
+  min-height: 24px; font-size: 13px; color: var(--text-dim); text-align: center;
+}
+#warn { color: var(--up); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
 }
