@@ -15,6 +15,7 @@ rds 单次查询在 5000 行处静默截断（响应声称 count=5644、has_more
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Callable, Mapping
 from datetime import date, timedelta
@@ -45,6 +46,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     pull = sub.add_parser("pull", help="拉某个交易日的整张表")
+    capture = sub.add_parser(
+        "capture", help="抓一份真实响应快照落 golden/（ADR-0015 决定 4；采纳进 tests/ 需用户批准）"
+    )
+    capture.add_argument("--table", default="stk_limit", help="参考表名")
+    capture.add_argument("--day", required=True, metavar="YYYY-MM-DD")
+    capture.add_argument(
+        "--symbols", default=None, help="逐票模式；缺省全市场（受 5000 行截断约束）"
+    )
     pull.add_argument("--table", default="stk_limit", help="参考表名，默认 stk_limit")
     pull.add_argument("--day", required=True, metavar="YYYY-MM-DD", help="要哪个交易日")
     pull.add_argument("--symbols", default=None, help="逗号分隔的票池过滤；缺省全市场入库")
@@ -391,12 +400,52 @@ def _pull(
     return "\n".join([*head, *tail]), 0, ledger
 
 
+def _capture(args: argparse.Namespace) -> str:
+    """抓一份原始响应快照进 golden/relay/（ADR-0015 决定 4 的"抓下来的"那一半；
+    "认过的"要用户批准后才进 tests/golden/，两处隔开）。"""
+    from zhixing_quant.sources.relay.client import fetch as relay_fetch
+
+    day = date.fromisoformat(args.day)
+    wanted: list[str] | None = (
+        [c.strip() for c in args.symbols.split(",") if c.strip()] if args.symbols else None
+    )
+    out_dir = config.data_root() / "golden" / "relay"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lines = [f"# relay golden · {args.table} · {day.isoformat()}"]
+    if wanted is None:
+        source, body = relay_fetch(args.table, {"trade_date": day.strftime("%Y%m%d")})
+        name = f"{args.table}-{day.isoformat()}-{source}.json"
+        (out_dir / name).write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+        lines.append(
+            f"- {name}（全市场首页，{len((body.get('data') or {}).get('items') or [])} 行）"
+        )
+    else:
+        from zhixing_quant.domain.symbol import normalize_code
+        from zhixing_quant.sources.akshare.fetch import market_of
+
+        for symbol in wanted:
+            source, body = relay_fetch(
+                args.table,
+                {
+                    "ts_code": f"{normalize_code(symbol)}.{market_of(symbol).upper()}",
+                    "trade_date": day.strftime("%Y%m%d"),
+                },
+            )
+            name = f"{args.table}-{day.isoformat()}-{symbol}-{source}.json"
+            (out_dir / name).write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+            lines.append(f"- {name}（{len((body.get('data') or {}).get('items') or [])} 行）")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     from zhixing_quant.sources.relay.client import fetch as relay_fetch
 
     args = build_parser().parse_args(argv)
     try:
         args.day_parsed = date.fromisoformat(args.day)
+        if args.command == "capture":
+            print(_capture(args))
+            return 0
         check_range(date(2000, 1, 1), args.day_parsed)
         report, code, _ = _pull(
             args,
