@@ -49,6 +49,30 @@ class TableSpec:
         return tuple(name for name, _ in self.columns)
 
 
+class DailyBasicRow(NamedTuple):
+    """与 `sources.relay.tables.DailyBasicRow` 同形同序（结构互认见模块说明）。"""
+
+    source: str
+    symbol: str
+    trade_date: date
+    close: float
+    turnover_rate: float | None
+    turnover_rate_f: float | None
+    volume_ratio: float | None
+    pe: float | None
+    pe_ttm: float | None
+    pb: float | None
+    ps: float | None
+    ps_ttm: float | None
+    dv_ratio: float | None
+    dv_ttm: float | None
+    total_share: float | None
+    float_share: float | None
+    free_share: float | None
+    total_mv: float | None
+    circ_mv: float | None
+
+
 SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="stk_limit",
@@ -62,6 +86,33 @@ SPECS: tuple[TableSpec, ...] = (
         key=("trade_date",),
         order=("trade_date",),
         row=StkLimitRow,
+    ),
+    TableSpec(
+        name="daily_basic",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("trade_date", "DATE"),
+            ("close", "DOUBLE"),
+            ("turnover_rate", "DOUBLE"),
+            ("turnover_rate_f", "DOUBLE"),
+            ("volume_ratio", "DOUBLE"),
+            ("pe", "DOUBLE"),
+            ("pe_ttm", "DOUBLE"),
+            ("pb", "DOUBLE"),
+            ("ps", "DOUBLE"),
+            ("ps_ttm", "DOUBLE"),
+            ("dv_ratio", "DOUBLE"),
+            ("dv_ttm", "DOUBLE"),
+            ("total_share", "DOUBLE"),
+            ("float_share", "DOUBLE"),
+            ("free_share", "DOUBLE"),
+            ("total_mv", "DOUBLE"),
+            ("circ_mv", "DOUBLE"),
+        ),
+        key=("trade_date",),
+        order=("trade_date",),
+        row=DailyBasicRow,
     ),
 )
 _BY_NAME = {spec.name: spec for spec in SPECS}
@@ -139,8 +190,12 @@ def read_table(
     end: date,
     *,
     root: Path | None = None,
-) -> list[NamedTuple]:
-    """一只票一段区间的参考表行，按 `spec.order` 升序。没落过盘就是空，不是错。"""
+) -> list[Any]:
+    """一只票一段区间的参考表行，按 `spec.order` 升序。没落过盘就是空，不是错。
+
+    返回类型给 `list[Any]`：每张表的具体行类型由表名决定，调用方按名取用；静态上
+    收窄到具体 NamedTuple 需要按表重载，值不过这条查询的体量。
+    """
     spec = table_spec(table)
     out: list[Any] = []
     with duckdb.connect() as con:

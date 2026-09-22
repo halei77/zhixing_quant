@@ -9,9 +9,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from zhixing_quant.domain.symbol import normalize_code
 
@@ -65,5 +65,87 @@ def parse_stk_limit(
     return rows
 
 
+class DailyBasicRow(NamedTuple):
+    """`daily_basic` 一行：某票某日的每日估值指标（不复权口径，Qoute §8 陷阱清单的
+    null 纪律在这里生效——源给 null 的字段保持 None，**禁止 0 填充**参与任何计算）。"""
+
+    source: str
+    symbol: str
+    trade_date: date
+    close: float
+    turnover_rate: float | None
+    turnover_rate_f: float | None
+    volume_ratio: float | None
+    pe: float | None
+    pe_ttm: float | None
+    pb: float | None
+    ps: float | None
+    ps_ttm: float | None
+    dv_ratio: float | None
+    dv_ttm: float | None
+    total_share: float | None
+    float_share: float | None
+    free_share: float | None
+    total_mv: float | None
+    circ_mv: float | None
+
+
+def _opt(row: Sequence[object], fields: Sequence[str], name: str) -> float | None:
+    """可空数值列：源给 null（字符串 'None' 或空）就保持 None——0 填充会把"没这数"
+    洗成"这数为 0"，银行/保险的估值科目大面积是 null，那是它们的常态不是异常。"""
+    text = _field(row, fields, name)
+    if text in ("", "None", "nan", "NULL", "null"):
+        return None
+    value = float(text)
+    if value != value:  # NaN
+        return None
+    return value
+
+
+def parse_daily_basic(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[DailyBasicRow]:
+    rows: list[DailyBasicRow] = []
+    seen: set[tuple[str, date]] = set()
+    for raw in items:
+        symbol = normalize_code(_field(raw, fields, "ts_code"))
+        trade_date = _as_date(_field(raw, fields, "trade_date"))
+        close = float(_field(raw, fields, "close"))
+        if close <= 0:
+            raise ValueError(f"{symbol}@{trade_date} 收盘价 {close} 不成立")
+        key = (symbol, trade_date)
+        if key in seen:
+            raise ValueError(f"{symbol}@{trade_date} 在同一页里出现两次（分页重叠）")
+        seen.add(key)
+        rows.append(
+            DailyBasicRow(
+                source,
+                symbol,
+                trade_date,
+                close,
+                _opt(raw, fields, "turnover_rate"),
+                _opt(raw, fields, "turnover_rate_f"),
+                _opt(raw, fields, "volume_ratio"),
+                _opt(raw, fields, "pe"),
+                _opt(raw, fields, "pe_ttm"),
+                _opt(raw, fields, "pb"),
+                _opt(raw, fields, "ps"),
+                _opt(raw, fields, "ps_ttm"),
+                _opt(raw, fields, "dv_ratio"),
+                _opt(raw, fields, "dv_ttm"),
+                _opt(raw, fields, "total_share"),
+                _opt(raw, fields, "float_share"),
+                _opt(raw, fields, "free_share"),
+                _opt(raw, fields, "total_mv"),
+                _opt(raw, fields, "circ_mv"),
+            )
+        )
+    return rows
+
+
 #: 表名 → 解析器。zx-relay 按名取；新表在这里登记才算"可接"（ADR-0015 后果第一条）。
-PARSERS = {"stk_limit": parse_stk_limit}
+#: 类型显式给全：两张表的行类型不同，不注解会被 mypy 并成 object。
+PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], list[Any]]] = {
+    "stk_limit": parse_stk_limit,
+    "daily_basic": parse_daily_basic,
+}

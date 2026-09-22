@@ -19,7 +19,7 @@ import pytest
 
 from zhixing_quant.sources.jobs import relay_cli
 from zhixing_quant.sources.relay import client as relay_client
-from zhixing_quant.sources.relay.tables import parse_stk_limit
+from zhixing_quant.sources.relay.tables import parse_daily_basic, parse_stk_limit
 from zhixing_quant.storage import tables
 from zhixing_quant.storage.query import read_bars
 
@@ -144,7 +144,7 @@ def test_write_is_idempotent_and_repairs_changed_values(tmp_path: Any) -> None:
     )
     assert (changed.added, changed.repaired) == (0, 1)
     back = tables.read_table("stk_limit", "600519", DAY, DAY, root=tmp_path)
-    assert back[0].up_limit == 11.05 and back[0].source == "rds"  # type: ignore[attr-defined]
+    assert back[0].up_limit == 11.05 and back[0].source == "rds"
 
 
 def test_write_refuses_conflicting_rows_and_wrong_type(tmp_path: Any) -> None:
@@ -169,13 +169,117 @@ def test_unknown_table_and_bar_reader_are_both_refused(tmp_path: Any) -> None:
         read_bars("600519", DAY, DAY, dataset="stk_limit", root=tmp_path)
 
 
+# ── daily_basic ──────────────────────────────────────────────────────────────
+
+BASIC_FIELDS = [
+    "ts_code",
+    "trade_date",
+    "close",
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dv_ratio",
+    "dv_ttm",
+    "total_share",
+    "float_share",
+    "free_share",
+    "total_mv",
+    "circ_mv",
+]
+
+
+def test_daily_basic_null_stays_null_never_zero() -> None:
+    """陷阱清单的 null 纪律：源给 'None' 的字段保持 None——0 填充会把"没这数"洗成"这数为 0"。"""
+    raw = [
+        "600519.SH",
+        "20260918",
+        "1257.12",
+        "0.2",
+        "None",
+        "",
+        "19.0",
+        "None",
+        "6.2",
+        "9.2",
+        "9.2",
+        "4.1",
+        "4.1",
+        "125008.16",
+        "None",
+        "56879.87",
+        "156735231.0",
+        "156735231.0",
+    ]
+    rows = parse_daily_basic("rds", BASIC_FIELDS, [raw])
+    row = rows[0]
+    assert row.turnover_rate == 0.2
+    assert row.turnover_rate_f is None and row.volume_ratio is None and row.pe_ttm is None
+    assert row.float_share is None
+    assert row.close == 1257.12
+
+
+def test_daily_basic_close_anchor_rejects_mismatch(tmp_path: Any) -> None:
+    """表内 close 与干净区收盘差 5 分钱：超过一分钱容差 → 整批拒。两边都到分，差一分就是不同真。"""
+    raw = ["600519.SH", "20260918", "1257.17"] + ["None"] * 15
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        return "rds", {"code": 0, "data": {"fields": BASIC_FIELDS, "items": [raw]}}
+
+    report, code, ledger = relay_cli._pull(
+        _args(table="daily_basic"),
+        fetch=fetch,
+        prev_ref_of=lambda _symbol, _day: None,
+        same_ref_of=lambda _symbol, _day: 1257.12,
+        root=tmp_path,
+    )
+    assert code == 1 and ledger is None
+    assert "整批拒" in report and "1257.17" in report
+
+
+def test_daily_basic_close_anchor_passes_and_writes(tmp_path: Any) -> None:
+    raw = ["600519.SH", "20260918", "1257.12", "0.2"] + ["None"] * 14
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        return "rds", {"code": 0, "data": {"fields": BASIC_FIELDS, "items": [raw]}}
+
+    _report, code, ledger = relay_cli._pull(
+        _args(table="daily_basic"),
+        fetch=fetch,
+        prev_ref_of=lambda _symbol, _day: None,
+        same_ref_of=lambda _symbol, _day: 1257.12,
+        root=tmp_path,
+    )
+    assert code == 0 and ledger is not None and ledger.added == 1
+    back = tables.read_table("daily_basic", "600519", DAY, DAY, root=tmp_path)
+    assert back[0].close == 1257.12 and back[0].pe is None
+
+
+def test_a_table_without_a_registered_anchor_is_refused(tmp_path: Any) -> None:
+    """ADR-0015 决定 3：没配锚的表不许拉——fail-closed 不给"先拉了再补锚"留门。"""
+    with pytest.raises(ValueError, match="没有登记解析器或锚点"):
+        relay_cli._pull(
+            _args(table="forecast"),
+            fetch=lambda _a, _p: ("rds", {"code": 0, "data": {"fields": [], "items": []}}),
+            prev_ref_of=lambda _s, _d: None,
+            same_ref_of=lambda _s, _d: None,
+            root=tmp_path,
+        )
+
+
 # ── relay_cli ────────────────────────────────────────────────────────────────
 
 
-def _args(day: str = "2026-09-18", symbols: str | None = None) -> argparse.Namespace:
+def _args(
+    day: str = "2026-09-18", symbols: str | None = None, table: str = "stk_limit"
+) -> argparse.Namespace:
     return argparse.Namespace(
         command="pull",
-        table="stk_limit",
+        table=table,
         day=day,
         day_parsed=date.fromisoformat(day),
         symbols=symbols,
@@ -198,7 +302,7 @@ def test_pull_writes_anchored_rows_and_counts_unanchored(tmp_path: Any) -> None:
         return 10.0
 
     report, code, ledger = relay_cli._pull(
-        _args(), fetch=fetch, prev_close_of=prev, limit_pct_of=limit, root=tmp_path
+        _args(), fetch=fetch, prev_ref_of=prev, same_ref_of=prev, limit_of=limit, root=tmp_path
     )
     assert code == 0 and ledger is not None and ledger.added == 1, "锚不上的剔除，只落有锚的"
     assert "1 行锚不上被剔除" in report
@@ -214,8 +318,9 @@ def test_pull_rejects_the_whole_page_when_anchor_breaks(tmp_path: Any) -> None:
     report, code, ledger = relay_cli._pull(
         _args(),
         fetch=fetch,
-        prev_close_of=lambda _symbol, _day: 10.03,
-        limit_pct_of=lambda _symbol: 10.0,
+        prev_ref_of=lambda _symbol, _day: 10.03,
+        same_ref_of=lambda _symbol, _day: 10.03,
+        limit_of=lambda _symbol: 10.0,
         root=tmp_path,
     )
     assert code == 1 and ledger is None
@@ -258,8 +363,9 @@ def test_pull_filters_by_symbols_and_handles_empty_day(tmp_path: Any) -> None:
     report, code, ledger = relay_cli._pull(
         _args(symbols="600519"),
         fetch=fetch,
-        prev_close_of=lambda _symbol, _day: 10.0,
-        limit_pct_of=lambda _symbol: 10.0,
+        prev_ref_of=lambda _symbol, _day: 10.0,
+        same_ref_of=lambda _symbol, _day: 10.0,
+        limit_of=lambda _symbol: 10.0,
         root=tmp_path,
     )
     assert code == 0 and ledger is None and "没有行" in report
