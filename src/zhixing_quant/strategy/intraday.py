@@ -1,5 +1,9 @@
 """日内做T 候选策略（07 §四，Step 7）。
 
+**窗口口径（07 §四 2026-09-22 实测修订）**：所有回看窗都是**跨日**的K线根数，不限当日。
+起因是真跑里三个候选在 minute_60 上零回合——一天只有 4 根，"当日之内回看 10~40 根"永远
+预热不满，零信号是几何必然。这里按修订后的口径实现。
+
 共用的一套姿态先说清，几个策略都是它的变体：
 
 - **状态从持仓推出来，不自己记**。`view.holding − 底仓`（本次运行首根看到的持仓就是底仓）
@@ -18,26 +22,8 @@ C1（残差均值回归）不在此处：它需要跨票参考序列，引擎的
 from __future__ import annotations
 
 import random
-from datetime import date
 
 from zhixing_quant.backtest.engine import Signal, View
-from zhixing_quant.domain.bar import Bar
-
-
-def _today(view: View) -> list[Bar]:
-    """今天的根。它们在 `view.bars` 的尾部——历史序列跨日，倒着扫到日期变了就停。
-
-    日内回看量级（≤240 根）与全史（几千根）差一个数量级，这个扫法是 O(当日)；
-    按日全量过滤是 O(全史)，每根都来一遍就是 O(n²)。
-    """
-    day: date = view.bar.trade_date
-    out = []
-    for bar in reversed(view.bars):
-        if bar.trade_date != day:
-            break
-        out.append(bar)
-    out.reverse()
-    return out
 
 
 def _zscore(series: list[float]) -> float | None:
@@ -91,18 +77,15 @@ class _RoundMixin:
         return None
 
 
-class VWAPReversion(_RoundMixin):
-    """C2：相对当日累计 VWAP 的偏离 z 分数反转（07 §四）。
+class RollingReversion(_RoundMixin):
+    """C2：收盘对滚动均价的 z 分数反转，跨日窗口（07 §四）。
 
-    偏离 = `close/vwap − 1`，vwap 用累计**金额/累计量**（amount 是元、volume 是股，商就是
-    当日真实成交均价），窗口内均值归一后再标准化——早盘偏离天然大，不归一会把开盘半小时
-    当成常态极值。默认值取网格中位（`zx-backtest --strategy` 零参构造用的就是它们）。
-
-    止盈与止损共用同一对边界：偏离**缩回** z_exit 内是 thesis 兑现，**冲出** z_enter 之外
-    是 thesis 破产——两种都平仓，拖着不处理只会把可控的一笔小亏变成穿仓。
+    `z = (close − SMA_N) / STD_N`，N 含当前根。止盈与止损共用同一对边界：z **缩回** z_exit
+    内是 thesis 兑现，**冲出** z_enter 之外是 thesis 破产——两种都平仓，拖着不处理只会把
+    可控的一笔小亏变成穿仓。默认值取网格中位（`zx-backtest --strategy` 零参构造用它们）。
     """
 
-    name = "vwap_reversion"
+    name = "rolling_reversion"
 
     def __init__(self, lookback: int = 20, z_enter: float = 2.0, z_exit: float = 0.5) -> None:
         super().__init__()
@@ -118,18 +101,10 @@ class VWAPReversion(_RoundMixin):
         self.z_exit = z_exit
 
     def signals(self, view: View, /) -> Signal | None:
-        today = _today(view)
-        if len(today) < self.lookback:
+        if len(view.bars) < self.lookback:
             return None
-        devs: list[float] = []
-        cum_amount = cum_volume = 0.0
-        for bar in today:
-            if bar.volume <= 0:
-                continue
-            cum_amount += bar.amount
-            cum_volume += bar.volume
-            devs.append(bar.close / (cum_amount / cum_volume) - 1.0)
-        z = _zscore(devs[-self.lookback :])
+        closes = [bar.close for bar in view.bars[-self.lookback :]]
+        z = _zscore(closes)
         if z is None:
             return None
         up = z >= self.z_enter
@@ -146,14 +121,14 @@ class VWAPReversion(_RoundMixin):
         )
 
 
-class RangeBreakout(_RoundMixin):
-    """C3：开盘 `n_break` 根成区间，突破顺势、跌回边界即离场（07 §四）。
+class DonchianBreakout(_RoundMixin):
+    """C3：前 `n_break` 根高低点成区间（唐奇安），收盘突破顺势、跌回边界即离场（07 §四）。
 
     确认 = 最近 `confirm` 根收盘**全数**站在线外（盘中的影线刺一下不算）；离场看最后一根
     收盘落回区间内——趋势策略的止盈就是止损那一条线，利润回吐是它的既定成本。
     """
 
-    name = "range_breakout"
+    name = "donchian_breakout"
 
     def __init__(self, n_break: int = 10, confirm: int = 1) -> None:
         super().__init__()
@@ -165,16 +140,15 @@ class RangeBreakout(_RoundMixin):
         self.confirm = confirm
 
     def signals(self, view: View, /) -> Signal | None:
-        today = _today(view)
-        if len(today) < self.n_break + self.confirm:
+        if len(view.bars) < self.n_break + self.confirm:
             return None
-        window = today[: self.n_break]
+        window = view.bars[-(self.n_break + self.confirm) : -self.confirm]
         high = max(bar.high for bar in window)
         low = min(bar.low for bar in window)
-        tail = today[self.n_break :]
-        enter_sell = all(bar.close < low for bar in tail[-self.confirm :])
-        enter_buy = all(bar.close > high for bar in tail[-self.confirm :])
-        last = today[-1].close
+        tail = view.bars[-self.confirm :]
+        enter_sell = all(bar.close < low for bar in tail)
+        enter_buy = all(bar.close > high for bar in tail)
+        last = view.bar.close
         return self._act(
             view,
             enter_sell=enter_sell,
@@ -188,7 +162,7 @@ class RangeBreakout(_RoundMixin):
 class VolumeSpike(_RoundMixin):
     """C4：量比突增 + 价格同向确认，顺势一笔，`exit_bars` 根内时间止损（07 §四）。
 
-    突增判据 = 最近 `confirm` 根每根量 ≥ `k` × 其前 `confirm_window` 根均量（今日内、
+    突增判据 = 最近 `confirm` 根每根量 ≥ `k` × 其前 `confirm_window` 根均量（跨日、
     零量根剔除）；方向看确认段最后一根收对确认段前一根收。离场是**纯时间止损**——
     "回到 spike 前价"那种目标价要再引一个参数，网格膨胀，07 §四 定稿时就没给它。
     时间到但持仓已回底仓（上一笔委托被拒、或早被对手分支平掉）→ delta 判据天然沉默，
@@ -214,8 +188,7 @@ class VolumeSpike(_RoundMixin):
         self._opened_at: dict[str, int] = {}
 
     def signals(self, view: View, /) -> Signal | None:
-        today = _today(view)
-        if len(today) < self.confirm_window + self.confirm + 1:
+        if len(view.bars) < self.confirm_window + self.confirm + 1:
             return None
         if self._delta(view) != 0:
             opened = self._opened_at.get(view.code)
@@ -229,15 +202,15 @@ class VolumeSpike(_RoundMixin):
                 close_long=True,
                 note="time-stop",
             )
-        tail = today[-self.confirm :]
+        tail = view.bars[-self.confirm :]
         for i, bar in enumerate(tail):
-            head = today[: len(today) - len(tail) + i]
+            head = view.bars[: len(view.bars) - len(tail) + i]
             prev = [b for b in head[-self.confirm_window :] if b.volume > 0]
             if bar.volume <= 0 or not prev:
                 return None
             if bar.volume < self.k * sum(b.volume for b in prev) / len(prev):
                 return None
-        last, before = today[-1], today[-1 - self.confirm]
+        last, before = view.bars[-1], view.bars[-1 - self.confirm]
         up = last.close > before.close
         self._opened_at[view.code] = view.index
         return self._act(
@@ -288,4 +261,4 @@ class RandomBaseline:
 
 
 #: 竞争名册（07 §四）：C1 缺席，理由与入场条件写在 07，不在这里重复。
-CANDIDATES: tuple[type, ...] = (VWAPReversion, RangeBreakout, VolumeSpike)
+CANDIDATES: tuple[type, ...] = (RollingReversion, DonchianBreakout, VolumeSpike)

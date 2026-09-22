@@ -13,10 +13,10 @@ from typing import Any
 
 from zhixing_quant.backtest.engine import Strategy
 from zhixing_quant.strategy.intraday import (
+    DonchianBreakout,
     RandomBaseline,
-    RangeBreakout,
+    RollingReversion,
     VolumeSpike,
-    VWAPReversion,
 )
 
 
@@ -47,14 +47,14 @@ def slots() -> tuple[Slot, ...]:
     return (
         Slot(
             "C2",
-            "日内 VWAP 均值回归",
-            VWAPReversion,
+            "滚动均值回归",
+            RollingReversion,
             _product(lookback=(10, 20, 40), z_enter=(1.5, 2.0, 2.5), z_exit=(0.3, 0.5)),
         ),
         Slot(
             "C3",
-            "日内区间突破",
-            RangeBreakout,
+            "滚动区间突破",
+            DonchianBreakout,
             _product(n_break=(5, 10, 15), confirm=(1, 2)),
         ),
         Slot(

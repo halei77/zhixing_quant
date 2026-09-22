@@ -23,7 +23,7 @@ from zhixing_quant.compete.cli import _gate_row, _range
 from zhixing_quant.compete.grid import Slot, slots
 from zhixing_quant.compete.runner import Score
 from zhixing_quant.domain.bar import Bar
-from zhixing_quant.strategy.intraday import VWAPReversion
+from zhixing_quant.strategy.intraday import RollingReversion
 
 DAY0 = date(2026, 6, 1)
 
@@ -194,7 +194,7 @@ def test_best_is_stable_on_ties() -> None:
 
 def test_run_phase_reports_trips_by_code_and_pct() -> None:
     """一个真实的小场景走完 run_phase：期待至少一笔回合，且逐票计数落账。"""
-    slot = Slot("C2", "测试", VWAPReversion, ({"lookback": 5, "z_enter": 1.5, "z_exit": 0.5},))
+    slot = Slot("C2", "测试", RollingReversion, ({"lookback": 5, "z_enter": 1.5, "z_exit": 0.5},))
     # 价格全程留在 flat_bands(prev_close=10) 的 ±10% 板内——8.0 那种深跌会被判"跌停锁死"，
     # 卖单全拒、回合永远配不上（第一版就用 8.0，测出的是拒单簿不是竞争）。
     day1 = _bars(DAY0, [10.0, 10.4] * 10 + [9.2, 9.2, 9.2, 9.2])
@@ -224,7 +224,7 @@ def test_range_parses_and_refuses_reversed_order() -> None:
 
 
 def test_gate_row_rejects_zero_trip_and_independent_gates() -> None:
-    slot = Slot("C2", "t", VWAPReversion, ({},))
+    slot = Slot("C2", "t", RollingReversion, ({},))
     row = _gate_row(slot, {"p": 1}, _score(0, 0), _score(0, 0))
     assert "无回合" in row[-1], "零回合直接出局，不算胜率"
 

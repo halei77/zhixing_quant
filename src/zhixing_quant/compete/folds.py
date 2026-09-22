@@ -67,6 +67,16 @@ def split(days: tuple[date, ...], *, folds: int = 4) -> Selection:
     return Selection(folds=folds_out, test=test)
 
 
+def extended_test(days: tuple[date, ...]) -> tuple[date, ...]:
+    """5.4-4 的"向前扩一折"：测试段从末尾 20% 扩到末尾 40%（扩幅 ≈ 一折宽）。
+
+    只许扩一次——再扩就该回到"补数据"而不是继续烧选择段。扩过的测试段在报告里必须
+    标注：它吃掉了一段本属选择面的历史，同轮其他候选的测试段没有跟着扩，横向不可比。
+    """
+    cut = max(int(len(days) * (1 - 2 * TEST_FRAC)), MIN_SELECTION_DAYS)
+    return days[cut:]
+
+
 def selection_days(selection: Selection) -> tuple[date, ...]:
     """选择段 = 所有折的训练 ∪ 验证（并集即头部全部；给报告核"测试段没被碰过"用）。"""
     days: set[date] = set()

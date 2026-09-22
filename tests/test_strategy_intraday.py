@@ -25,10 +25,10 @@ from zhixing_quant.backtest.engine import Signal, run
 from zhixing_quant.domain.bar import Bar
 from zhixing_quant.strategy.intraday import (
     CANDIDATES,
+    DonchianBreakout,
     RandomBaseline,
-    RangeBreakout,
+    RollingReversion,
     VolumeSpike,
-    VWAPReversion,
 )
 
 DAY1 = date(2026, 9, 17)
@@ -115,16 +115,16 @@ def oscillation(n: int, base: float = 10.0, amp: float = 0.4) -> list[float]:
 
 def test_c2_stays_silent_through_warmup() -> None:
     """预热不足不许硬算：短序列的 z 是噪声。"""
-    strategy = VWAPReversion(lookback=20)
+    strategy = RollingReversion(lookback=20)
     bars = path(DAY1, oscillation(15))
     assert drive(strategy, bars) == []
 
 
 def test_c2_buys_a_deep_dip_and_exits_on_recovery() -> None:
     """下探极值 → 买（T入）；回到 VWAP 附近 → 卖平回合。这是它存在的全部理由。"""
-    strategy = VWAPReversion(lookback=20)
-    day1 = [*oscillation(17), 8.0, 8.2, 8.1]  # 尾部深跌
-    day2 = [8.5, 9.0, 9.5, *oscillation(18)]  # 次日拉回 + 震荡
+    strategy = RollingReversion(lookback=20)
+    day1 = [*oscillation(17), 7.0, 7.2, 7.1]  # 尾部深跌
+    day2 = [8.5, 9.5, 10.0, *oscillation(18)]  # 次日拉回 + 震荡
     signals = drive(strategy, path(DAY1, day1) + path(DAY2, day2))
     sides = [s.side for _, s in signals]
     assert "buy" in sides, "深跌必须触发 T入"
@@ -134,8 +134,8 @@ def test_c2_buys_a_deep_dip_and_exits_on_recovery() -> None:
 
 def test_c2_sells_a_spike_then_buys_back() -> None:
     """冲高极值 → 卖（T出）；跌回 → 买回。空回合那一半同样要转。"""
-    strategy = VWAPReversion(lookback=20)
-    day1 = [*oscillation(17), 13.0, 13.2, 13.1]  # 尾部冲高
+    strategy = RollingReversion(lookback=20)
+    day1 = [*oscillation(17), 13.5, 13.7, 13.6]  # 尾部冲高
     day2 = [12.0, 11.0, 10.5, *oscillation(18)]
     signals = drive(strategy, path(DAY1, day1) + path(DAY2, day2))
     sides = [s.side for _, s in signals]
@@ -145,29 +145,29 @@ def test_c2_sells_a_spike_then_buys_back() -> None:
 
 def test_c2_flat_water_is_silent_not_a_crash() -> None:
     """全天一根价：std=0 问不出 z → None。除零或编信号都算 bug。"""
-    strategy = VWAPReversion(lookback=5)
+    strategy = RollingReversion(lookback=5)
     bars = path(DAY1, [10.0] * 30)
     assert drive(strategy, bars) == []
 
 
 def test_c2_rejects_self_contradicting_bands() -> None:
     with pytest.raises(ValueError, match="z_enter"):
-        VWAPReversion(z_enter=0.5, z_exit=0.5)
+        RollingReversion(z_enter=0.5, z_exit=0.5)
     with pytest.raises(ValueError, match="lookback"):
-        VWAPReversion(lookback=1)
+        RollingReversion(lookback=1)
 
 
 # ── C3 区间突破 ──────────────────────────────────────────────────────────────
 
 
 def test_c3_needs_the_full_range_before_any_signal() -> None:
-    strategy = RangeBreakout(n_break=10)
+    strategy = DonchianBreakout(n_break=10)
     bars = path(DAY1, oscillation(11, amp=0.5))
     assert drive(strategy, bars) == []
 
 
 def test_c3_buys_confirmed_breakout_and_sells_the_fall_back() -> None:
-    strategy = RangeBreakout(n_break=10, confirm=2)
+    strategy = DonchianBreakout(n_break=10, confirm=2)
     closes = [*oscillation(10, amp=0.5), 11.0, 11.0, 11.0, 9.5, 9.5, 9.0, 9.0]
     signals = drive(strategy, path(DAY1, closes))
     sides = [s.side for _, s in signals]
@@ -177,14 +177,14 @@ def test_c3_buys_confirmed_breakout_and_sells_the_fall_back() -> None:
 
 def test_c3_ignores_wicks_that_do_not_close_outside() -> None:
     """盘中刺穿不算突破：判据看的是收盘。影线触顶 → 全程沉默。"""
-    strategy = RangeBreakout(n_break=10, confirm=1)
+    strategy = DonchianBreakout(n_break=10, confirm=1)
     closes = oscillation(10, amp=0.5) + [10.25] * 6  # 10.25 在区间内
     assert drive(strategy, path(DAY1, closes)) == []
 
 
 def test_c3_rejects_degenerate_range() -> None:
     with pytest.raises(ValueError, match="n_break"):
-        RangeBreakout(n_break=1)
+        DonchianBreakout(n_break=1)
 
 
 # ── C4 量能异动 ──────────────────────────────────────────────────────────────
@@ -279,14 +279,16 @@ def test_b0_rejects_zero_frequency() -> None:
 
 def test_c2_round_trip_through_the_engine() -> None:
     """策略接进引擎跑通一回合：先买后卖、一笔回合、成交在信号后第一根。"""
-    strategy = VWAPReversion(lookback=20)
-    day1 = [*oscillation(17), 8.0, 8.2, 8.1, 8.1, 8.1]  # 深跌后留 3 根给入场单成交
-    day2 = [8.5, 9.0, 9.5, *oscillation(20)]
+    strategy = RollingReversion(lookback=20, z_enter=1.5)
+    day1 = [*oscillation(17), 9.2, 9.2, 9.2, 9.2, 9.2]  # 板内深跌，留根给入场单成交
+    day2 = [9.4, 9.6, 9.8, *oscillation(20)]
     bars = path(DAY1, day1) + path(DAY2, day2)
     result = run(bars, strategy=strategy, assumptions=assumptions(), bands=flat_bands())
     sides = [fill.order.side for fill in result.fills]
-    assert sides == ["buy", "sell"], f"先 T入 后平仓，实际 {sides}"
-    assert len(result.round_trips) == 1
+    assert sides and sides[0] == "buy", "先 T入"
+    # 跨日窗口在恢复后的震荡里会继续开平回合——断言每一回合都完整配对，而不是只许一回合
+    assert len(result.round_trips) == len(sides) // 2
+    assert all(a == "buy" and b == "sell" for a, b in zip(sides[::2], sides[1::2], strict=True))
 
 
 def test_every_candidate_constructs_zero_arg_and_is_named() -> None:

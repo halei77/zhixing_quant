@@ -139,14 +139,15 @@ def _select_per_fold(
 
 
 def _gate_row(slot: Slot, params: dict[str, Any], score: Score, scaled: Score) -> list[str]:
-    """测试段一行的判定（5.4-1/2/5；样本下限 5.4-4 单独一列）。"""
+    """测试段一行的判定（5.4-1/2/4/5；T飞率是 §七.1 验收要件，如实呈现不设门槛）。"""
     if score.metrics.trips == 0 or score.expectancy_pct is None:
-        return [slot.name, str(params), "0", "—", "—", "—", "—", "无回合，出局"]
+        return [slot.name, str(params), "0", "—", "—", "—", "—", "—", "无回合，出局"]
     g = stats.gate(score.metrics.wins, score.metrics.trips, score.expectancy_pct)
     scaled_ok = scaled.expectancy_pct is not None and scaled.expectancy_pct > 0
     sample_ok = score.metrics.trips >= 100 and min(score.trips_by_code.values(), default=0) >= 10
     streak_ok = score.metrics.max_loss_streak <= 8
     verdict = "过" if g.ok and scaled_ok and sample_ok and streak_ok else "不过"
+    fly = score.metrics.fly_rate
     return [
         slot.name,
         str(params),
@@ -155,8 +156,14 @@ def _gate_row(slot: Slot, params: dict[str, Any], score: Score, scaled: Score) -
         f"p={g.binom_p:.4f}",
         f"{score.expectancy_pct * 10000:.1f}bp",
         f"{scaled.expectancy_pct * 10000:.1f}bp" if scaled.expectancy_pct is not None else "—",
+        f"{fly:.1%}" if fly is not None else "—",
         f"{verdict}（样本{'✓' if sample_ok else '✗'} 连败{'✓' if streak_ok else '✗'}）",
     ]
+
+
+def _sample_floor(score: Score) -> bool:
+    """5.4-4：测试段 ≥ 100 回合且每票 ≥ 10。"""
+    return score.metrics.trips >= 100 and min(score.trips_by_code.values(), default=0) >= 10
 
 
 def _compete(
@@ -187,10 +194,12 @@ def _compete(
         pooled = runner.merge(valid_scores)
         rate = pooled.win_rate
         passed = rate is not None and rate > 0.5
+        rate_text = "无回合" if rate is None else f"{rate:.1%}"
         picks = "、".join(str(s.params) for s in valid_scores)
+        fly_text = "—" if pooled.metrics.fly_rate is None else f"{pooled.metrics.fly_rate:.1%}"
         rows_valid.append(
             f"| {slot.name} {slot.title} | {picks} | {pooled.metrics.trips} | "
-            f"{rate:.1%} | {pooled.streak} | {'入围' if passed else '初筛出局'} |"
+            f"{rate_text} | {pooled.streak} | {fly_text} | {'入围' if passed else '初筛出局'} |"
         )
         if not passed:
             continue
@@ -206,7 +215,42 @@ def _compete(
             bands=bands,
             phase="test-x1.5",
         )
-        finals.append({"slot": slot, "params": chosen, "base": base, "scaled": scaled})
+        extended_note = ""
+        if not _sample_floor(base):
+            # 5.4-4：样本不足 → 向前扩一折再数（只许一次；吃掉一段选择面，报告里点名）。
+            ext_days = fold_mod.extended_test(tuple(days))
+            base = runner.run_phase(
+                slot,
+                chosen,
+                active,
+                ext_days,
+                assumptions=assumptions,
+                bands=bands,
+                phase="test-ext",
+            )
+            scaled = runner.run_phase(
+                slot,
+                chosen,
+                active,
+                ext_days,
+                assumptions=assumptions.with_cost_scaled(1.5),
+                bands=bands,
+                phase="test-ext-x1.5",
+            )
+            extended_note = (
+                f"\n\n  > **测试段已扩一折（5.4-4）**：{ext_days[0]} → {ext_days[-1]}"
+                f"（{len(ext_days)} 个交易日）。扩后样本仍不足即出局，不再扩第二次。"
+            )
+        finals.append(
+            {
+                "slot": slot,
+                "params": chosen,
+                "base": base,
+                "scaled": scaled,
+                "extended": bool(extended_note),
+                "note": extended_note,
+            }
+        )
 
     lines = [
         "# 做T 策略竞争报告 · " + date.today().isoformat(),
@@ -220,35 +264,37 @@ def _compete(
         "",
         "## 一、验证段（初筛，胜率 > 50% 入围；§四-2）",
         "",
-        "| 槽位 | 各折选中参数 | 回合 | 胜率 | 最大连败 | 判定 |",
-        "|---|---|---|---|---|---|",
+        "| 槽位 | 各折选中参数 | 回合 | 胜率 | 最大连败 | T飞率 | 判定 |",
+        "|---|---|---|---|---|---|---|",
         *rows_valid,
         "",
         "## 二、测试段（终选，一次性；5.4-1/2/4/5）",
         "",
-        "| 槽位 | 参数 | 回合 | 胜率 | 显著性 | 净期望 | ×1.5 期望 | 判定 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 槽位 | 参数 | 回合 | 胜率 | 显著性 | 净期望 | ×1.5 期望 | T飞率 | 判定 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     detail: list[dict[str, Any]] = []
+    passed_finals: list[dict[str, Any]] = []
     for final in finals:
-        lines.append(
-            "| "
-            + " | ".join(_gate_row(final["slot"], final["params"], final["base"], final["scaled"]))
-            + " |"
-        )
+        row = _gate_row(final["slot"], final["params"], final["base"], final["scaled"])
+        lines.append("| " + " | ".join(row) + " |")
+        if final["note"]:
+            lines.append(final["note"])
+        if row[-1].startswith("过"):
+            passed_finals.append(final)
         detail.append(final)
     lines += [
         "",
         "## 三、结论",
         "",
     ]
-    if not finals:
+    if not passed_finals:
         lines.append(
-            "**全部不启用**——没有候选同时通过初筛与测试段门槛。这是合法结论（07 §一/§七.3），"
-            "不降门槛、不加赛，等数据或策略有实质变化再重跑。"
+            "**全部不启用**——没有候选同时通过初筛与测试段门槛（入围≠通过，判定见第二节各行）。"
+            "这是合法结论（07 §一/§七.3），不降门槛、不加赛，等数据或策略有实质变化再重跑。"
         )
     else:
-        winners = "、".join(f"{f['slot'].name}" for f in finals)
+        winners = "、".join(f"{f['slot'].name}" for f in passed_finals)
         lines.append(
             f"通过全部门槛的候选：{winners}。下一步：组合评审（§四-3 多数投票）+ "
             "正式成绩单走 `zx-backtest` 登记台账（backtest_id），再进 Step 8 模拟信号期。"
