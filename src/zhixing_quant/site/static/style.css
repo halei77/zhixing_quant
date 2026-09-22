@@ -145,6 +145,39 @@ button.primary:active { transform: scale(0.97); }
 button.primary:disabled { opacity: 0.45; cursor: default; }
 button.wide { width: 100%; margin-top: 10px; }
 
+/* ── 自定义组合面板 ─────────────────────────────────── */
+.task { font-size: 14px; margin-top: 10px; color: var(--text); }
+.custom-panel {
+  margin-top: 10px; padding: 12px; border-radius: 14px;
+  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid var(--glass-line);
+  display: grid; gap: 8px;
+}
+@media (prefers-color-scheme: light) {
+  .custom-panel { background: rgba(15, 23, 42, 0.04); }
+}
+.custom-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+}
+.custom-row label {
+  display: flex; align-items: center; gap: 8px; font-size: 15px; cursor: pointer;
+}
+.custom-row input[type="checkbox"] {
+  width: 18px; height: 18px; accent-color: var(--seal); cursor: pointer;
+}
+.custom-row .days {
+  width: 90px; height: 36px; padding: 0 10px; border-radius: 10px;
+  border: 1px solid var(--glass-line); background: var(--glass-dark);
+  color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.custom-row .days:focus { outline: 2px solid var(--seal); outline-offset: 1px; }
+
+/* 内容块显现：一次 160ms 的淡入，快而不闹；reduced-motion 在文件尾统一掐 */
+.glass { transition: opacity 0.16s ease-out, transform 0.16s ease-out; }
+.glass[hidden] { display: none; }
+
 .preview {
   margin-top: 10px; padding: 14px; border-radius: 14px;
   background: rgba(0, 0, 0, 0.28);

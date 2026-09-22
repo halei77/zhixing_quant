@@ -34,6 +34,7 @@ from zhixing_quant.domain.security import Listing
 from zhixing_quant.domain.symbol import UnknownCode, normalize_code
 from zhixing_quant.site import prompt, search, templates
 from zhixing_quant.site.search import search_indexes
+from zhixing_quant.site.templates import Selection
 from zhixing_quant.sources.akshare.calendar import load_calendar
 from zhixing_quant.sources.akshare.master import read_master
 
@@ -60,15 +61,25 @@ class Entry(BaseModel):
     at: str
 
 
+class CustomEntry(BaseModel):
+    """自定义组合的一段数据选择（ADR-0017）：K线 dataset + 交易日数。"""
+
+    dataset: str
+    days: int
+
+
 class PromptBody(BaseModel):
     """生成请求。`as_of` 不给就是今天：周日生成的提示词，末行自己退到周五那根K线
 
     （ADR-0012 决定 2：区间终点是 ≤ as_of 的最后一个交易日，不是 as_of 本身。）
+    `custom` 只在 `template == "自定义"` 时用（ADR-0017）：K线四种 × 天数，字段与
+    口径固定，前端传不进来。
     """
 
     code: str
     template: str
     as_of: date | None = None
+    custom: list[CustomEntry] | None = None
 
 
 class RecentBody(BaseModel):
@@ -147,6 +158,15 @@ def create_app(
 
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
+    @app.middleware("http")
+    async def no_asset_cache(request: Request, call_next: _Dispatch) -> Response:
+        """静态件永远重验（etag/304 很便宜）：页面更新而 JS 被旧缓存拖着走的现场，
+        排查的人会以为是新代码坏了——这次站点二期的"说明不变"就是它。"""
+        response = await call_next(request)
+        if request.url.path.startswith("/assets") or request.url.path == "/":
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     @app.get("/")
     def index() -> FileResponse:
         """站点那张页（06 §八-1 的全流程在这里走）。
@@ -169,17 +189,57 @@ def create_app(
     def api_templates() -> Any:
         return {"templates": [asdict(template) for template in cfg.templates]}
 
+    def _custom_template(entries: list[CustomEntry]) -> Any:
+        """ADR-0017：自定义 = 一次性合成的 Template。role/task/output 固定文案不由前端传，
+        可变面收窄到 dataset × days；校验粒度与模板装载同级，全部 ValueError → 400 带原话。"""
+        if not entries:
+            raise ValueError("自定义组合是空的：至少要选一个K线类型")
+        allowed = {"daily", "minute_5", "minute_30", "minute_60"}
+        seen: set[str] = set()
+        selections: list[Selection] = []
+        for entry in entries:
+            if entry.dataset not in allowed:
+                raise ValueError(
+                    f"自定义的 K线类型 {entry.dataset!r} 不在可选里：{'、'.join(sorted(allowed))}"
+                )
+            if entry.dataset in seen:
+                raise ValueError(f"K线类型 {entry.dataset} 选了两次")
+            if not 1 <= entry.days <= 750:
+                raise ValueError(f"{entry.dataset} 的天数 {entry.days} 越界（1–750）")
+            seen.add(entry.dataset)
+            selections.append(Selection(dataset=entry.dataset, days=entry.days))
+        from zhixing_quant.site.templates import Template as _T
+
+        return _T(
+            name="自定义",
+            role="你是资深 A 股分析师",
+            task="按用户自选的K线周期与深度，给出趋势、量价与关键价位判断",
+            data=tuple(selections),
+            output=(
+                "先给结论（看多/看空/观望 + 一句话理由），再给依据。\n"
+                "每条依据都要引用具体日期与表中的价格，不许出现表中没有的数字。"
+            ),
+            format="markdown",
+            fields=("open", "high", "low", "close", "volume", "amount"),
+            adjust="backward",
+            status="ready",
+            waiting_on="",
+        )
+
     @app.post("/api/prompt")
     def api_prompt(body: PromptBody) -> Any:
-        """生成提示词。指数不走这里——模板是股票口径（06 §四），指数有自己的 K线查询。"""
         """生成一条提示词。失败一律 400 带上原来那句话，不改写、不翻译。
 
         收口成一条 `except ValueError` 是因为生成路上**可预期**的失败全是它的子类——pending 模板、
-        缺分母、空表、日历不覆盖、代码不认、模板名不存在。不是 ValueError 的就是程序错，让它 500：
-        把 bug 伪装成"请求不对"是排查路上最贵的一种礼貌。
+        缺分母、空表、日历不覆盖、代码不认、模板名不存在、自定义组合不合法。不是 ValueError 的
+        就是程序错，让它 500：把 bug 伪装成"请求不对"是排查路上最贵的一种礼貌。
+        指数不走这里——模板是股票口径（06 §四），指数有自己的 K线查询。
         """
         try:
-            template = cfg.by_name(body.template)
+            if body.template == "自定义":
+                template = _custom_template(body.custom or [])
+            else:
+                template = cfg.by_name(body.template)
             code = _known(body.code, names)
             built = prompt.build(
                 template,

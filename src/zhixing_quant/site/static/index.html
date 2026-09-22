@@ -59,12 +59,31 @@
       </section>
 
       <section id="prompt-zone" class="glass sheet" hidden>
-        <p id="template-note" class="hint"></p>
         <div class="prompt-actions">
           <select id="templates" aria-label="模板"></select>
-          <input id="asof" type="date" aria-label="截止日期" />
           <button id="generate" type="button" class="primary">生成</button>
         </div>
+        <p id="template-task" class="task"></p>
+        <div id="custom-panel" class="custom-panel" hidden>
+          <p class="hint">勾选要进的K线类型，各自填天数（1–750 个交易日）</p>
+          <div class="custom-row" data-dataset="daily">
+            <label><input type="checkbox" checked /> 日K</label>
+            <input type="number" class="days" value="120" min="1" max="750" />
+          </div>
+          <div class="custom-row" data-dataset="minute_60">
+            <label><input type="checkbox" /> 60 分K</label>
+            <input type="number" class="days" value="60" min="1" max="750" />
+          </div>
+          <div class="custom-row" data-dataset="minute_30">
+            <label><input type="checkbox" /> 30 分K</label>
+            <input type="number" class="days" value="30" min="1" max="750" />
+          </div>
+          <div class="custom-row" data-dataset="minute_5">
+            <label><input type="checkbox" /> 5 分K</label>
+            <input type="number" class="days" value="10" min="1" max="750" />
+          </div>
+        </div>
+        <p id="template-note" class="hint"></p>
         <p id="meter" class="hint"><span id="tokens">—</span> token<span id="warn"></span></p>
         <pre id="preview" class="preview">选一只票，点生成。</pre>
         <button id="copy" type="button" class="primary wide">复制提示词</button>

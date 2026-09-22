@@ -5,7 +5,15 @@
 const TOKEN_KEY = "zx.site.token";
 const $ = (id) => document.getElementById(id);
 
-const state = { code: null, name: null, kind: "stock", bars: [], text: "", busy: false };
+const state = {
+  code: null,
+  name: null,
+  kind: "stock",
+  bars: [],
+  text: "",
+  busy: false,
+  templates: [],
+};
 
 function token() {
   return localStorage.getItem(TOKEN_KEY) || "";
@@ -211,24 +219,49 @@ function drawKline(bars) {
 // ── 提示词 ───────────────────────────────────────────
 
 function note(template) {
+  // 模板的任务说明 + 数据组成一起换：只换一半，用户会以为切换没生效
   if (!template) return;
-  $("template-note").textContent =
-    template.status === "ready"
-      ? `取 ${template.data.map((d) => `${d.dataset} ${d.days} 天`).join("、")}`
-      : `还没上线：${template.waiting_on}`;
+  if (template.status !== "ready") {
+    $("template-task").textContent = "";
+    $("template-note").textContent = `还没上线：${template.waiting_on}`;
+    return;
+  }
+  $("template-task").textContent = template.task;
+  $("template-note").textContent = `取 ${template.data
+    .map((d) => `${d.dataset} ${d.days} 天`)
+    .join("、")}${template.name === "自定义" ? "（你选的组合）" : ""}`;
 }
 
+const CUSTOM_NAME = "自定义";
+
 async function loadTemplates() {
-  const templates = (await call("GET", "/api/templates")).templates;
+  state.templates = (await call("GET", "/api/templates")).templates;
   const select = $("templates");
   select.replaceChildren();
-  for (const template of templates) {
+  for (const template of state.templates) {
     const option = document.createElement("option");
     option.value = template.name;
     option.textContent = template.status === "ready" ? template.name : `${template.name}（未上线）`;
     select.append(option);
   }
-  note(templates[0]);
+  const custom = document.createElement("option");
+  custom.value = CUSTOM_NAME;
+  custom.textContent = CUSTOM_NAME;
+  select.append(custom);
+  note(state.templates[0]);
+}
+
+function collectCustom() {
+  const data = [];
+  for (const row of document.querySelectorAll("#custom-panel .custom-row")) {
+    const checked = row.querySelector('input[type="checkbox"]').checked;
+    if (!checked) continue;
+    data.push({
+      dataset: row.dataset.dataset,
+      days: Math.max(1, Math.min(750, parseInt(row.querySelector(".days").value, 10) || 0)),
+    });
+  }
+  return data;
 }
 
 let regenerating = 0;
@@ -246,7 +279,14 @@ async function generate() {
   $("generate").disabled = true;
   say("生成中…");
   const body = { code: state.code, template: $("templates").value };
-  if ($("asof").value) body.as_of = $("asof").value;
+  if ($("templates").value === CUSTOM_NAME) {
+    body.custom = collectCustom();
+    if (!body.custom.length) {
+      state.busy = false;
+      $("generate").disabled = false;
+      return say("自定义组合至少勾一个K线类型");
+    }
+  }
   try {
     const built = await call("POST", "/api/prompt", body);
     state.text = built.text;
@@ -285,10 +325,16 @@ $("search").addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeSuggest();
 });
 $("templates").addEventListener("change", () => {
+  const isCustom = $("templates").value === CUSTOM_NAME;
+  $("custom-panel").hidden = !isCustom;
+  if (isCustom) {
+    $("template-task").textContent = "自己勾K线类型与天数，生成一条一次性组合";
+    $("template-note").textContent = "";
+    return;
+  }
   note(state.templates.find((t) => t.name === $("templates").value));
   scheduleRegenerate();
 });
-$("asof").addEventListener("change", scheduleRegenerate);
 $("generate").addEventListener("click", generate);
 $("copy").addEventListener("click", copy);
 $("token").addEventListener("input", () => {

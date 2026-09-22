@@ -756,3 +756,52 @@ def test_a_new_yaml_row_reaches_the_prompt_with_no_code_change(
     assert body["warn"] is None
     shell.post("/api/recent", json={"code": "600519"})
     assert [e["code"] for e in json.loads(trace.read_text(encoding="utf-8"))] == ["600519"]
+
+
+def test_custom_composition_builds_from_picked_datasets(client: TestClient) -> None:
+    """ADR-0017：自定义 = dataset × days 的临场组合，其余一切固定。"""
+    body = client.post(
+        "/api/prompt",
+        json={
+            "code": "600519",
+            "template": "自定义",
+            "as_of": "2024-01-04",
+            "custom": [{"dataset": "daily", "days": 30}],
+        },
+    ).json()
+    assert body["tokens"] > 0
+    assert "【数据纪律】" in body["text"] and "| 时间 |" in body["text"]
+
+
+def test_custom_composition_rejects_the_four_illegal_shapes(client: TestClient) -> None:
+    cases = [
+        ({"code": "600519", "template": "自定义"}, "是空的"),
+        (
+            {
+                "code": "600519",
+                "template": "自定义",
+                "custom": [{"dataset": "daily_basic", "days": 10}],
+            },
+            "不在可选",
+        ),
+        (
+            {
+                "code": "600519",
+                "template": "自定义",
+                "custom": [{"dataset": "daily", "days": 30}, {"dataset": "daily", "days": 60}],
+            },
+            "选了两次",
+        ),
+        (
+            {
+                "code": "600519",
+                "template": "自定义",
+                "custom": [{"dataset": "daily", "days": 9999}],
+            },
+            "越界",
+        ),
+    ]
+    for payload, needle in cases:
+        response = client.post("/api/prompt", json=payload)
+        assert response.status_code == 400, payload
+        assert needle in response.json()["detail"], payload
