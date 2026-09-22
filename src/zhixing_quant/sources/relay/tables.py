@@ -110,7 +110,12 @@ def parse_daily_basic(
     for raw in items:
         symbol = normalize_code(_field(raw, fields, "ts_code"))
         trade_date = _as_date(_field(raw, fields, "trade_date"))
-        close = float(_field(raw, fields, "close"))
+        # close 为 null 的行（停牌日的估值行）没有信息量，跳行不崩——崩会把整天的
+        # 5553 行都拖死；close 若有值但 ≤0 才是真错。
+        raw_close = _field(raw, fields, "close")
+        if raw_close in ("", "None", "nan", "NULL", "null"):
+            continue
+        close = float(raw_close)
         if close <= 0:
             raise ValueError(f"{symbol}@{trade_date} 收盘价 {close} 不成立")
         key = (symbol, trade_date)
