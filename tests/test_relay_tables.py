@@ -19,7 +19,7 @@ import pytest
 
 from zhixing_quant.sources.jobs import relay_cli
 from zhixing_quant.sources.relay import client as relay_client
-from zhixing_quant.sources.relay.tables import parse_daily_basic, parse_stk_limit
+from zhixing_quant.sources.relay.tables import parse_daily_basic, parse_forecast, parse_stk_limit
 from zhixing_quant.storage import tables
 from zhixing_quant.storage.query import read_bars
 
@@ -263,12 +263,76 @@ def test_a_table_without_a_registered_anchor_is_refused(tmp_path: Any) -> None:
     """ADR-0015 决定 3：没配锚的表不许拉——fail-closed 不给"先拉了再补锚"留门。"""
     with pytest.raises(ValueError, match="没有登记解析器或锚点"):
         relay_cli._pull(
-            _args(table="forecast"),
+            _args(table="stk_holder"),
             fetch=lambda _a, _p: ("rds", {"code": 0, "data": {"fields": [], "items": []}}),
             prev_ref_of=lambda _s, _d: None,
             same_ref_of=lambda _s, _d: None,
             root=tmp_path,
         )
+
+
+# ── forecast ─────────────────────────────────────────────────────────────────
+
+FORECAST_FIELDS = [
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "type",
+    "p_change_min",
+    "p_change_max",
+    "net_profit_min",
+    "net_profit_max",
+    "last_parent_net",
+    "summary",
+    "update_flag",
+]
+
+
+def test_forecast_parses_and_rejects_bad_type_and_interval() -> None:
+    raw = [
+        "600519.SH",
+        "20260113",
+        "20251231",
+        "预增",
+        "14.67",
+        "14.67",
+        "8570000",
+        "8570000",
+        "None",
+        "略增",
+    ]
+    rows = parse_forecast("rds", FORECAST_FIELDS, [raw])
+    assert rows[0].type == "预增" and rows[0].ann_date == date(2026, 1, 13)
+    with pytest.raises(ValueError, match="不在已知枚举"):
+        parse_forecast(
+            "rds", FORECAST_FIELDS, [["600519.SH", "20260113", "20251231", "暴涨", *raw[4:]]]
+        )
+    with pytest.raises(ValueError, match="预告区间颠倒"):
+        parse_forecast(
+            "rds",
+            FORECAST_FIELDS,
+            [["600519.SH", "20260113", "20251231", "预增", "20", "10", *raw[6:]]],
+        )
+
+
+def test_forecast_anchor_requires_quarter_end_and_past_ann_date() -> None:
+    from zhixing_quant.sources.relay.tables import ForecastRow
+
+    good = ForecastRow(
+        "rds", "600519", date(2026, 1, 13), date(2025, 12, 31), "预增", 1.0, 2.0, 3.0, 4.0, "s"
+    )
+    bad_period = ForecastRow(
+        "rds", "600519", date(2026, 1, 13), date(2025, 12, 30), "预增", 1.0, 2.0, 3.0, 4.0, "s"
+    )
+    future = ForecastRow(
+        "rds", "600519", date(2099, 1, 13), date(2025, 12, 31), "预增", 1.0, 2.0, 3.0, 4.0, "s"
+    )
+    # 直接走锚函数（不经 _pull 的网络路径）
+    anchor = relay_cli.ANCHORS["forecast"]
+    problems, _unanchored, kept = anchor([good], None, None, None)
+    assert not problems and len(kept) == 1
+    problems, _, _ = anchor([bad_period, future], None, None, None)
+    assert len(problems) == 2
 
 
 # ── relay_cli ────────────────────────────────────────────────────────────────

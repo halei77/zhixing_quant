@@ -145,7 +145,73 @@ def parse_daily_basic(
 
 #: 表名 → 解析器。zx-relay 按名取；新表在这里登记才算"可接"（ADR-0015 后果第一条）。
 #: 类型显式给全：两张表的行类型不同，不注解会被 mypy 并成 object。
+class ForecastRow(NamedTuple):
+    """`forecast` 一行：一次业绩预告（08"基本面未受损"排除项的原料）。
+
+    主键是 (ann_date, end_date)：同一次预告的修正以不同 ann_date 出现，各自留行
+    （update_flag 只是源的标注，不构成行身份——修正史本身就是"点时可见性"的证据）。
+    """
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    type: str
+    p_change_min: float | None
+    p_change_max: float | None
+    net_profit_min: float | None
+    net_profit_max: float | None
+    summary: str
+
+
+_FORECAST_TYPES = {"预增", "预减", "扭亏", "首亏", "续亏", "续盈", "略增", "略减", "不确定"}
+
+
+def parse_forecast(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[ForecastRow]:
+    rows: list[ForecastRow] = []
+    seen: set[tuple[date, date]] = set()
+    for raw in items:
+        symbol = normalize_code(_field(raw, fields, "ts_code"))
+        ann_date = _as_date(_field(raw, fields, "ann_date"))
+        end_date = _as_date(_field(raw, fields, "end_date"))
+        type_ = _field(raw, fields, "type")
+        if type_ not in _FORECAST_TYPES:
+            raise ValueError(
+                f"{symbol}@{ann_date} 预告类型 {type_!r} 不在已知枚举里：先扩枚举再入库"
+            )
+        p_min = _opt(raw, fields, "p_change_min")
+        p_max = _opt(raw, fields, "p_change_max")
+        if p_min is not None and p_max is not None and p_min > p_max:
+            raise ValueError(f"{symbol}@{ann_date} 预告区间颠倒：min {p_min} > max {p_max}")
+        n_min = _opt(raw, fields, "net_profit_min")
+        n_max = _opt(raw, fields, "net_profit_max")
+        if n_min is not None and n_max is not None and n_min > n_max:
+            raise ValueError(f"{symbol}@{ann_date} 净利区间颠倒：min {n_min} > max {n_max}")
+        key = (ann_date, end_date)
+        if key in seen:
+            raise ValueError(f"{symbol}@{ann_date} 同一页里出现两次（分页重叠）")
+        seen.add(key)
+        rows.append(
+            ForecastRow(
+                source,
+                symbol,
+                ann_date,
+                end_date,
+                type_,
+                p_min,
+                p_max,
+                n_min,
+                n_max,
+                _field(raw, fields, "summary")[:500],
+            )
+        )
+    return rows
+
+
 PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], list[Any]]] = {
     "stk_limit": parse_stk_limit,
     "daily_basic": parse_daily_basic,
+    "forecast": parse_forecast,
 }

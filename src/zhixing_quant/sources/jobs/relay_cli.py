@@ -62,6 +62,7 @@ def fetch_all_pages(
     fetch: FetchFn,
     page_size: int = 5000,
     symbol: str | None = None,
+    date_param: str | None = "trade_date",
 ) -> tuple[str, list[list[str]], list[str], int | None]:
     """分页拉完整天。返回 (供数源, 原始 items, fields, 源声称的总行数或 None)。
 
@@ -75,16 +76,15 @@ def fetch_all_pages(
     source = ""
     offset = 0
     total: int | None = None
-    params: dict[str, str] = {"trade_date": day.strftime("%Y%m%d")}
+    params: dict[str, str] = {}
+    if date_param is not None:
+        params[date_param] = day.strftime("%Y%m%d")
     if symbol is not None:
         # 逐票模式绕开单次查询的 5000 行截断：一票一天一两行，永远碰不到上限。
         from zhixing_quant.domain.symbol import normalize_code
         from zhixing_quant.sources.akshare.fetch import market_of
 
-        params = {
-            "ts_code": f"{normalize_code(symbol)}.{market_of(symbol).upper()}",
-            "trade_date": day.strftime("%Y%m%d"),
-        }
+        params["ts_code"] = f"{normalize_code(symbol)}.{market_of(symbol).upper()}"
     while True:
         source, body = fetch(table, {**params, "limit": page_size, "offset": offset})
         data = body.get("data") or {}
@@ -116,6 +116,7 @@ AnchorFn = Callable[..., tuple[list[str], int, list[Any]]]
 def _anchor_stk_limit(
     rows: list[Any],
     prev_ref_of: RefFn,
+    _same_ref_of: RefFn,
     limit_of: LimitPctFn,
     factor_of: FactorFn | None = None,
 ) -> tuple[list[str], int, list[Any]]:
@@ -179,7 +180,12 @@ _exdiv_notes: list[str] = []
 CLOSE_TOLERANCE = 0.011
 
 
-def _anchor_daily_basic(rows: list[Any], same_ref_of: RefFn) -> tuple[list[str], int, list[Any]]:
+def _anchor_daily_basic(
+    rows: list[Any],
+    _prev_ref_of: RefFn,
+    same_ref_of: RefFn,
+    _limit_of: LimitPctFn,
+) -> tuple[list[str], int, list[Any]]:
     """表内 close 对干净区日线**同日**收盘：两边都是不复权收盘价，一分钱都差不起。"""
     problems: list[str] = []
     unanchored = 0
@@ -198,10 +204,37 @@ def _anchor_daily_basic(rows: list[Any], same_ref_of: RefFn) -> tuple[list[str],
     return problems, unanchored, anchored
 
 
+def _anchor_forecast(
+    rows: list[Any],
+    _prev_ref_of: RefFn,
+    _same_ref_of: RefFn,
+    _limit_of: LimitPctFn,
+) -> tuple[list[str], int, list[Any]]:
+    """forecast 的锚：end_date 必须是季度末（业绩预告的报告期），ann_date 不许在未来。
+    它没有干净区同口径数据可比——这两条是"行级可验"的全部，类型枚举与区间校验在解析器。"""
+    import calendar as cal
+
+    problems: list[str] = []
+    unanchored = 0
+    anchored: list[Any] = []
+    for row in rows:
+        if row.end_date.day != cal.monthrange(row.end_date.year, row.end_date.month)[1]:
+            problems.append(
+                f"{row.symbol}@{row.ann_date} end_date {row.end_date} 不是季度末（报告期口径）"
+            )
+            continue
+        if row.ann_date > date.today():
+            problems.append(f"{row.symbol}@{row.ann_date} ann_date 在未来")
+            continue
+        anchored.append(row)
+    return problems, unanchored, anchored
+
+
 #: 表名 → 锚点。没登记锚的表不许拉（ADR-0015 决定 3：每张表配锚点对账，没有豁免）。
 ANCHORS: dict[str, AnchorFn] = {
     "stk_limit": _anchor_stk_limit,
     "daily_basic": _anchor_daily_basic,
+    "forecast": _anchor_forecast,
 }
 
 #: 档位查询注入点：真跑用 `_limit_pct_of`（主数据 + gate.toml），测试注入常数表。
@@ -287,9 +320,17 @@ def _pull(
         # 后者撞 5000 行截断，前者绕开它。
         rows = []
         source = ""
+        # 公告类表（forecast）按 ts_code 拉全史，没有 trade_date 参数——day 对它们是
+        # "锚点与归档日期"，不是源端筛选。
+        date_param = None if args.table == "forecast" else "trade_date"
         for symbol in wanted:
             src, page_items, page_fields, _ = fetch_all_pages(
-                args.table, args.day_parsed, fetch=fetch, page_size=args.page_size, symbol=symbol
+                args.table,
+                args.day_parsed,
+                fetch=fetch,
+                page_size=args.page_size,
+                symbol=symbol,
+                date_param=date_param,
             )
             source = source or src
             raw_count += len(page_items)
@@ -312,10 +353,16 @@ def _pull(
 
     if args.table == "stk_limit":
         problems, unanchored, kept = anchor(
-            rows, prev_ref_of, limit_of=limit_of or _limit_pct_of, factor_of=_factor_of
+            rows,
+            prev_ref_of,
+            same_ref_of,
+            limit_of or _limit_pct_of,
+            factor_of=_factor_of,
         )
     else:
-        problems, unanchored, kept = anchor(rows, same_ref_of)
+        problems, unanchored, kept = anchor(
+            rows, prev_ref_of, same_ref_of, limit_of or _limit_pct_of
+        )
     if problems:
         body = [
             *head,

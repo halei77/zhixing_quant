@@ -43,6 +43,8 @@ class TableSpec:
     key: tuple[str, ...]
     order: tuple[str, ...]
     row: type[Any]  # 各表自己的 NamedTuple；type[Any] 防 mypy 把 type(row) is not 收窄成 NamedTuple
+    #: 分区年月取自哪一列：行情表是 trade_date，公告类表是 ann_date（ADR-0015）。
+    date_field: str = "trade_date"
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -73,6 +75,21 @@ class DailyBasicRow(NamedTuple):
     circ_mv: float | None
 
 
+class ForecastRow(NamedTuple):
+    """与 `sources.relay.tables.ForecastRow` 同形同序（结构互认见模块说明）。"""
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    type: str
+    p_change_min: float | None
+    p_change_max: float | None
+    net_profit_min: float | None
+    net_profit_max: float | None
+    summary: str
+
+
 SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="stk_limit",
@@ -86,6 +103,25 @@ SPECS: tuple[TableSpec, ...] = (
         key=("trade_date",),
         order=("trade_date",),
         row=StkLimitRow,
+    ),
+    TableSpec(
+        name="forecast",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("ann_date", "DATE"),
+            ("end_date", "DATE"),
+            ("type", "VARCHAR"),
+            ("p_change_min", "DOUBLE"),
+            ("p_change_max", "DOUBLE"),
+            ("net_profit_min", "DOUBLE"),
+            ("net_profit_max", "DOUBLE"),
+            ("summary", "VARCHAR"),
+        ),
+        key=("ann_date", "end_date"),
+        order=("ann_date", "end_date"),
+        row=ForecastRow,
+        date_field="ann_date",
     ),
     TableSpec(
         name="daily_basic",
@@ -152,7 +188,7 @@ def write_table(rows: Sequence[Any], *, table: str, root: Path | None = None) ->
                 "存储层不替它投影"
             )
         symbol = row.symbol
-        year = row.trade_date.year
+        year = getattr(row, spec.date_field).year
         path = layout.partition_path(symbol, year, dataset=spec.name, root=root)
         key = tuple(getattr(row, name) for name in spec.key)
         if any(part is None for part in key):
@@ -161,7 +197,7 @@ def write_table(rows: Sequence[Any], *, table: str, root: Path | None = None) ->
         previous = slot.get(key)
         if previous is not None and previous != row:
             raise BarConflict(
-                f"{symbol}@{row.trade_date} 在这一批里给了两条不同的行"
+                f"{symbol}@{getattr(row, spec.date_field)} 在这一批里给了两条不同的行"
                 f"（{previous.source} 与 {row.source}）：存储层不替它们裁决谁对"
             )
         slot[key] = row
