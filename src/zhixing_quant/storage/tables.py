@@ -322,7 +322,8 @@ def read_table(
     with duckdb.connect() as con:
         for path in layout.partitions(symbol, start, end, dataset=spec.name, root=root):
             out.extend(partition.read(con, path, spec.names, spec.row))
-    in_range = [r for r in out if start <= r.trade_date <= end]
+    date_field = spec.date_field
+    in_range = [r for r in out if start <= getattr(r, date_field) <= end]
     return sorted(in_range, key=attrgetter(*spec.order))
 
 

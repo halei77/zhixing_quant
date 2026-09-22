@@ -44,6 +44,15 @@ TABLE_DATASETS: dict[str, tuple[str, ...]] = {
         "circ_mv",
         "turnover_rate",
     ),
+    # forecast 的 ann/end 两列每行都印（行身份），不进可选清单
+    "forecast": (
+        "type",
+        "p_change_min",
+        "p_change_max",
+        "net_profit_min",
+        "net_profit_max",
+        "summary",
+    ),
 }
 
 

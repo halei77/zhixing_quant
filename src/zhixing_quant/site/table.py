@@ -135,6 +135,35 @@ def render_valuation(
     return "\n".join(lines)
 
 
+FORECAST_LABEL = (
+    "业绩预告口径：公告日与报告期为行身份，净利区间单位万元（源为元，此处换算），"
+    "只含公告日不晚于截止日的预告——点时可见性（03-L4 的未来函数禁令在提示词侧的落点）"
+)
+
+
+def render_forecast(rows: Sequence[Any], *, format: Format = "markdown") -> str:
+    """forecast 参考表 → 业绩预告事件列表（ADR-0016 的表形态，事件型而非序列型）。
+
+    点时可见性在这里兑现：rows 由查询层按 ann_date ≤ 截止日筛过，渲染层不放宽——
+    一条"下个月才公告"的预告出现在提示词里，就是给大模型递未来函数。
+    """
+    headers = ["公告日", "报告期", "类型", "净利下限(万元)", "净利上限(万元)", "摘要"]
+    body_rows = []
+    for row in rows:
+        lo = "—" if row.net_profit_min is None else f"{row.net_profit_min / 1e4:,.0f}"
+        hi = "—" if row.net_profit_max is None else f"{row.net_profit_max / 1e4:,.0f}"
+        body_rows.append(
+            [row.ann_date.isoformat(), row.end_date.isoformat(), row.type, lo, hi, row.summary[:80]]
+        )
+    if format == "csv":
+        lines = [f"# {FORECAST_LABEL}", ",".join(headers)]
+        lines += [",".join(r) for r in body_rows]
+        return "\n".join(lines)
+    lines = [f"> {FORECAST_LABEL}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
+    lines += [f"| {' | '.join(row)} |" for row in body_rows]
+    return "\n".join(lines)
+
+
 def _denominator(columns: Sequence[str], float_shares: float | None) -> float:
     """换手率的分母。没请求这一列时返回 0.0（无人使用），请求了就必须是正数。
 

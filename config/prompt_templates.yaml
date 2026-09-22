@@ -48,6 +48,7 @@ templates:
     data:
       - {dataset: daily, days: 750}
       - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
+      - {dataset: forecast, days: 500, fields: [type, net_profit_min, net_profit_max]}
     format: markdown
     fields: [open, high, low, close, volume, amount]
     adjust: backward

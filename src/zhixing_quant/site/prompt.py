@@ -109,7 +109,7 @@ def title_of(dataset: str) -> str:
         return f"{dataset[len(_MINUTE) :]} 分K"
     if dataset in templates.TABLE_DATASETS:
         # 参考表（ADR-0016）：小标题由表自己的中文名给，不编。
-        return {"daily_basic": "估值（每日指标）"}.get(dataset, dataset)
+        return {"daily_basic": "估值（每日指标）", "forecast": "业绩预告"}.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
 
 
@@ -157,6 +157,20 @@ def build(
     sections: list[Section] = []
     for selection in template.data:
         start, end = window(calendar, as_of, selection.days)
+        if selection.dataset == "forecast":
+            # 事件型表（ADR-0016）：渲染列固定，行按 ann_date 点时筛——未来函数禁令的落点。
+            rows = [
+                row
+                for row in read_table("forecast", code, start, end, root=config.parquet_dir())
+                if row.ann_date <= as_of
+            ]
+            sections.append(
+                Section(
+                    title=heading(selection, len(rows)),
+                    body=table.render_forecast(rows, format=template.format),
+                )
+            )
+            continue
         if selection.dataset in templates.TABLE_DATASETS:
             # 参考表条目（ADR-0016）：不走 Bar 查询，也没有复权口径。
             rows = read_table(selection.dataset, code, start, end, root=config.parquet_dir())

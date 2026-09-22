@@ -255,3 +255,44 @@ def test_render_valuation_nulls_units_and_csv() -> None:
     assert "| — |" in text, "pe_ttm 是 null：渲染成 '—'，不是 0"
     csv_text = render_valuation(rows, fields=["close", "pe_ttm"], format="csv")
     assert csv_text.startswith("# 估值口径"), "csv 模式口径行走注释（ADR-0011 决定 4 同款）"
+
+
+def test_render_forecast_units_and_point_in_time() -> None:
+    """净利区间元→万元换算；点时可见性在查询侧筛（这里只钉渲染），csv 口径行走注释。"""
+    from datetime import date
+
+    from zhixing_quant.site.table import render_forecast
+    from zhixing_quant.sources.relay.tables import ForecastRow
+
+    rows = [
+        ForecastRow(
+            "rds",
+            "600519",
+            date(2025, 1, 3),
+            date(2024, 12, 31),
+            "略增",
+            14.67,
+            14.67,
+            8570000.0,
+            8570000.0,
+            "预计净利润",
+        ),
+        ForecastRow(
+            "rds",
+            "600519",
+            date(2025, 1, 13),
+            date(2024, 12, 31),
+            "预减",
+            None,
+            None,
+            None,
+            None,
+            "",
+        ),
+    ]
+    text = render_forecast(rows, format="markdown")
+    assert "857" in text, "8570000 元 = 857 万元"
+    assert "—" in text, "缺区间的预告渲染 '—'"
+    assert "2025-01-03" in text and "2024-12-31" in text
+    csv_text = render_forecast(rows[:1], format="csv")
+    assert csv_text.startswith("# 业绩预告口径")
