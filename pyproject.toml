@@ -25,6 +25,7 @@ zx-backtest = "zhixing_quant.backtest.cli:main"
 zx-site = "zhixing_quant.site.api:main"
 zx-backup = "zhixing_quant.backup.cli:main"
 zx-compete = "zhixing_quant.compete.cli:main"
+zx-relay = "zhixing_quant.sources.jobs.relay_cli:main"
 
 [dependency-groups]
 dev = [

@@ -43,7 +43,7 @@ def test_doc_declares_nonempty_package_list() -> None:
     这个数就是"文档树里有几个包"。它跟着包列表走：加一个包（Step 5 的 `backup/`）就 +1，
     而它拦住的是另一种事——解析器失效时会返回空列表，于是下面三条 parametrized 测试全部空转。
     """
-    assert len(_subpackages_declared_in_doc()) == 11
+    assert len(_subpackages_declared_in_doc()) == 12
 
 
 @pytest.mark.parametrize("name", _subpackages_declared_in_doc())
