@@ -90,6 +90,29 @@ class ForecastRow(NamedTuple):
     summary: str
 
 
+class FinaAuditRow(NamedTuple):
+    """与 `sources.relay.tables.FinaAuditRow` 同形同序（结构互认见模块说明）。"""
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    audit_result: str
+    audit_fees: float | None
+    audit_agency: str
+    audit_sign: str
+
+
+class HolderNumberRow(NamedTuple):
+    """与 `sources.relay.tables.HolderNumberRow` 同形同序（结构互认见模块说明）。"""
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    holder_num: float
+
+
 SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="stk_limit",
@@ -121,6 +144,37 @@ SPECS: tuple[TableSpec, ...] = (
         key=("ann_date", "end_date"),
         order=("ann_date", "end_date"),
         row=ForecastRow,
+        date_field="ann_date",
+    ),
+    TableSpec(
+        name="fina_audit",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("ann_date", "DATE"),
+            ("end_date", "DATE"),
+            ("audit_result", "VARCHAR"),
+            ("audit_fees", "DOUBLE"),
+            ("audit_agency", "VARCHAR"),
+            ("audit_sign", "VARCHAR"),
+        ),
+        key=("ann_date", "end_date"),
+        order=("ann_date", "end_date"),
+        row=FinaAuditRow,
+        date_field="ann_date",
+    ),
+    TableSpec(
+        name="stk_holdernumber",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("ann_date", "DATE"),
+            ("end_date", "DATE"),
+            ("holder_num", "DOUBLE"),
+        ),
+        key=("ann_date", "end_date"),
+        order=("ann_date", "end_date"),
+        row=HolderNumberRow,
         date_field="ann_date",
     ),
     TableSpec(

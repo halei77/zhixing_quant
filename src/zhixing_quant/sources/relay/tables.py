@@ -164,7 +164,21 @@ class ForecastRow(NamedTuple):
     summary: str
 
 
-_FORECAST_TYPES = {"预增", "预减", "扭亏", "首亏", "续亏", "续盈", "略增", "略减", "不确定"}
+#: 类型枚举以源实测为准（2026-09-22 真跑被 '增亏' 教育过一次——解析器拒绝而非吞下，
+#: 枚举因此是长出来的不是拍的）。
+_FORECAST_TYPES = {
+    "预增",
+    "预减",
+    "扭亏",
+    "首亏",
+    "续亏",
+    "续盈",
+    "略增",
+    "略减",
+    "增亏",
+    "减亏",
+    "不确定",
+}
 
 
 def parse_forecast(
@@ -210,8 +224,89 @@ def parse_forecast(
     return rows
 
 
+class FinaAuditRow(NamedTuple):
+    """`fina_audit` 一行：年报审计意见（08"基本面未受损"的硬否决项原料）。
+
+    audit_result 是自由文本（"标准无保留意见"/"保留意见"/…），不在解析器里枚举——
+    "非标 = 不是'标准无保留意见'"这个判定留给消费方按自己的口径做，这里只验字段在。
+    """
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    audit_result: str
+    audit_fees: float | None
+    audit_agency: str
+    audit_sign: str
+
+
+def parse_fina_audit(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[FinaAuditRow]:
+    rows: list[FinaAuditRow] = []
+    seen: set[tuple[date, date]] = set()
+    for raw in items:
+        symbol = normalize_code(_field(raw, fields, "ts_code"))
+        ann_date = _as_date(_field(raw, fields, "ann_date"))
+        end_date = _as_date(_field(raw, fields, "end_date"))
+        result = _field(raw, fields, "audit_result")
+        if not result:
+            raise ValueError(f"{symbol}@{ann_date} 审计意见为空：这是否决判据本体，缺了不如不要")
+        key = (ann_date, end_date)
+        if key in seen:
+            raise ValueError(f"{symbol}@{ann_date} 同一页里出现两次（分页重叠）")
+        seen.add(key)
+        fees = _opt(raw, fields, "audit_fees")
+        rows.append(
+            FinaAuditRow(
+                source,
+                symbol,
+                ann_date,
+                end_date,
+                result,
+                fees,
+                _field(raw, fields, "audit_agency"),
+                _field(raw, fields, "audit_sign"),
+            )
+        )
+    return rows
+
+
+class HolderNumberRow(NamedTuple):
+    """`stk_holdernumber` 一行：某报告期的股东户数（08 情绪/筹码因子的原料）。"""
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    holder_num: float
+
+
+def parse_holder_number(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[HolderNumberRow]:
+    rows: list[HolderNumberRow] = []
+    seen: set[tuple[date, date]] = set()
+    for raw in items:
+        symbol = normalize_code(_field(raw, fields, "ts_code"))
+        ann_date = _as_date(_field(raw, fields, "ann_date"))
+        end_date = _as_date(_field(raw, fields, "end_date"))
+        num = _opt(raw, fields, "holder_num")
+        if num is None or num <= 0:
+            raise ValueError(f"{symbol}@{ann_date} 股东户数 {num!r} 不成立：缺了给 None 也轮不到 0")
+        key = (ann_date, end_date)
+        if key in seen:
+            raise ValueError(f"{symbol}@{ann_date} 同一页里出现两次（分页重叠）")
+        seen.add(key)
+        rows.append(HolderNumberRow(source, symbol, ann_date, end_date, num))
+    return rows
+
+
 PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], list[Any]]] = {
     "stk_limit": parse_stk_limit,
     "daily_basic": parse_daily_basic,
     "forecast": parse_forecast,
+    "fina_audit": parse_fina_audit,
+    "stk_holdernumber": parse_holder_number,
 }

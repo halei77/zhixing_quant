@@ -107,6 +107,11 @@ def fetch_all_pages(
         if isinstance(raw_count, int):
             total = raw_count
         items.extend(page_items)
+        # 分页元数据按源分两派（2026-09-22 实测）：rds 给 has_more/count、单次查询 5000 行
+        # 静默截断；promax **不认 limit/offset**，一次全吐（5644 行照回，has_more/count 均无）。
+        # 没有元数据的响应没有"下一页"可言——继续翻页只会把同一批行拉两遍撞"页内重复"。
+        if data.get("has_more") is None:
+            return source, items, fields, total
         if len(page_items) < page_size:
             if data.get("has_more") and total is not None and len(items) < total:
                 raise ValueError(
@@ -243,7 +248,11 @@ def _anchor_forecast(
 ANCHORS: dict[str, AnchorFn] = {
     "stk_limit": _anchor_stk_limit,
     "daily_basic": _anchor_daily_basic,
+    # forecast / fina_audit / stk_holdernumber 同一支锚：公告类表没有干净区同口径
+    # 数据可比，"行级可验"（报告期口径 + 时序合理）就是它们的全部分量。
     "forecast": _anchor_forecast,
+    "fina_audit": _anchor_forecast,
+    "stk_holdernumber": _anchor_forecast,
 }
 
 #: 档位查询注入点：真跑用 `_limit_pct_of`（主数据 + gate.toml），测试注入常数表。
