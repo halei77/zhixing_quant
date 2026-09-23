@@ -863,6 +863,43 @@ def test_served_dir_prefers_the_build_and_falls_back_to_the_legacy_shell(tmp_pat
     assert api.served_dir(built, legacy) == built, "构建产物在就该发它（决定 2）"
 
 
+def test_served_dir_can_be_pinned_to_one_shell(tmp_path: Path) -> None:
+    """e2e 的定点开关（`ZX_SITE_SHELL`）：指名旧壳就发旧壳，哪怕构建产物在场。
+
+    不指名就自动挑（上一条）。但两个壳各有各的 spec、DOM 一个 id 都不重叠，共用一个服务
+    必红一半（2026-09-24 实测旧壳那套 3 条全红），所以并存期得能各起一个服务各指一个壳。
+    """
+    built = tmp_path / "built"
+    legacy = tmp_path / "legacy"
+    built.mkdir()
+    legacy.mkdir()
+    (built / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    (legacy / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    assert api.served_dir(built, legacy, shell="built") == built
+    assert api.served_dir(built, legacy, shell="legacy") == legacy
+
+
+def test_pinning_to_a_missing_shell_never_falls_back_to_the_other(tmp_path: Path) -> None:
+    """指名的那个不在就起来，**不许退回去发另一个**：那条 e2e 绿了也测不到自己该测的壳。"""
+    built = tmp_path / "built"
+    legacy = tmp_path / "legacy"
+    built.mkdir()
+    legacy.mkdir()
+    (legacy / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="built"):
+        api.served_dir(built, legacy, shell="built")
+
+
+def test_an_unknown_shell_name_is_refused(tmp_path: Path) -> None:
+    """只认 built/legacy 两个值：写错就起来等于「猜一个」，与全仓 fail-closed 不合（审计 M1）。"""
+    built = tmp_path / "built"
+    legacy = tmp_path / "legacy"
+    built.mkdir()
+    legacy.mkdir()
+    with pytest.raises(RuntimeError, match="ZX_SITE_SHELL"):
+        api.served_dir(built, legacy, shell="vue")
+
+
 def test_the_assembly_serves_whichever_frontend_it_is_given(trace: Path, tmp_path: Path) -> None:
     """发哪个前端是装配决定（`static_dir` 参数），不是模块常量。
 

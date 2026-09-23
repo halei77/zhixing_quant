@@ -70,7 +70,15 @@ def _assets_dir(static_dir: Path) -> Path:
     return nested if nested.is_dir() else static_dir
 
 
-def served_dir(built: Path = FRONTEND_DIST, legacy: Path = STATIC_DIR) -> Path:
+#: e2e 的定点开关：两个壳各有各的 spec，必须能各起一个服务各测各的（见 `served_dir`）。
+#: 只认 `built` / `legacy` 两个值，写错就不起来——“猜一个”等于让那条 e2e 测到对面那个壳上去。
+SHELL_ENV = "ZX_SITE_SHELL"
+SHELLS = ("built", "legacy")
+
+
+def served_dir(
+    built: Path = FRONTEND_DIST, legacy: Path = STATIC_DIR, shell: str | None = None
+) -> Path:
     """该发哪个前端目录（ADR-0018 决定 2）：构建产物在就发它，不在就退回旧的 `site/static`。
 
     退回**是契约内的情形**：后果二明写并存期里 `site/static` 仍是线上（它还带着旧的口令存储
@@ -79,12 +87,22 @@ def served_dir(built: Path = FRONTEND_DIST, legacy: Path = STATIC_DIR) -> Path:
     那为什么不默默挑一个？因为代价二另外半句是「哪个是真前端要写清楚」——目录不能由构建时序
     悄悄决定，`main()` 会把它打进 stderr（写在服务自己的日志里，不是藏在代码里）。
 
-    两个目录都走参数：测试于是能在临时目录里各造一份，把三个分支全钉住，而不依赖 npm build
+    `shell`（`ZX_SITE_SHELL`）是并存期给 e2e 用的定点开关：`site.spec.ts` 测旧壳、
+    `site-vue.spec.ts` 测新壳，两个 DOM 的 id 一个都不重叠，**共用一个服务就必然红一半**
+    （2026-09-24 实测 3 红——不是断言松，是两条 spec 各测一个壳却指着同一个服务）。指名了
+    就只认那一个，它不在就起来：退回去发另一个壳，那条 e2e 绿了也测不到自己该测的东西。
+
+    两个目录都走参数：测试于是能在临时目录里各造一份，把四个分支全钉住，而不依赖 npm build
     （CI 的干净 checkout 里没有 dist——它在 .gitignore 里）。
     """
-    for candidate in (built, legacy):
-        if (candidate / "index.html").is_file():
-            return candidate
+    if shell is not None and shell not in SHELLS:
+        raise RuntimeError(f"{SHELL_ENV} 只认 {'/'.join(SHELLS)}，收到 {shell!r}")
+    names = {"built": built, "legacy": legacy}
+    for name in SHELLS if shell is None else (shell,):
+        if (names[name] / "index.html").is_file():
+            return names[name]
+    if shell is not None:
+        raise RuntimeError(f"{SHELL_ENV}={shell} 指名的 {names[shell]} 里没有 index.html")
     raise RuntimeError(
         f"两个前端目录都没有 index.html：{built} 与 {legacy}。"
         "先在 frontend/ 跑 npm run build（ADR-0018 决定 2）"
@@ -375,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     """进程入口（`zx-site`）。默认只绑本机：公网那一步在阿里云侧由反代给出（ADR-0006）。"""
     build_parser().parse_args(argv)
-    served = served_dir()
+    served = served_dir(shell=os.environ.get(SHELL_ENV))
     print(f"zx-site 发前端目录：{served}", file=sys.stderr)
     cfg = templates.load(config.prompt_templates_file())
     app = create_app(
