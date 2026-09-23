@@ -36,3 +36,6 @@ dist/
 tools/e2e/node_modules/
 tools/e2e/test-results/
 tools/e2e/playwright-report/
+
+# 浏览器 MCP 的 console 噪声（本机调试产物，不入库）
+.playwright-mcp/
