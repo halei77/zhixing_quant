@@ -1,0 +1,12 @@
+{
+  "name": "zhixing-e2e",
+  "private": true,
+  "description": "站点端到端冒烟测试（@playwright/test）。独立于 Python 测试体系；需要本机数据根。",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}
