@@ -829,18 +829,24 @@ def test_the_vue_shell_writes_text_and_never_markup() -> None:
             assert word not in script, f"{path.name} 里有 {word}：外部文字会被当标记读"
 
 
-def test_served_dir_is_the_built_frontend_and_never_falls_back(tmp_path: Path) -> None:
-    """`served_dir()` 认构建产物；没有就**起不来**，不许悄悄改成发旧件。
+def test_served_dir_prefers_the_build_and_falls_back_to_the_legacy_shell(tmp_path: Path) -> None:
+    """发哪个前端的三个分支全钉住（ADR-0018 决定 2 + 后果二）。
 
-    与 `site_token()` 同一条理由：\"忘了构建\"做成\"默默发旧前端\"的话，日志长得像\"服务起来了\"，
-    而线上跑的是另一个前端——旧件还把口令存 localStorage（关页不清），退回它等于退回去。
+    后果二明写并存期里 `site/static` 仍是线上，所以「构建产物不在 → 退回旧件」是契约内的情形，
+    不是谎报；但**不许默默挑**（代价二：哪个是真前端要写清楚，由 `main()` 打进 stderr）。
+    两个都没有才是起不来。三个目录都造假的，于是不依赖 npm build——CI 的干净 checkout 里没有
+    dist（它在 .gitignore 里），读真 dist 会让这条测试在 CI 里自己红掉。
     """
-    empty = tmp_path / "empty"
-    empty.mkdir()
+    built = tmp_path / "built"
+    legacy = tmp_path / "legacy"
+    built.mkdir()
+    legacy.mkdir()
     with pytest.raises(RuntimeError, match="npm run build"):
-        api.served_dir(empty)
-    (empty / "index.html").write_text("<!doctype html>", encoding="utf-8")
-    assert api.served_dir(empty) == empty
+        api.served_dir(built, legacy)
+    (legacy / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    assert api.served_dir(built, legacy) == legacy, "构建产物缺席时该退回旧件（代价二）"
+    (built / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    assert api.served_dir(built, legacy) == built, "构建产物在就该发它（决定 2）"
 
 
 def test_the_assembly_serves_whichever_frontend_it_is_given(trace: Path, tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import secrets
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, date, datetime
@@ -69,20 +70,25 @@ def _assets_dir(static_dir: Path) -> Path:
     return nested if nested.is_dir() else static_dir
 
 
-def served_dir(root: Path | None = None) -> Path:
-    """该发哪个前端目录（ADR-0018 决定 2）：构建产物存在就发它，不存在就**起不来**。
+def served_dir(built: Path = FRONTEND_DIST, legacy: Path = STATIC_DIR) -> Path:
+    """该发哪个前端目录（ADR-0018 决定 2）：构建产物在就发它，不在就退回旧的 `site/static`。
 
-    不做静默回退。"忘了构建"实现成"默默发旧前端"与"忘了配口令"实现成"没鉴权"
-    （`site_token` 那条的理由）是同一个陷阱：两者的日志都长得像"服务起来了"，而线上跑的
-    是另一个东西。代价二要的"哪个是真前端写清楚"，就是这句话——真前端是 `frontend/dist`。
+    退回**是契约内的情形**：后果二明写并存期里 `site/static` 仍是线上（它还带着旧的口令存储
+    偏离——localStorage 关页不清），所以退回不是谎报，是并存期的规定状态。两个都没有才起不来。
+
+    那为什么不默默挑一个？因为代价二另外半句是「哪个是真前端要写清楚」——目录不能由构建时序
+    悄悄决定，`main()` 会把它打进 stderr（写在服务自己的日志里，不是藏在代码里）。
+
+    两个目录都走参数：测试于是能在临时目录里各造一份，把三个分支全钉住，而不依赖 npm build
+    （CI 的干净 checkout 里没有 dist——它在 .gitignore 里）。
     """
-    dist = FRONTEND_DIST if root is None else root
-    if not (dist / "index.html").is_file():
-        raise RuntimeError(
-            f"{dist} 里没有 index.html：前端没构建。先在 frontend/ 跑 npm run build；"
-            "构建产物缺失时不允许回退到旧的 site/static（ADR-0018 决定 2）"
-        )
-    return dist
+    for candidate in (built, legacy):
+        if (candidate / "index.html").is_file():
+            return candidate
+    raise RuntimeError(
+        f"两个前端目录都没有 index.html：{built} 与 {legacy}。"
+        "先在 frontend/ 跑 npm run build（ADR-0018 决定 2）"
+    )
 
 
 #: 鉴权中间件的下一个处理器。这一版 FastAPI 没导出这个别名，所以自己写。
@@ -366,6 +372,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     """进程入口（`zx-site`）。默认只绑本机：公网那一步在阿里云侧由反代给出（ADR-0006）。"""
     build_parser().parse_args(argv)
+    served = served_dir()
+    print(f"zx-site 发前端目录：{served}", file=sys.stderr)
     cfg = templates.load(config.prompt_templates_file())
     app = create_app(
         listings=read_master().listings,
@@ -373,7 +381,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         calendar=load_calendar(until=date.today()),
         recent=Recent(config.site_recent_file()),
         token=site_token(),
-        static_dir=served_dir(),
+        static_dir=served,
     )
     host = os.environ.get("ZX_SITE_HOST", "127.0.0.1")
     port = int(os.environ.get("ZX_SITE_PORT", "8000"))
