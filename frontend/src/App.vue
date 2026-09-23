@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { Moon, Sun } from 'lucide-vue-next'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
-import { ApiError, api, getToken, setToken, type Bar, type Hit, type Template } from '@/api'
+import { ApiError, api, getToken, setToken, type Bar, type Entry, type Hit, type Template } from '@/api'
 import KLineChart from '@/components/KLineChart.vue'
 
 const THEME_KEY = 'zx.site.theme'
@@ -32,7 +31,9 @@ const status = ref('')
 
 const query = ref('')
 const hits = ref<Hit[]>([])
-let typing: number | undefined
+const recent = ref<Entry[]>([])
+let searchTimer: number | undefined
+let tokenTimer: number | undefined
 
 const selected = ref<{ code: string; name: string; kind: 'stock' | 'index' } | null>(null)
 const bars = ref<Bar[]>([])
@@ -43,12 +44,14 @@ const custom = reactive<Record<string, boolean>>({ daily: true, minute_60: false
 const customDays = reactive<Record<string, number>>(
   Object.fromEntries(DATASETS.map((d) => [d.key, d.days])),
 )
+const dayError = ref('')
 
 const text = ref('')
 const tokens = ref<number | null>(null)
 const warn = ref('')
 const busy = ref(false)
-let regenerating: number | undefined
+const dirty = ref(false)
+let regenerateTimer: number | undefined
 
 const isCustom = computed(() => templateName.value === CUSTOM)
 const showPrompt = computed(() => selected.value?.kind === 'stock')
@@ -58,9 +61,13 @@ const quote = computed(() => {
   const last = list[list.length - 1]
   const prev = list.length > 1 ? list[list.length - 2] : null
   const change = prev ? ((last.close - prev.close) / prev.close) * 100 : 0
-  return { last, change }
+  return { ...last, change }
 })
 const currentTemplate = computed(() => templates.value.find((t) => t.name === templateName.value))
+const hint = computed(() => {
+  if (hits.value.length) return ''
+  return query.value.trim() ? '没找到——试试代码、名称或拼音首字母' : '输入至少一个字开始搜索，指数直接搜名字'
+})
 
 function say(message: string) {
   status.value = message
@@ -77,22 +84,23 @@ function handleError(error: unknown) {
 
 // ── 搜索 ──────────────────────────────────────────────
 function onSearchInput() {
-  window.clearTimeout(typing)
-  typing = window.setTimeout(async () => {
-    const q = query.value.trim()
-    if (!q) {
-      hits.value = []
-      return
-    }
-    try {
-      hits.value = (await api.search(q)).hits.slice(0, 12)
-      connected.value = true
-      if (hits.value.length === 0) say('没找到——试试代码、名称或拼音首字母')
-      else say('')
-    } catch (error) {
-      handleError(error)
-    }
-  }, 160)
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(runSearch, 160)
+}
+
+async function runSearch() {
+  const q = query.value.trim()
+  if (!q) {
+    hits.value = []
+    return
+  }
+  try {
+    hits.value = (await api.search(q)).hits.slice(0, 12)
+    connected.value = true
+    if (hits.value.length === 0) say('')
+  } catch (error) {
+    handleError(error)
+  }
 }
 
 async function pick(hit: Hit) {
@@ -102,9 +110,28 @@ async function pick(hit: Hit) {
   text.value = ''
   tokens.value = null
   warn.value = ''
+  dirty.value = false
+  window.clearTimeout(regenerateTimer)
   if (hit.kind === 'stock') await generate()
   await loadQuote()
-  api.remember(hit.code).catch(() => {})
+  await remember(hit.code)
+}
+
+async function remember(code: string) {
+  try {
+    recent.value = (await api.remember(code)).entries
+    connected.value = true
+  } catch {
+    // 留痕写不进去不该打断看K线：它是旁路，不是主流程
+  }
+}
+
+async function loadRecent() {
+  recent.value = (await api.recent()).entries
+}
+
+async function pickRecent(entry: Entry) {
+  await pick({ code: entry.code, name: entry.name, kind: 'stock' })
 }
 
 // ── 行情 ──────────────────────────────────────────────
@@ -132,36 +159,49 @@ async function loadTemplates() {
   templateName.value = templates.value[0]?.name ?? CUSTOM
 }
 
-function collectCustom() {
-  return DATASETS.filter((d) => custom[d.key]).map((d) => ({
-    dataset: d.key,
-    days: Math.max(1, Math.min(750, Number(customDays[d.key]) || 0)),
-  }))
+/** 只校验、不改写：把 900 悄悄当 750 发出去，服务端那句「越界」就永远响不出来。 */
+function collectCustom(): { dataset: string; days: number }[] | null {
+  const picked = DATASETS.filter((d) => custom[d.key])
+  if (picked.length === 0) {
+    dayError.value = '自定义组合至少勾一个K线类型'
+    return null
+  }
+  for (const d of picked) {
+    const days = Number(customDays[d.key])
+    if (!Number.isInteger(days) || days < 1 || days > 750) {
+      dayError.value = `${d.label} 的天数 ${days} 越界（1–750 个交易日）`
+      return null
+    }
+  }
+  dayError.value = ''
+  return picked.map((d) => ({ dataset: d.key, days: Number(customDays[d.key]) }))
 }
 
 function scheduleRegenerate() {
-  if (!text.value) return
-  window.clearTimeout(regenerating)
-  regenerating = window.setTimeout(generate, 400)
+  if (!text.value && !dirty.value) return
+  window.clearTimeout(regenerateTimer)
+  regenerateTimer = window.setTimeout(() => void generate(), 400)
 }
 
 async function generate() {
-  if (busy.value || !selected.value) return
+  if (!selected.value) return
+  if (busy.value) {
+    // 上一次还没回来：记下脏标，回来以后重跑——静默丢掉会让正文停留在上一个模板
+    dirty.value = true
+    return
+  }
   if (selected.value.kind === 'index') {
     say('指数暂无提示词模板——看K线就好')
     return
   }
-  busy.value = true
-  say('生成中…')
   const body: Record<string, unknown> = { code: selected.value.code, template: templateName.value }
   if (isCustom.value) {
-    body.custom = collectCustom()
-    if ((body.custom as unknown[]).length === 0) {
-      busy.value = false
-      say('自定义组合至少勾一个K线类型')
-      return
-    }
+    const picked = collectCustom()
+    if (!picked) return
+    body.custom = picked
   }
+  busy.value = true
+  say('生成中…')
   try {
     const built = await api.prompt(body)
     text.value = built.text
@@ -170,9 +210,18 @@ async function generate() {
     connected.value = true
     say('')
   } catch (error) {
+    // 失败就把正文清掉：留着上一个模板的提示词，而选择器已经是新的，是自相矛盾的页面
+    text.value = ''
+    tokens.value = null
+    warn.value = ''
     handleError(error)
   } finally {
     busy.value = false
+    if (dirty.value) {
+      dirty.value = false
+      window.clearTimeout(regenerateTimer)
+      regenerateTimer = window.setTimeout(() => void generate(), 0)
+    }
   }
 }
 
@@ -190,14 +239,22 @@ async function copy() {
 }
 
 function onTemplateChange() {
-  if (!isCustom.value) scheduleRegenerate()
+  if (isCustom.value) {
+    // 切到自定义：先把上一个模板的正文收掉，别让两套口径同时挂在页面上
+    text.value = ''
+    tokens.value = null
+    warn.value = ''
+    dirty.value = false
+    return
+  }
+  scheduleRegenerate()
 }
 
 // ── 连接 ──────────────────────────────────────────────
 async function boot() {
   if (!token.value.trim()) return
   try {
-    await Promise.all([loadTemplates(), api.recent()])
+    await Promise.all([loadTemplates(), loadRecent()])
     connected.value = true
     say('已连接')
   } catch (error) {
@@ -207,13 +264,24 @@ async function boot() {
 
 function onTokenInput() {
   setToken(token.value)
-  window.clearTimeout(typing)
-  typing = window.setTimeout(boot, 500)
+  window.clearTimeout(tokenTimer)
+  if (!token.value.trim()) {
+    // 口令清空 = 没口令：绿点不许继续亮着说「已连接」
+    connected.value = false
+    say('')
+    return
+  }
+  tokenTimer = window.setTimeout(boot, 500)
 }
 
 onMounted(() => {
   applyTheme()
   if (token.value.trim()) boot()
+})
+onUnmounted(() => {
+  window.clearTimeout(searchTimer)
+  window.clearTimeout(tokenTimer)
+  window.clearTimeout(regenerateTimer)
 })
 </script>
 
@@ -224,25 +292,35 @@ onMounted(() => {
       <div class="relative flex flex-1 items-center gap-2">
         <input
           v-model="token"
+          data-testid="token"
           type="password"
-          class="field !h-10"
+          class="field !h-11"
           placeholder="输入口令连接"
           autocomplete="off"
+          aria-label="站点口令"
           @input="onTokenInput"
         />
         <span
-          class="h-2.5 w-2.5 shrink-0 rounded-full"
-          :style="{ background: connected ? 'var(--down)' : 'var(--text-3)' }"
+          class="dot"
+          :class="connected ? 'dot-on' : 'dot-off'"
           :title="connected ? '已连接' : '未连接'"
         />
+        <span class="sr-only">{{ connected ? '已连接' : '未连接' }}</span>
       </div>
       <button
         type="button"
         class="icon-btn shrink-0"
         :title="theme === 'light' ? '切到深色' : '切到浅色'"
+        :aria-label="theme === 'light' ? '切到深色' : '切到浅色'"
         @click="toggleTheme"
       >
-        <component :is="theme === 'light' ? Moon : Sun" :size="18" />
+        <svg v-if="theme === 'light'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+        <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+        </svg>
       </button>
     </div>
   </header>
@@ -252,11 +330,13 @@ onMounted(() => {
     <section class="glass-float relative p-2.5">
       <input
         v-model="query"
+        data-testid="search"
         type="search"
         class="field"
         placeholder="搜代码 / 名称 / 拼音，如 600519、茅台、gzmt"
         autocomplete="off"
         enterkeyhint="search"
+        aria-label="搜索股票或指数"
         @input="onSearchInput"
         @focus="onSearchInput"
         @keydown.escape="hits = []"
@@ -264,12 +344,13 @@ onMounted(() => {
       <Transition name="pop">
         <ul
           v-if="hits.length"
-          class="glass-float absolute inset-x-0 top-[calc(100%+6px)] z-30 max-h-[44vh] overflow-auto p-1.5"
+          data-testid="suggest"
+          class="surface-solid absolute inset-x-0 top-[calc(100%+6px)] z-30 max-h-[44vh] overflow-auto p-1.5"
         >
           <li v-for="hit in hits" :key="hit.code">
             <button
               type="button"
-              class="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[var(--glass-inset)]"
+              class="hit flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[var(--glass-inset)]"
               @click="pick(hit)"
             >
               <span>{{ hit.code }} {{ hit.name }}</span>
@@ -280,70 +361,93 @@ onMounted(() => {
           </li>
         </ul>
       </Transition>
-      <p v-if="!hits.length" class="px-1 pt-2 text-[13px]" style="color: var(--text-2)">
-        输入至少一个字开始搜索，指数直接搜名字
-      </p>
+
+      <div v-if="!hits.length && recent.length" class="pt-2">
+        <p class="px-1 text-[13px]" style="color: var(--text-3)">最近搜过</p>
+        <ul class="flex flex-wrap gap-1.5 px-1 pt-1.5">
+          <li v-for="entry in recent" :key="entry.code">
+            <button
+              type="button"
+              class="hit pill"
+              :title="`${entry.name} · ${entry.at}`"
+              @click="pickRecent(entry)"
+            >
+              {{ entry.name }}
+            </button>
+          </li>
+        </ul>
+      </div>
+
+      <p v-if="hint" class="px-1 pt-2 text-[13px]" style="color: var(--text-2)">{{ hint }}</p>
     </section>
 
-    <!-- 行情 -->
-    <section v-if="selected" class="glass-float p-4">
-      <div class="flex items-start justify-between">
-        <div>
-          <p class="text-[22px] font-semibold">{{ selected.name }}</p>
-          <p class="num text-[13px]" style="color: var(--text-2)">{{ selected.code }}</p>
+    <!-- 行情：整块是内容层（docs/11 §二「正文与数字一律实底」），不是玻璃 -->
+    <section v-if="selected" class="surface-solid p-4">
+      <div class="p-1">
+        <div class="flex items-start justify-between">
+          <div>
+            <p class="text-[22px] font-semibold">{{ selected.name }}</p>
+            <p class="num text-[13px]" style="color: var(--text-2)">{{ selected.code }}</p>
+          </div>
+          <div v-if="quote" class="text-right">
+            <p
+              class="num text-[30px] font-bold"
+              :style="{ color: quote.change >= 0 ? 'var(--up)' : 'var(--down)' }"
+            >
+              {{ quote.close.toFixed(2) }}
+            </p>
+            <p
+              class="num text-[15px]"
+              :style="{ color: quote.change >= 0 ? 'var(--up)' : 'var(--down)' }"
+            >
+              {{ quote.change >= 0 ? '+' : '' }}{{ quote.change.toFixed(2) }}%
+            </p>
+          </div>
         </div>
-        <div v-if="quote" class="text-right">
-          <p
-            class="num text-[30px] font-bold"
-            :style="{ color: quote.change >= 0 ? 'var(--up)' : 'var(--down)' }"
-          >
-            {{ quote.last.close.toFixed(2) }}
-          </p>
-          <p
-            class="num text-[15px]"
-            :style="{ color: quote.change >= 0 ? 'var(--up)' : 'var(--down)' }"
-          >
-            {{ quote.change >= 0 ? '+' : '' }}{{ quote.change.toFixed(2) }}%
-          </p>
-        </div>
-      </div>
 
-      <div v-if="bars.length" class="surface-solid mt-3 p-2">
-        <KLineChart :bars="bars" />
-      </div>
+        <div v-if="bars.length" class="mt-3">
+          <KLineChart :bars="bars" />
+        </div>
 
-      <dl v-if="quote" class="num mt-2.5 grid grid-cols-4 gap-2 text-center">
-        <div>
-          <dt class="text-xs" style="color: var(--text-2)">开</dt>
-          <dd class="text-[15px]">{{ quote.last.open.toFixed(2) }}</dd>
-        </div>
-        <div>
-          <dt class="text-xs" style="color: var(--text-2)">高</dt>
-          <dd class="text-[15px]">{{ quote.last.high.toFixed(2) }}</dd>
-        </div>
-        <div>
-          <dt class="text-xs" style="color: var(--text-2)">低</dt>
-          <dd class="text-[15px]">{{ quote.last.low.toFixed(2) }}</dd>
-        </div>
-        <div>
-          <dt class="text-xs" style="color: var(--text-2)">量</dt>
-          <dd class="text-[15px]">
-            {{ quote.last.volume == null ? '—' : Math.round(quote.last.volume).toLocaleString('zh-CN') }}
-          </dd>
-        </div>
-      </dl>
+        <dl v-if="quote" class="num mt-2.5 grid grid-cols-4 gap-2 text-center">
+          <div>
+            <dt class="text-xs" style="color: var(--text-2)">开</dt>
+            <dd class="text-[15px]">{{ quote.open.toFixed(2) }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs" style="color: var(--text-2)">高</dt>
+            <dd class="text-[15px]">{{ quote.high.toFixed(2) }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs" style="color: var(--text-2)">低</dt>
+            <dd class="text-[15px]">{{ quote.low.toFixed(2) }}</dd>
+          </div>
+          <div>
+            <dt class="text-xs" style="color: var(--text-2)">量</dt>
+            <dd class="text-[15px]">
+              {{ quote.volume == null ? '—' : Math.round(quote.volume).toLocaleString('zh-CN') }}
+            </dd>
+          </div>
+        </dl>
+      </div>
     </section>
 
     <!-- 提示词 -->
-    <section v-if="showPrompt" class="glass-float p-4">
+    <section v-if="showPrompt" class="surface-solid p-4">
       <div class="flex gap-2">
-        <select v-model="templateName" class="field !h-[42px] flex-1" @change="onTemplateChange">
+        <select
+          v-model="templateName"
+          data-testid="templates"
+          class="field !h-11 flex-1"
+          aria-label="模板"
+          @change="onTemplateChange"
+        >
           <option v-for="t in templates" :key="t.name" :value="t.name">
             {{ t.status === 'ready' ? t.name : `${t.name}（未上线）` }}
           </option>
           <option :value="CUSTOM">{{ CUSTOM }}</option>
         </select>
-        <button type="button" class="btn !h-[42px]" :disabled="busy" @click="generate">生成</button>
+        <button type="button" class="btn !h-11" :disabled="busy" @click="generate">生成</button>
       </div>
 
       <p class="pt-2.5 text-sm">
@@ -369,9 +473,11 @@ onMounted(() => {
             type="number"
             min="1"
             max="750"
-            class="field num !h-9 !w-[90px] text-right"
+            :aria-label="`${d.label} 天数`"
+            class="field num !h-11 !w-[90px] text-right"
           />
         </label>
+        <p v-if="dayError" class="text-[13px]" style="color: var(--warn)">{{ dayError }}</p>
       </div>
 
       <p class="num pt-2 text-[13px]" style="color: var(--text-2)">
@@ -379,24 +485,22 @@ onMounted(() => {
       </p>
 
       <pre
-        class="surface-solid mt-2.5 max-h-[46vh] overflow-auto p-3.5 text-[13px] leading-relaxed whitespace-pre-wrap break-all"
+        class="surface-solid mt-2.5 max-h-[46vh] overflow-auto p-3.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words"
         style="font-family: ui-monospace, 'SF Mono', Menlo, monospace"
       >{{ text || '选一只票，点生成。' }}</pre>
       <button type="button" class="btn mt-2.5 w-full" @click="copy">复制提示词</button>
     </section>
   </main>
 
-  <p class="mx-auto min-h-6 max-w-[640px] px-4 pb-6 text-center text-[13px]" style="color: var(--text-2)">
-    {{ status }}
-  </p>
+  <p class="toast" :class="{ 'toast-on': status }" role="status">{{ status }}</p>
 </template>
 
 <style scoped>
 .seal {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
   background: var(--seal);
   color: #fff;
@@ -408,5 +512,21 @@ onMounted(() => {
   box-shadow:
     inset 0 0 0 2px rgba(255, 255, 255, 0.22),
     0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.pill {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--stroke);
+  background: var(--glass-inset);
+  cursor: pointer;
 }
 </style>

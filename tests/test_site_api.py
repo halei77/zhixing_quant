@@ -805,3 +805,68 @@ def test_custom_composition_rejects_the_four_illegal_shapes(client: TestClient) 
         response = client.post("/api/prompt", json=payload)
         assert response.status_code == 400, payload
         assert needle in response.json()["detail"], payload
+
+
+# ── ADR-0018 决定 2：发的是构建出来的前端 ───────────────────────────────────────
+
+
+def test_the_vue_shell_writes_text_and_never_markup() -> None:
+    """新前端要继承旧壳那条 XSS 契约：外部文字只当文本渲染，不许当标记。
+
+    `test_the_page_writes_text_and_never_markup` 钉的是 `site/static/app.js`；Vue 这边的对应
+    形状是不许出现 v-html / innerHTML / insertAdjacentHTML / document.write。Vue 的双大括号
+    默认转义，但**没人钉住**的话，一次手滑写个 v-html 就把这条唯一提权路径重新打开（代价六）。
+    判的是 `frontend/src`（源码入库）而不是 `frontend/dist`（构建产物在 .gitignore 里，
+    CI 的干净 checkout 上根本没有，读它会让这条测试在 CI 里自己红掉）。
+    """
+    source_dir = Path(__file__).resolve().parent.parent / "frontend" / "src"
+    sources = [p for p in sorted(source_dir.rglob("*")) if p.suffix in {".vue", ".ts"}]
+    assert len(sources) >= 3, f"frontend/src 里只抓到 {len(sources)} 个源文件，这条测试在空转"
+    banned = ("v-html", "innerHTML", "insertAdjacentHTML", "document.write")
+    for path in sources:
+        script = path.read_text(encoding="utf-8")
+        for word in banned:
+            assert word not in script, f"{path.name} 里有 {word}：外部文字会被当标记读"
+
+
+def test_served_dir_is_the_built_frontend_and_never_falls_back(tmp_path: Path) -> None:
+    """`served_dir()` 认构建产物；没有就**起不来**，不许悄悄改成发旧件。
+
+    与 `site_token()` 同一条理由：\"忘了构建\"做成\"默默发旧前端\"的话，日志长得像\"服务起来了\"，
+    而线上跑的是另一个前端——旧件还把口令存 localStorage（关页不清），退回它等于退回去。
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(RuntimeError, match="npm run build"):
+        api.served_dir(empty)
+    (empty / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    assert api.served_dir(empty) == empty
+
+
+def test_the_assembly_serves_whichever_frontend_it_is_given(trace: Path, tmp_path: Path) -> None:
+    """发哪个前端是装配决定（`static_dir` 参数），不是模块常量。
+
+    这条同时钉住两件：① `/` 与 `/assets/*` 确实从注入的目录发；② 静态件是公用明文可取的，
+    口令的值一个字符都不许漏进去。测试里造一份假 dist，于是不依赖 npm build。
+    """
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text('<!doctype html><div id="app"></div>', encoding="utf-8")
+    (dist / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    app = api.create_app(
+        listings=BOOK,
+        cfg=CFG,
+        calendar=CALENDAR,
+        recent=api.Recent(trace),
+        token=TOKEN,
+        static_dir=dist,
+    )
+    anonymous = TestClient(app, headers={})
+    page = anonymous.get("/")
+    assert page.status_code == 200
+    assert 'id="app"' in page.text
+    assert TOKEN not in page.text
+    served = anonymous.get("/assets/app.js")
+    assert served.status_code == 200
+    assert TOKEN not in served.text, "静态件是公用的、明文可取的，口令的值一个字符都不许写进去"
+    assert "console.log(1)" in served.text, "发出来的不是注入目录里的那份，说明 static_dir 没被用上"

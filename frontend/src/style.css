@@ -95,10 +95,11 @@ body {
   font-size: 17px;
   line-height: 1.5;
   background:
-    radial-gradient(42% 34% at 14% 6%, var(--ambient-4), transparent 60%),
-    radial-gradient(40% 34% at 86% 12%, var(--ambient-3), transparent 62%),
-    radial-gradient(52% 42% at 50% 104%, var(--ambient-2), transparent 60%),
-    radial-gradient(36% 30% at 80% 66%, var(--ambient-1), transparent 60%),
+    radial-gradient(48% 30% at 50% -6%, rgba(255, 255, 255, 0.95), transparent 62%),
+    radial-gradient(44% 32% at 12% 18%, var(--ambient-4), transparent 64%),
+    radial-gradient(46% 34% at 88% 24%, var(--ambient-3), transparent 66%),
+    radial-gradient(58% 44% at 50% 58%, var(--ambient-2), transparent 68%),
+    radial-gradient(42% 34% at 82% 86%, var(--ambient-1), transparent 66%),
     var(--bg);
   background-attachment: fixed;
   padding-bottom: env(safe-area-inset-bottom);
@@ -229,8 +230,8 @@ textarea {
 .icon-btn {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
   border: 1px solid var(--stroke);
   background: var(--glass-inset);
@@ -239,6 +240,70 @@ textarea {
 }
 .icon-btn:active {
   transform: scale(0.94);
+}
+
+/* 连接指示点：颜色之外再给形状差异，别把红绿当唯一信道（docs/11 §五） */
+.dot {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+.dot-on {
+  background: var(--down);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--down) 22%, transparent);
+}
+.dot-off {
+  background: transparent;
+  border: 2px solid var(--text-3);
+}
+
+/* 命中区统一过 44px 下限（docs/11 §五）：控件本身可以是圆角胶囊，热区不许更小 */
+.hit {
+  min-height: 44px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* 状态反馈：底部居中浮起（docs/11 §四 Toast） */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 40;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 12px 20px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-float);
+  color: var(--text);
+  font-size: 15px;
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  background: var(--surface-solid);
+  transition:
+    opacity var(--dur-2) var(--ease),
+    transform var(--dur-2) var(--ease);
+}
+.toast-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  /* 模糊只在真显示时才算一层（docs/11 §五 同屏 ≤3）：隐藏时留着 backdrop-filter
+     既占一层预算，又白付一次逐帧模糊。 */
+  background: var(--glass-float);
+  -webkit-backdrop-filter: var(--blur-float);
+  backdrop-filter: var(--blur-float);
+}
+
+/* 长正文（提示词能到十万 token 量级）：不在视口里就不排版 */
+main pre {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
 }
 
 /* 浮层入场 */

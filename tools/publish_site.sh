@@ -19,4 +19,13 @@ rsync -az --delete \
   aliyun:/opt/zhixing_data/golden/
 
 ssh aliyun "curl -s -o /dev/null -w '远端健康：HTTP %{http_code}\n' http://127.0.0.1:8000/"
+
+# 前端（ADR-0018 决定 7）：服务器无 node，故**本机构建、发构建产物**，不在服务器构建。
+# `frontend/dist` 在 .gitignore 里，仓库镜像带不过去，所以单发这一步；node_modules 不发
+# （它是缓存不是运行时）。发的是 /opt/zhixing_quant/frontend/dist——zx-site 的 served_dir()
+# 读的正是它（ADR-0018 决定 2）。StaticFiles 逐请求读盘，不需要重启服务。
+npm --prefix frontend ci --no-audit --no-fund
+npm --prefix frontend run build
+rsync -az --delete frontend/dist/ aliyun:/opt/zhixing_quant/frontend/dist/
+
 echo "发布完成 $(date '+%F %T')"

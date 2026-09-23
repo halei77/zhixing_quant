@@ -45,9 +45,45 @@ SEARCH_LIMIT = 20
 SEARCH_MAX = 50
 #: 06 §二 那句"固定口令"的环境变量名（ADR-0013 决定 3）。
 TOKEN_ENV = "ZX_SITE_TOKEN"
-#: 前端那三件静态件的位置：包内目录，路径由本文件反推（与 `config.repo_root()` 同一手法——
-#: 写死绝对路径换机即废，也过不了 02 §六 的路径扫描）。
+#: 旧前端那三件静态件的位置：包内目录，路径由本文件反推（与 `config.repo_root()` 同一手法——
+#: 写死绝对路径换机即废，也过不了 02 §六 的路径扫描）。ADR-0018 后果二：新前端通过功能
+#: 验收前它仍是线上，验收通过后退役（文件保留到 05 Q1-② 批准删除）。
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+#: 新前端（Vue 3 + Vite）的构建产物（ADR-0018 决定 2）。它在 `.gitignore` 里（构建产物不
+#: 入库），所以只在本机与发布目标上存在——测试一律读 `frontend/src`，不读这里。
+FRONTEND_DIST = config.repo_root() / "frontend" / "dist"
+
+
+def _assets_dir(static_dir: Path) -> Path:
+    """`/assets` 该映到哪个目录：两种前端的落盘形状不一样，这一格就是那个不一样。
+
+    - 新前端（`frontend/dist`）：Vite 把构建产物放在 `dist/assets/` 里面，`index.html` 引用
+      的就是 `/assets/<hash>.js`，所以映到 `dist/assets`。
+    - 旧前端（`site/static`）：三件**平铺**在目录里，`index.html` 引用 `/assets/style.css`，
+      于是只能映到目录本身。
+
+    判据是盘上有没有 `assets/` 子目录，不是"哪个前端"——那是 `served_dir()` 的事。两个形状都在
+    并存期里活着（ADR-0018 后果二），所以这里都得能发，且各有测试钉着。
+    """
+    nested = static_dir / "assets"
+    return nested if nested.is_dir() else static_dir
+
+
+def served_dir(root: Path | None = None) -> Path:
+    """该发哪个前端目录（ADR-0018 决定 2）：构建产物存在就发它，不存在就**起不来**。
+
+    不做静默回退。"忘了构建"实现成"默默发旧前端"与"忘了配口令"实现成"没鉴权"
+    （`site_token` 那条的理由）是同一个陷阱：两者的日志都长得像"服务起来了"，而线上跑的
+    是另一个东西。代价二要的"哪个是真前端写清楚"，就是这句话——真前端是 `frontend/dist`。
+    """
+    dist = FRONTEND_DIST if root is None else root
+    if not (dist / "index.html").is_file():
+        raise RuntimeError(
+            f"{dist} 里没有 index.html：前端没构建。先在 frontend/ 跑 npm run build；"
+            "构建产物缺失时不允许回退到旧的 site/static（ADR-0018 决定 2）"
+        )
+    return dist
+
 
 #: 鉴权中间件的下一个处理器。这一版 FastAPI 没导出这个别名，所以自己写。
 _Dispatch = Callable[[Request], Awaitable[Response]]
@@ -136,8 +172,12 @@ def create_app(
     calendar: TradingCalendar,
     recent: Recent,
     token: str,
+    static_dir: Path = STATIC_DIR,
 ) -> FastAPI:
     """装配应用。依赖全部从参数进来（与 ADR-0010 决定 1 同一手法），只有 `main` 从盘上取。
+
+    `static_dir` 也走参数：发哪个前端是装配决定，不是模块常量——测试于是能在临时目录里
+    造一份假 dist 判"发的是谁"，而不必先跑一次 npm build（CI 的干净 checkout 里没有 dist）。
 
     字典既用来搜，也用来判"这只票存不存在"（`_known`）——同一份名单，不另立第二份答案。
     """
@@ -156,7 +196,7 @@ def create_app(
             return await call_next(request)
         return Response(status_code=401, content="口令不对")
 
-    app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
+    app.mount("/assets", StaticFiles(directory=_assets_dir(static_dir)), name="assets")
 
     @app.middleware("http")
     async def no_asset_cache(request: Request, call_next: _Dispatch) -> Response:
@@ -175,7 +215,7 @@ def create_app(
         上，被拒的人得先看见这张页，才知道要往里面填什么。服务端不注口令——它不认人，无会话无
         账号，代价记在 ADR-0013 代价六。
         """
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(static_dir / "index.html")
 
     @app.get("/api/search")
     def api_search(q: str, limit: int = Query(SEARCH_LIMIT, ge=1, le=SEARCH_MAX)) -> Any:
@@ -333,6 +373,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         calendar=load_calendar(until=date.today()),
         recent=Recent(config.site_recent_file()),
         token=site_token(),
+        static_dir=served_dir(),
     )
     host = os.environ.get("ZX_SITE_HOST", "127.0.0.1")
     port = int(os.environ.get("ZX_SITE_PORT", "8000"))

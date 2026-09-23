@@ -13,6 +13,13 @@ export interface Hit {
   kind: 'stock' | 'index'
 }
 
+/** 留痕里的一条（ADR-0013 决定 4）。`at` 是写下的时刻。 */
+export interface Entry {
+  code: string
+  name: string
+  at: string
+}
+
 export interface Template {
   name: string
   status: string
@@ -72,6 +79,6 @@ export const api = {
       `/api/kline?code=${encodeURIComponent(code)}&kind=${kind}&days=${days}`,
     ),
   prompt: (body: unknown) => call<PromptResult>('POST', '/api/prompt', body),
-  recent: () => call<unknown>('GET', '/api/recent'),
-  remember: (code: string) => call<unknown>('POST', '/api/recent', { code }),
+  recent: () => call<{ entries: Entry[] }>('GET', '/api/recent'),
+  remember: (code: string) => call<{ entries: Entry[] }>('POST', '/api/recent', { code }),
 }
