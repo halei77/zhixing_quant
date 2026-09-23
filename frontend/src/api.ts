@@ -1,0 +1,77 @@
+// 站点 API 客户端。页面不产生任何口径：token 数、口径句、缺口句全来自服务器（ADR-0013 决定 5）。
+// 这里只做「输入 → 请求 → 响应」，与旧 app.js 的调用一一对应。
+
+const TOKEN_KEY = 'zx.site.token'
+
+// ADR-0013 补充决定一：口令由用户填进页面、存在 sessionStorage（关页即清），逐个请求带上。
+export const getToken = (): string => sessionStorage.getItem(TOKEN_KEY) || ''
+export const setToken = (value: string): void => sessionStorage.setItem(TOKEN_KEY, value.trim())
+
+export interface Hit {
+  code: string
+  name: string
+  kind: 'stock' | 'index'
+}
+
+export interface Template {
+  name: string
+  status: string
+  task: string
+  waiting_on?: string
+  data: { dataset: string; days: number }[]
+}
+
+export interface Bar {
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number | null
+}
+
+export interface PromptResult {
+  text: string
+  tokens: number
+  warn: string | null
+}
+
+export class ApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = { 'X-Token': getToken() }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  const response = await fetch(path, {
+    method,
+    headers,
+    body: body === undefined ? null : JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({ detail: response.statusText }))) as {
+      detail?: string
+    }
+    throw new ApiError(problem.detail || String(response.status), response.status)
+  }
+  return (await response.json()) as T
+}
+
+export const api = {
+  search: (q: string, limit = 20) =>
+    call<{ hits: Hit[] }>('GET', `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  templates: () => call<{ templates: Template[] }>('GET', '/api/templates'),
+  kline: (code: string, kind: string, days = 120) =>
+    call<{ bars: Bar[] }>(
+      'GET',
+      `/api/kline?code=${encodeURIComponent(code)}&kind=${kind}&days=${days}`,
+    ),
+  prompt: (body: unknown) => call<PromptResult>('POST', '/api/prompt', body),
+  recent: () => call<unknown>('GET', '/api/recent'),
+  remember: (code: string) => call<unknown>('POST', '/api/recent', { code }),
+}

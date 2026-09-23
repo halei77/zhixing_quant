@@ -1,0 +1,271 @@
+@import "tailwindcss";
+
+/* 知行 · Liquid Glass design tokens（docs/11-设计规范.md 的实现；数值真值在规范里）。
+   浅色（白灰）为主场景；深色是可选变体（[data-theme="dark"]）。红绿只给涨跌。
+   玻璃靠「对比 + 顶边高光 + 分层投影」才看得出；纯色背景上 blur 是看不见的。 */
+
+:root {
+  color-scheme: light;
+  --bg: #eef0f4;
+  --ambient-1: rgba(213, 69, 60, 0.1);
+  --ambient-2: rgba(31, 169, 122, 0.08);
+  --ambient-3: rgba(120, 150, 255, 0.16);
+  --ambient-4: rgba(255, 255, 255, 0.9);
+  --text: #14161c;
+  --text-2: #5b6472;
+  --text-3: #9aa1ad;
+  --ink: #14161c;
+  --ink-contrast: #ffffff;
+  --focus: #5b6472;
+  --up: #d70015;
+  --down: #1a8a4a;
+  --warn: #b26a00;
+  --seal: #d5453c;
+
+  --glass-chrome: rgba(255, 255, 255, 0.62);
+  --glass-float: rgba(255, 255, 255, 0.72);
+  --glass-inset: rgba(15, 23, 42, 0.05);
+  --surface-solid: rgba(255, 255, 255, 0.96);
+  --stroke: rgba(15, 23, 42, 0.1);
+  --stroke-hi: rgba(255, 255, 255, 0.95);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0) 45%);
+  --shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 6px 20px rgba(15, 23, 42, 0.08);
+  --shadow-float:
+    inset 0 1px 0 var(--stroke-hi), 0 18px 44px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
+
+  --blur-chrome: blur(30px) saturate(180%);
+  --blur-float: blur(28px) saturate(180%);
+
+  --r-xs: 8px;
+  --r-sm: 12px;
+  --r-md: 16px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-pill: 999px;
+
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 320ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #050608;
+  --ambient-1: rgba(213, 69, 60, 0.14);
+  --ambient-2: rgba(31, 169, 122, 0.12);
+  --ambient-3: rgba(120, 150, 255, 0.22);
+  --ambient-4: rgba(255, 255, 255, 0.16);
+  --text: #f5f5f7;
+  --text-2: #a1a1aa;
+  --text-3: #6b7280;
+  --ink: #f5f5f7;
+  --ink-contrast: #0b0e14;
+  --focus: #93a4bc;
+  --up: #ff453a;
+  --down: #30d158;
+  --warn: #ff9f0a;
+
+  --glass-chrome: rgba(255, 255, 255, 0.1);
+  --glass-float: rgba(255, 255, 255, 0.14);
+  --glass-inset: rgba(255, 255, 255, 0.06);
+  --surface-solid: rgba(9, 10, 14, 0.8);
+  --stroke: rgba(255, 255, 255, 0.18);
+  --stroke-hi: rgba(255, 255, 255, 0.5);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 42%);
+  --shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.28);
+  --shadow-float:
+    inset 0 1px 0 var(--stroke-hi), 0 16px 40px rgba(0, 0, 0, 0.38), 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  min-height: 100%;
+}
+body {
+  margin: 0;
+  color: var(--text);
+  font-family:
+    -apple-system, "SF Pro Text", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei",
+    sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+  background:
+    radial-gradient(42% 34% at 14% 6%, var(--ambient-4), transparent 60%),
+    radial-gradient(40% 34% at 86% 12%, var(--ambient-3), transparent 62%),
+    radial-gradient(52% 42% at 50% 104%, var(--ambient-2), transparent 60%),
+    radial-gradient(36% 30% at 80% 66%, var(--ambient-1), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  padding-bottom: env(safe-area-inset-bottom);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+}
+/* 细噪点：给毛玻璃一点纹理可折射（纯色背景上 blur 看不出） */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+main {
+  position: relative;
+  z-index: 1;
+}
+
+input,
+button,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+.num {
+  font-variant-numeric: tabular-nums;
+}
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ── 玻璃材质：三档 ─────────────────────────────────────── */
+.glass-chrome {
+  background: var(--glass-chrome);
+  -webkit-backdrop-filter: var(--blur-chrome);
+  backdrop-filter: var(--blur-chrome);
+  border-bottom: 1px solid var(--stroke);
+  box-shadow: var(--shadow-chrome);
+}
+.glass-float {
+  position: relative;
+  background: var(--glass-float);
+  -webkit-backdrop-filter: var(--blur-float);
+  backdrop-filter: var(--blur-float);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-float);
+}
+.glass-float::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--sheen);
+  pointer-events: none;
+  opacity: 0.9;
+}
+.glass-float > * {
+  position: relative;
+  z-index: 1;
+}
+.glass-inset {
+  background: var(--glass-inset);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-md);
+}
+.surface-solid {
+  background: var(--surface-solid);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-md);
+}
+
+/* ── 控件 ─────────────────────────────────────────────── */
+.field {
+  width: 100%;
+  height: 46px;
+  padding: 0 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--stroke);
+  background: var(--glass-inset);
+  transition:
+    border-color var(--dur-1) var(--ease),
+    box-shadow var(--dur-1) var(--ease);
+}
+.field::placeholder {
+  color: var(--text-3);
+}
+.btn {
+  height: 46px;
+  padding: 0 20px;
+  border: none;
+  border-radius: var(--r-md);
+  background: var(--ink);
+  color: var(--ink-contrast);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 6px 18px rgba(0, 0, 0, 0.28);
+  transition:
+    transform var(--dur-1) var(--ease),
+    filter var(--dur-1) var(--ease);
+}
+.btn:hover {
+  filter: brightness(1.06);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  filter: none;
+}
+.btn-ghost {
+  background: var(--glass-float);
+  color: var(--text);
+  border: 1px solid var(--stroke);
+  box-shadow: none;
+}
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke);
+  background: var(--glass-inset);
+  cursor: pointer;
+  transition: transform var(--dur-1) var(--ease);
+}
+.icon-btn:active {
+  transform: scale(0.94);
+}
+
+/* 浮层入场 */
+.pop-enter-active,
+.pop-leave-active {
+  transition:
+    opacity var(--dur-2) var(--ease),
+    transform var(--dur-2) var(--ease);
+}
+.pop-enter-from,
+.pop-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass-chrome,
+  .glass-float,
+  .glass-inset {
+    background: var(--surface-solid);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}

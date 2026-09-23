@@ -43,3 +43,26 @@ jobs:
       # 是因为 pytest-cov 在会话结束才写文件，测试中读到的永远是上一轮的数）。
       - name: 核心模块覆盖率门禁（02 §2 DoD-5）
         run: uv run --frozen python tools/check_coverage.py
+
+  # 前端门禁（ADR-0018）：类型检查 + 构建。产物不进 CI，只验证能构建。
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node（钉死大版本）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 同步依赖（npm ci：lock 不一致即失败）
+        run: npm ci
+
+      - name: vue-tsc 类型检查 + vite build
+        run: npm run build
