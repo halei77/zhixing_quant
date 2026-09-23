@@ -16,6 +16,12 @@ function toggleTheme() {
   localStorage.setItem(THEME_KEY, theme.value)
   applyTheme()
 }
+function onStorage(event: StorageEvent) {
+  // 多开标签页各自切主题时保持同步（同标签内的 setItem 不触发 storage，只有别的标签会）。
+  if (event.key !== THEME_KEY) return
+  theme.value = event.newValue === 'dark' ? 'dark' : 'light'
+  applyTheme()
+}
 
 const CUSTOM = '自定义'
 const DATASETS: { key: string; label: string; days: number }[] = [
@@ -276,9 +282,11 @@ function onTokenInput() {
 
 onMounted(() => {
   applyTheme()
+  window.addEventListener('storage', onStorage)
   if (token.value.trim()) boot()
 })
 onUnmounted(() => {
+  window.removeEventListener('storage', onStorage)
   window.clearTimeout(searchTimer)
   window.clearTimeout(tokenTimer)
   window.clearTimeout(regenerateTimer)
