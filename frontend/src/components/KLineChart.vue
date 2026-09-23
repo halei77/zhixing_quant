@@ -12,10 +12,10 @@ function tokens(el: HTMLElement) {
   const css = getComputedStyle(el)
   const pick = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback
   return {
-    up: pick('--up', '#d70015'),
-    down: pick('--down', '#1a8a4a'),
-    grid: pick('--stroke', 'rgba(15,23,42,.10)'),
-    label: pick('--text-2', '#5b6472'),
+    up: pick('--zx-up', '#d70015'),
+    down: pick('--zx-down', '#1a8a4a'),
+    grid: pick('--zx-stroke', 'rgba(15,23,42,.10)'),
+    label: pick('--zx-text-2', '#5b6472'),
   }
 }
 

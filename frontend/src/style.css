@@ -6,76 +6,84 @@
 
 :root {
   color-scheme: light;
-  --bg: #eef0f4;
-  --ambient-1: rgba(213, 69, 60, 0.1);
-  --ambient-2: rgba(31, 169, 122, 0.08);
-  --ambient-3: rgba(120, 150, 255, 0.16);
-  --ambient-4: rgba(255, 255, 255, 0.9);
-  --text: #14161c;
-  --text-2: #5b6472;
-  --text-3: #9aa1ad;
-  --ink: #14161c;
-  --ink-contrast: #ffffff;
-  --focus: #5b6472;
-  --up: #d70015;
-  --down: #1a8a4a;
-  --warn: #b26a00;
-  --seal: #d5453c;
+  --zx-bg: #eef0f4;
+  --zx-ambient-1: rgba(213, 69, 60, 0.15);
+  --zx-ambient-2: rgba(31, 169, 122, 0.11);
+  --zx-text: #14161c;
+  --zx-text-2: #5b6472;
+  --zx-text-3: #9aa1ad;
+  --zx-ink: #14161c;
+  --zx-ink-contrast: #ffffff;
+  --zx-focus: #5b6472;
+  --zx-up: #d70015;
+  --zx-down: #1a8a4a;
+  --zx-warn: #b26a00;
+  --zx-seal: #d5453c;
 
-  --glass-chrome: rgba(255, 255, 255, 0.62);
-  --glass-float: rgba(255, 255, 255, 0.72);
-  --glass-inset: rgba(15, 23, 42, 0.05);
-  --surface-solid: rgba(255, 255, 255, 0.96);
-  --stroke: rgba(15, 23, 42, 0.1);
-  --stroke-hi: rgba(255, 255, 255, 0.95);
-  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0) 45%);
-  --shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 6px 20px rgba(15, 23, 42, 0.08);
-  --shadow-float:
-    inset 0 1px 0 var(--stroke-hi), 0 18px 44px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
+  --zx-glass-chrome: rgba(255, 255, 255, 0.62);
+  --zx-glass-float: rgba(255, 255, 255, 0.72);
+  --zx-glass-inset: rgba(15, 23, 42, 0.05);
+  --zx-surface-solid: rgba(255, 255, 255, 0.96);
+  --zx-stroke: rgba(15, 23, 42, 0.1);
+  --zx-stroke-hi: rgba(255, 255, 255, 0.95);
+  --zx-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0) 45%);
+  --zx-shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 6px 20px rgba(15, 23, 42, 0.08);
+  --zx-shadow-float:
+    inset 0 1px 0 var(--zx-stroke-hi), 0 18px 44px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
 
-  --blur-chrome: blur(30px) saturate(180%);
-  --blur-float: blur(28px) saturate(180%);
+  --zx-blur-chrome: blur(30px) saturate(180%);
+  --zx-blur-float: blur(28px) saturate(180%);
 
-  --r-xs: 8px;
-  --r-sm: 12px;
-  --r-md: 16px;
-  --r-lg: 20px;
-  --r-xl: 28px;
-  --r-pill: 999px;
+  --zx-r-xs: 8px;
+  --zx-r-sm: 12px;
+  --zx-r-md: 16px;
+  --zx-r-lg: 20px;
+  --zx-r-xl: 28px;
+  --zx-r-pill: 999px;
 
-  --dur-1: 120ms;
-  --dur-2: 200ms;
-  --dur-3: 320ms;
-  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --zx-sp-1: 4px;
+  --zx-sp-2: 8px;
+  --zx-sp-3: 12px;
+  --zx-sp-4: 16px;
+  --zx-sp-5: 20px;
+  --zx-sp-6: 24px;
+  --zx-sp-7: 32px;
+  --zx-sp-8: 40px;
+
+  --zx-dur-1: 120ms;
+  --zx-dur-2: 200ms;
+  --zx-dur-3: 320ms;
+  --zx-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --zx-ease-out: cubic-bezier(0, 0, 0.2, 1);
+
+  --zx-ring: 0 0 0 3px color-mix(in srgb, var(--zx-focus) 60%, transparent);
 }
 
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg: #050608;
-  --ambient-1: rgba(213, 69, 60, 0.14);
-  --ambient-2: rgba(31, 169, 122, 0.12);
-  --ambient-3: rgba(120, 150, 255, 0.22);
-  --ambient-4: rgba(255, 255, 255, 0.16);
-  --text: #f5f5f7;
-  --text-2: #a1a1aa;
-  --text-3: #6b7280;
-  --ink: #f5f5f7;
-  --ink-contrast: #0b0e14;
-  --focus: #93a4bc;
-  --up: #ff453a;
-  --down: #30d158;
-  --warn: #ff9f0a;
+  --zx-bg: #050608;
+  --zx-ambient-1: rgba(213, 69, 60, 0.18);
+  --zx-ambient-2: rgba(31, 169, 122, 0.14);
+  --zx-text: #f5f5f7;
+  --zx-text-2: #a1a1aa;
+  --zx-text-3: #6b7280;
+  --zx-ink: #f5f5f7;
+  --zx-ink-contrast: #0b0e14;
+  --zx-focus: #93a4bc;
+  --zx-up: #ff453a;
+  --zx-down: #30d158;
+  --zx-warn: #ff9f0a;
 
-  --glass-chrome: rgba(255, 255, 255, 0.1);
-  --glass-float: rgba(255, 255, 255, 0.14);
-  --glass-inset: rgba(255, 255, 255, 0.06);
-  --surface-solid: rgba(9, 10, 14, 0.8);
-  --stroke: rgba(255, 255, 255, 0.18);
-  --stroke-hi: rgba(255, 255, 255, 0.5);
-  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 42%);
-  --shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.28);
-  --shadow-float:
-    inset 0 1px 0 var(--stroke-hi), 0 16px 40px rgba(0, 0, 0, 0.38), 0 2px 8px rgba(0, 0, 0, 0.22);
+  --zx-glass-chrome: rgba(255, 255, 255, 0.1);
+  --zx-glass-float: rgba(255, 255, 255, 0.14);
+  --zx-glass-inset: rgba(255, 255, 255, 0.06);
+  --zx-surface-solid: rgba(9, 10, 14, 0.8);
+  --zx-stroke: rgba(255, 255, 255, 0.18);
+  --zx-stroke-hi: rgba(255, 255, 255, 0.5);
+  --zx-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 42%);
+  --zx-shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.28);
+  --zx-shadow-float:
+    inset 0 1px 0 var(--zx-stroke-hi), 0 16px 40px rgba(0, 0, 0, 0.38), 0 2px 8px rgba(0, 0, 0, 0.22);
 }
 
 * {
@@ -88,23 +96,21 @@ body,
 }
 body {
   margin: 0;
-  color: var(--text);
+  color: var(--zx-text);
   font-family:
     -apple-system, "SF Pro Text", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei",
     sans-serif;
   font-size: 17px;
   line-height: 1.5;
   background:
-    radial-gradient(48% 30% at 50% -6%, rgba(255, 255, 255, 0.95), transparent 62%),
-    radial-gradient(44% 32% at 12% 18%, var(--ambient-4), transparent 64%),
-    radial-gradient(46% 34% at 88% 24%, var(--ambient-3), transparent 66%),
-    radial-gradient(58% 44% at 50% 58%, var(--ambient-2), transparent 68%),
-    radial-gradient(42% 34% at 82% 86%, var(--ambient-1), transparent 66%),
-    var(--bg);
+    radial-gradient(52% 32% at 50% -8%, rgba(255, 255, 255, 0.95), transparent 62%),
+    radial-gradient(64% 46% at 20% 34%, var(--zx-ambient-1), transparent 72%),
+    radial-gradient(62% 48% at 84% 46%, var(--zx-ambient-2), transparent 74%),
+    var(--zx-bg);
   background-attachment: fixed;
   padding-bottom: env(safe-area-inset-bottom);
   -webkit-font-smoothing: antialiased;
-  transition: background-color var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+  transition: background-color var(--zx-dur-2) var(--zx-ease), color var(--zx-dur-2) var(--zx-ease);
 }
 /* 细噪点：给毛玻璃一点纹理可折射（纯色背景上 blur 看不出） */
 body::before {
@@ -133,34 +139,35 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 :focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--zx-focus);
   outline-offset: 2px;
   border-radius: 6px;
+  box-shadow: var(--zx-ring);
 }
 
 /* ── 玻璃材质：三档 ─────────────────────────────────────── */
 .glass-chrome {
-  background: var(--glass-chrome);
-  -webkit-backdrop-filter: var(--blur-chrome);
-  backdrop-filter: var(--blur-chrome);
-  border-bottom: 1px solid var(--stroke);
-  box-shadow: var(--shadow-chrome);
+  background: var(--zx-glass-chrome);
+  -webkit-backdrop-filter: var(--zx-blur-chrome);
+  backdrop-filter: var(--zx-blur-chrome);
+  border-bottom: 1px solid var(--zx-stroke);
+  box-shadow: var(--zx-shadow-chrome);
 }
 .glass-float {
   position: relative;
-  background: var(--glass-float);
-  -webkit-backdrop-filter: var(--blur-float);
-  backdrop-filter: var(--blur-float);
-  border: 1px solid var(--stroke);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-float);
+  background: var(--zx-glass-float);
+  -webkit-backdrop-filter: var(--zx-blur-float);
+  backdrop-filter: var(--zx-blur-float);
+  border: 1px solid var(--zx-stroke);
+  border-radius: var(--zx-r-lg);
+  box-shadow: var(--zx-shadow-float);
 }
 .glass-float::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: var(--sheen);
+  background: var(--zx-sheen);
   pointer-events: none;
   opacity: 0.9;
 }
@@ -169,14 +176,14 @@ textarea {
   z-index: 1;
 }
 .glass-inset {
-  background: var(--glass-inset);
-  border: 1px solid var(--stroke);
-  border-radius: var(--r-md);
+  background: var(--zx-glass-inset);
+  border: 1px solid var(--zx-stroke);
+  border-radius: var(--zx-r-md);
 }
 .surface-solid {
-  background: var(--surface-solid);
-  border: 1px solid var(--stroke);
-  border-radius: var(--r-md);
+  background: var(--zx-surface-solid);
+  border: 1px solid var(--zx-stroke);
+  border-radius: var(--zx-r-md);
 }
 
 /* ── 控件 ─────────────────────────────────────────────── */
@@ -184,31 +191,31 @@ textarea {
   width: 100%;
   height: 46px;
   padding: 0 16px;
-  border-radius: var(--r-md);
-  border: 1px solid var(--stroke);
-  background: var(--glass-inset);
+  border-radius: var(--zx-r-md);
+  border: 1px solid var(--zx-stroke);
+  background: var(--zx-glass-inset);
   transition:
-    border-color var(--dur-1) var(--ease),
-    box-shadow var(--dur-1) var(--ease);
+    border-color var(--zx-dur-1) var(--zx-ease),
+    box-shadow var(--zx-dur-1) var(--zx-ease);
 }
 .field::placeholder {
-  color: var(--text-3);
+  color: var(--zx-text-3);
 }
 .btn {
   height: 46px;
   padding: 0 20px;
   border: none;
-  border-radius: var(--r-md);
-  background: var(--ink);
-  color: var(--ink-contrast);
+  border-radius: var(--zx-r-md);
+  background: var(--zx-ink);
+  color: var(--zx-ink-contrast);
   font-weight: 600;
   cursor: pointer;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.35),
     0 6px 18px rgba(0, 0, 0, 0.28);
   transition:
-    transform var(--dur-1) var(--ease),
-    filter var(--dur-1) var(--ease);
+    transform var(--zx-dur-1) var(--zx-ease),
+    filter var(--zx-dur-1) var(--zx-ease);
 }
 .btn:hover {
   filter: brightness(1.06);
@@ -222,9 +229,9 @@ textarea {
   filter: none;
 }
 .btn-ghost {
-  background: var(--glass-float);
-  color: var(--text);
-  border: 1px solid var(--stroke);
+  background: var(--zx-glass-float);
+  color: var(--zx-text);
+  border: 1px solid var(--zx-stroke);
   box-shadow: none;
 }
 .icon-btn {
@@ -233,10 +240,10 @@ textarea {
   width: 44px;
   height: 44px;
   border-radius: 12px;
-  border: 1px solid var(--stroke);
-  background: var(--glass-inset);
+  border: 1px solid var(--zx-stroke);
+  background: var(--zx-glass-inset);
   cursor: pointer;
-  transition: transform var(--dur-1) var(--ease);
+  transition: transform var(--zx-dur-1) var(--zx-ease);
 }
 .icon-btn:active {
   transform: scale(0.94);
@@ -250,12 +257,12 @@ textarea {
   border-radius: 50%;
 }
 .dot-on {
-  background: var(--down);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--down) 22%, transparent);
+  background: var(--zx-down);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--zx-down) 22%, transparent);
 }
 .dot-off {
   background: transparent;
-  border: 2px solid var(--text-3);
+  border: 2px solid var(--zx-text-3);
 }
 
 /* 命中区统一过 44px 下限（docs/11 §五）：控件本身可以是圆角胶囊，热区不许更小 */
@@ -276,28 +283,28 @@ textarea {
   z-index: 40;
   max-width: min(560px, calc(100vw - 32px));
   padding: 12px 20px;
-  border: 1px solid var(--stroke);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-float);
-  color: var(--text);
+  border: 1px solid var(--zx-stroke);
+  border-radius: var(--zx-r-lg);
+  box-shadow: var(--zx-shadow-float);
+  color: var(--zx-text);
   font-size: 15px;
   text-align: center;
   pointer-events: none;
   opacity: 0;
   transform: translate(-50%, 8px);
-  background: var(--surface-solid);
+  background: var(--zx-surface-solid);
   transition:
-    opacity var(--dur-2) var(--ease),
-    transform var(--dur-2) var(--ease);
+    opacity var(--zx-dur-2) var(--zx-ease),
+    transform var(--zx-dur-2) var(--zx-ease);
 }
 .toast-on {
   opacity: 1;
   transform: translate(-50%, 0);
   /* 模糊只在真显示时才算一层（docs/11 §五 同屏 ≤3）：隐藏时留着 backdrop-filter
      既占一层预算，又白付一次逐帧模糊。 */
-  background: var(--glass-float);
-  -webkit-backdrop-filter: var(--blur-float);
-  backdrop-filter: var(--blur-float);
+  background: var(--zx-glass-float);
+  -webkit-backdrop-filter: var(--zx-blur-float);
+  backdrop-filter: var(--zx-blur-float);
 }
 
 /* 长正文（提示词能到十万 token 量级）：不在视口里就不排版 */
@@ -307,11 +314,15 @@ main pre {
 }
 
 /* 浮层入场 */
-.pop-enter-active,
+.pop-enter-active {
+  transition:
+    opacity var(--zx-dur-2) var(--zx-ease),
+    transform var(--zx-dur-2) var(--zx-ease);
+}
 .pop-leave-active {
   transition:
-    opacity var(--dur-2) var(--ease),
-    transform var(--dur-2) var(--ease);
+    opacity var(--zx-dur-2) var(--zx-ease-out),
+    transform var(--zx-dur-2) var(--zx-ease-out);
 }
 .pop-enter-from,
 .pop-leave-to {
@@ -329,7 +340,7 @@ main pre {
   .glass-chrome,
   .glass-float,
   .glass-inset {
-    background: var(--surface-solid);
+    background: var(--zx-surface-solid);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }

@@ -357,11 +357,11 @@ onUnmounted(() => {
           <li v-for="hit in hits" :key="hit.code">
             <button
               type="button"
-              class="hit flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[var(--glass-inset)]"
+              class="hit flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[var(--zx-glass-inset)]"
               @click="pick(hit)"
             >
               <span>{{ hit.code }} {{ hit.name }}</span>
-              <span class="text-xs" :style="{ color: hit.kind === 'index' ? 'var(--seal)' : 'var(--text-2)' }">
+              <span class="text-xs" :style="{ color: hit.kind === 'index' ? 'var(--zx-seal)' : 'var(--zx-text-2)' }">
                 {{ hit.kind === 'index' ? '指数' : '个股' }}
               </span>
             </button>
@@ -370,7 +370,7 @@ onUnmounted(() => {
       </Transition>
 
       <div v-if="!hits.length && recent.length" class="pt-2">
-        <p class="px-1 text-[13px]" style="color: var(--text-3)">最近搜过</p>
+        <p class="px-1 text-[13px]" style="color: var(--zx-text-3)">最近搜过</p>
         <ul class="flex flex-wrap gap-1.5 px-1 pt-1.5">
           <li v-for="entry in recent" :key="entry.code">
             <button
@@ -385,7 +385,7 @@ onUnmounted(() => {
         </ul>
       </div>
 
-      <p v-if="hint" class="px-1 pt-2 text-[13px]" style="color: var(--text-2)">{{ hint }}</p>
+      <p v-if="hint" class="px-1 pt-2 text-[13px]" style="color: var(--zx-text-2)">{{ hint }}</p>
     </section>
 
     <!-- 行情：整块是内容层（docs/11 §二「正文与数字一律实底」），不是玻璃 -->
@@ -394,18 +394,18 @@ onUnmounted(() => {
         <div class="flex items-start justify-between">
           <div>
             <p class="text-[22px] font-semibold">{{ selected.name }}</p>
-            <p class="num text-[13px]" style="color: var(--text-2)">{{ selected.code }}</p>
+            <p class="num text-[13px]" style="color: var(--zx-text-2)">{{ selected.code }}</p>
           </div>
           <div v-if="quote" data-testid="quote" class="text-right">
             <p
               class="num text-[30px] font-bold"
-              :style="{ color: quote.up ? 'var(--up)' : 'var(--down)' }"
+              :style="{ color: quote.up ? 'var(--zx-up)' : 'var(--zx-down)' }"
             >
               {{ quote.close }}
             </p>
             <p
               class="num text-[15px]"
-              :style="{ color: quote.up ? 'var(--up)' : 'var(--down)' }"
+              :style="{ color: quote.up ? 'var(--zx-up)' : 'var(--zx-down)' }"
             >
               {{ quote.change_pct }}
             </p>
@@ -418,19 +418,19 @@ onUnmounted(() => {
 
         <dl v-if="quote" class="num mt-2.5 grid grid-cols-4 gap-2 text-center">
           <div>
-            <dt class="text-xs" style="color: var(--text-2)">开</dt>
+            <dt class="text-xs" style="color: var(--zx-text-2)">开</dt>
             <dd class="text-[15px]">{{ quote.open }}</dd>
           </div>
           <div>
-            <dt class="text-xs" style="color: var(--text-2)">高</dt>
+            <dt class="text-xs" style="color: var(--zx-text-2)">高</dt>
             <dd class="text-[15px]">{{ quote.high }}</dd>
           </div>
           <div>
-            <dt class="text-xs" style="color: var(--text-2)">低</dt>
+            <dt class="text-xs" style="color: var(--zx-text-2)">低</dt>
             <dd class="text-[15px]">{{ quote.low }}</dd>
           </div>
           <div>
-            <dt class="text-xs" style="color: var(--text-2)">量</dt>
+            <dt class="text-xs" style="color: var(--zx-text-2)">量</dt>
             <dd class="text-[15px]">{{ quote.volume }}</dd>
           </div>
         </dl>
@@ -458,19 +458,19 @@ onUnmounted(() => {
       <p class="pt-2.5 text-sm">
         {{ isCustom ? '自己勾K线类型与天数，生成一条一次性组合' : (currentTemplate?.task ?? '') }}
       </p>
-      <p v-if="!isCustom && currentTemplate && currentTemplate.status !== 'ready'" class="text-[13px]" style="color: var(--text-2)">
+      <p v-if="!isCustom && currentTemplate && currentTemplate.status !== 'ready'" class="text-[13px]" style="color: var(--zx-text-2)">
         还没上线：{{ currentTemplate.waiting_on }}
       </p>
 
       <div v-if="isCustom" class="glass-inset mt-2.5 grid gap-2 p-3">
-        <p class="text-[13px]" style="color: var(--text-2)">勾选要进的K线类型，各自填天数（1–750 个交易日）</p>
+        <p class="text-[13px]" style="color: var(--zx-text-2)">勾选要进的K线类型，各自填天数（1–750 个交易日）</p>
         <label
           v-for="d in DATASETS"
           :key="d.key"
           class="flex items-center justify-between gap-2.5"
         >
           <span class="flex items-center gap-2 text-[15px]">
-            <input v-model="custom[d.key]" type="checkbox" class="h-[18px] w-[18px]" style="accent-color: var(--ink)" />
+            <input v-model="custom[d.key]" type="checkbox" class="h-[18px] w-[18px]" style="accent-color: var(--zx-ink)" />
             {{ d.label }}
           </span>
           <input
@@ -482,11 +482,11 @@ onUnmounted(() => {
             class="field num !h-11 !w-[90px] text-right"
           />
         </label>
-        <p v-if="dayError" class="text-[13px]" style="color: var(--warn)">{{ dayError }}</p>
+        <p v-if="dayError" class="text-[13px]" style="color: var(--zx-warn)">{{ dayError }}</p>
       </div>
 
-      <p class="num pt-2 text-[13px]" style="color: var(--text-2)">
-        <span>{{ tokens == null ? '—' : tokens.toLocaleString('zh-CN') }}</span> token<span :style="{ color: 'var(--warn)' }">{{ warn ? `　⚠ ${warn}` : '' }}</span>
+      <p class="num pt-2 text-[13px]" style="color: var(--zx-text-2)">
+        <span>{{ tokens == null ? '—' : tokens.toLocaleString('zh-CN') }}</span> token<span :style="{ color: 'var(--zx-warn)' }">{{ warn ? `　⚠ ${warn}` : '' }}</span>
       </p>
 
       <pre
@@ -507,7 +507,7 @@ onUnmounted(() => {
   width: 44px;
   height: 44px;
   border-radius: 12px;
-  background: var(--seal);
+  background: var(--zx-seal);
   color: #fff;
   font-size: 14px;
   font-weight: 700;
@@ -529,9 +529,9 @@ onUnmounted(() => {
 .pill {
   min-height: 44px;
   padding: 0 16px;
-  border-radius: var(--r-pill);
-  border: 1px solid var(--stroke);
-  background: var(--glass-inset);
+  border-radius: var(--zx-r-pill);
+  border: 1px solid var(--zx-stroke);
+  background: var(--zx-glass-inset);
   cursor: pointer;
 }
 </style>
