@@ -9,6 +9,7 @@
 
 import math
 import sys
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -139,14 +140,72 @@ WINDOW = (date(2024, 1, 2), date(2024, 1, 31))
 SYMBOLS = ("sh600519", "sz300750")
 
 
+def _bse_relay(*rows: list[str], count: int | None = None, has_more: bool = False) -> cg.RelayCall:
+    """北交所名单那一份的假 relay。不给它一个 seam，这些测试就会去碰真网络与真 key。"""
+    body: dict[str, Any] = {
+        "data": {
+            "fields": ["ts_code", "name", "list_date"],
+            "items": list(rows),
+            "count": len(rows) if count is None else count,
+            "has_more": has_more,
+        }
+    }
+
+    def fetch(_api: str, _params: Mapping[str, object]) -> tuple[str, dict[str, Any]]:
+        return "rds", body
+
+    return fetch
+
+
+def test_the_capture_tool_covers_every_snapshot_the_master_needs() -> None:
+    """主数据要的四份名单，抓取工具必须一份不少——这是本文件最贵的一条不变量。
+
+    重抓会**覆盖** manifest（`capture()` 的写法），少抓一份就是把那份的 captured_at 抹掉，
+    `master.captured_on` 随即拒收，zx-daily / zx-site / zx-backtest 全线起不来。2026-09-23
+    实测过一次：扩板加了科创板与北交所两份名单，工具却还只抓原来的两份，`read_master` 直接
+    `SourceSchemaError`。注释里写"两处同名"挡不住这件事，只有这条断言能。
+    """
+    from zhixing_quant.sources.akshare import master
+
+    keys = set(cg.build_fetchers(WINDOW, SYMBOLS))
+    assert set(master.SNAPSHOT_NAMES) <= keys, sorted(set(master.SNAPSHOT_NAMES) - keys)
+
+
+def test_the_relay_listing_frame_keeps_the_source_columns() -> None:
+    """北交所名单落的是源那天的原样，不剪成主数据要的三列（剪过就看不出列漂移）。"""
+    rows = cg.relay_listing_frame(relay_call=_bse_relay(["920229.BJ", "N世纪", "20260922"]))
+    assert rows == [{"ts_code": "920229.BJ", "name": "N世纪", "list_date": "20260922"}]
+
+
+def test_the_bse_snapshot_parses_into_the_bse_board() -> None:
+    """样本落下来是为了重放：这几行的形状必须真能过主数据那一层（`.BJ` 后缀归一化）。"""
+    from zhixing_quant.domain.symbol import Board, board_of
+    from zhixing_quant.sources.akshare.master import listings_from_rows
+
+    rows = cg.relay_listing_frame(relay_call=_bse_relay(["920229.BJ", "N世纪", "20260922"]))
+    (listing,) = listings_from_rows(rows).listings
+    assert listing.code == "920229"
+    assert board_of(listing.code) is Board.BSE
+
+
+def test_a_truncated_relay_listing_is_refused_not_sampled() -> None:
+    """源声称的总行数大于这一页就是截断（ADR-0015 决定 3）：样本落一半比不落更危险。"""
+    truncated = _bse_relay(["920229.BJ", "N世纪", "20260922"], count=5644, has_more=True)
+    with pytest.raises(RuntimeError, match="截断"):
+        cg.relay_listing_frame(relay_call=truncated)
+
+
 def test_fetcher_keys_encode_the_window_and_the_symbol() -> None:
     """key 就是文件名，所以参数必须写在 key 里：换窗口=换 key，不覆盖已批准的样本。"""
     keys = cg.build_fetchers(WINDOW, SYMBOLS)
     assert "stock_zh_a_daily__sh600519__20240102_20240131__hfq" in keys
     assert "tool_trade_date_hist_sina" in keys
-    # 两所各一个 key：合并成一份样本就重放不出"某个交易所今天什么都没给"
+    # 每份名单一个 key：合并成一份样本就重放不出"某个板块今天什么都没给"
     assert "stock_info_sh_name_code__主板A股" in keys
     assert "stock_info_sz_name_code__A股列表" in keys
+    assert "stock_info_sh_name_code__科创板" in keys
+    # 北交所名单（relay）：四份上市名单里唯一不走 akshare 的一份
+    assert cg.BSE_LISTING_KEY in keys
     # 分钟线的 key 不带窗口：源没有窗口参数（ADR-0009 决定 6），能带的参数只有周期。
     assert "stock_zh_a_minute__sh600519__5min" in keys
     assert "stock_zh_a_minute__sz300750__60min" in keys
@@ -155,7 +214,7 @@ def test_fetcher_keys_encode_the_window_and_the_symbol() -> None:
 def test_each_symbol_binds_its_own_arguments() -> None:
     """闭包捕获循环变量的经典事故：所有 key 都抓最后一只票，样本名字却全都对得上。"""
     call = Recorder(*[[] for _ in cg.build_fetchers(WINDOW, SYMBOLS)])
-    fetchers = cg.build_fetchers(WINDOW, SYMBOLS, call=call)
+    fetchers = cg.build_fetchers(WINDOW, SYMBOLS, call=call, relay_call=_bse_relay())
     for key, fetcher in fetchers.items():
         assert fetcher() == [], key
     daily = [k for k in call.kwargs if "start_date" in k]
@@ -185,7 +244,7 @@ def test_the_command_line_reports_a_failed_capture_by_its_exit_code(
     def boom(**_kwargs: object) -> FakeFrame:
         raise RuntimeError("源不可达")
 
-    assert cg.main(["20240102", "20240131", "sh600519"], call=boom) == 1
+    assert cg.main(["20240102", "20240131", "sh600519"], call=boom, relay_call=_bse_relay()) == 1
     assert "没抓到" in capsys.readouterr().err
     assert (tmp_path / "golden" / cg.MANIFEST_NAME).is_file()  # 失败也要留下可查的清单
 
@@ -195,5 +254,9 @@ def test_a_full_capture_exits_zero(
 ) -> None:
     """成功路径也要有人走一遍：退出码写反了，日报上"抓到"和"没抓到"就反了。"""
     monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
-    assert cg.main(["20240102", "20240131", "sh600519"], call=lambda **_k: FakeFrame(RAW)) == 0
+    one = _bse_relay(["920229.BJ", "N世纪", "20260922"])
+    rc = cg.main(
+        ["20240102", "20240131", "sh600519"], call=lambda **_k: FakeFrame(RAW), relay_call=one
+    )
+    assert rc == 0
     assert "需用户批准" in capsys.readouterr().out

@@ -1,4 +1,10 @@
-"""黄金样本抓取：把 akshare 的真实响应落成可重放的 CSV（03 §二 L2；Step 2a）。
+"""黄金样本抓取：把源的真实响应落成可重放的 CSV（03 §二 L2；Step 2a）。
+
+绡大多数样本来自 akshare，唯一的例外是北交所上市名单：akshare 没有 BSE 名单接口，它走 relay
+的 `stock_basic`（ADR-0013 补充决定三）。四份名单（主板/创业板/科创板/北交所）合起来正是
+`master.SNAPSHOT_NAMES`，**一份都不能少**——本文件重抓会覆盖 manifest，少抓一份就是把那份的
+captured_at 抹掉，`master.captured_on` 随即拒收，zx-daily 与 zx-site 一起起不来（2026-09-23
+实测过）。这条不变量由 `tests/test_capture_golden.py` 的覆盖检查机器判定。
 
 为什么样本先落在数据根（`$ZX_DATA_ROOT/golden/`）而不是直接进仓：真实快照进仓等于把
 "外部服务器那天给了什么"变成仓库历史的一部分——它是数据不是代码，而且一次落错就会永久
@@ -30,6 +36,9 @@ from zhixing_quant.sources.akshare import fetch
 Row = Mapping[str, Any]
 Fetcher = Callable[[], Sequence[Row]]
 Record = dict[str, object]
+#: relay 客户端 `fetch` 的形状（供数源名 + 响应体）。与 akshare 的 `call` 分开两个注入点：
+#: 两边的假件形状不同，混成一个 seam 只会让两边都测不清。
+RelayCall = Callable[[str, Mapping[str, object]], tuple[str, dict[str, Any]]]
 
 #: 清单列。captured_at 记到秒：同一天重抓两次也要分得出先后。
 MANIFEST_COLUMNS = (
@@ -150,6 +159,43 @@ def write_manifest(records: Iterable[Record], path: Path) -> None:
 #: 相除得来的，只落一帧的样本重放不出因子，R005 就没有判据来源。
 FRAMES = (("", "raw"), ("hfq", "hfq"))
 
+#: 北交所上市名单：akshare 没有 BSE 名单接口，走 relay 的 `stock_basic`（ADR-0013 补充
+#: 决定三）。key 与 `master.SNAPSHOT_NAMES` 里那一条一字不差——read_master 按名字找文件。
+BSE_LISTING_KEY = "relay_stock_basic__BJ"
+BSE_LISTING_PARAMS: Mapping[str, object] = {"exchange": "BSE"}
+
+
+def relay_listing_frame(*, relay_call: RelayCall | None = None) -> list[dict[str, Any]]:
+    """北交所上市名单（relay `stock_basic`，exchange=BSE）→ 源给的整行。
+
+    返回源那天的**原样**（实测十个列），不剪成主数据要的 ts_code/name/list_date 三列：样本
+    记的是"源给了什么形状"，剪过的样本看不出源多给或少给了一列，而列漂移正是样本要发现的事。
+
+    截断必须硬响（ADR-0015 决定 3）：这张表今天只有几百行、碰不到 relay 的 5000 行上限，
+    但"碰不到"是源说了算，静默截断等于股票池悄悄少一截。与 `relay_cli.fetch_all_pages`
+    同一条纪律，只是这里没有 trade_date 可分页，只能拒绝整份样本。
+    """
+    fetch = _real_relay_fetch() if relay_call is None else relay_call
+    _source, body = fetch("stock_basic", dict(BSE_LISTING_PARAMS))
+    data = body.get("data") or {}
+    fields = [str(name) for name in (data.get("fields") or [])]
+    items = data.get("items") or []
+    total = data.get("count")
+    if data.get("has_more") or (isinstance(total, int) and total > len(items)):
+        raise RuntimeError(
+            f"北交所名单被截断：拿到 {len(items)} 行、源声称 {total} 行"
+            f"（has_more={data.get('has_more')}）——落半份样本比不落更危险"
+        )
+    rows: list[dict[str, Any]] = [dict(zip(fields, item, strict=False)) for item in items]
+    return rows
+
+
+def _real_relay_fetch() -> RelayCall:
+    """真联网的 relay 入口：只有手动跑这个脚本时才走到（CI 无网络也过得了这一层）。"""
+    from zhixing_quant.sources.relay.client import fetch as relay_fetch
+
+    return relay_fetch
+
 
 def build_fetchers(
     window: tuple[date, date],
@@ -157,8 +203,13 @@ def build_fetchers(
     *,
     periods: tuple[str, ...] = ("5", "30", "60"),
     call: fetch.AkCall | None = None,
+    relay_call: RelayCall | None = None,
 ) -> dict[str, Fetcher]:
     """这次抓取要落哪些样本：窗口与代码写在这一处，不散落在调用处。
+
+    **上市名单一份不能少**：四份（主板/创业板/科创板/北交所）各自一个 key，与
+    `master.SNAPSHOT_NAMES` 一致——重抓会覆盖 manifest，少一份就会把 `read_master` 弄断。
+    前三份从 `fetch.LISTINGS` 来，北交所那份走 relay（见 `BSE_LISTING_KEY`）。
 
     真正发请求的是 `sources/akshare/fetch.py`——每日任务用的就是它。在这里再写一遍参数拼装
     迟早漂：漂了的样子是"样本重放全绿、线上天天告警"，两边各自都测得过。
@@ -174,6 +225,8 @@ def build_fetchers(
     tag = f"{start:%Y%m%d}_{end:%Y%m%d}"
     fetchers: dict[str, Fetcher] = {
         "tool_trade_date_hist_sina": partial(fetch.fetch_calendar, call=call),
+        # 北交所名单（relay）：`master.SNAPSHOT_NAMES` 四份里的第四份，也是唯一不走 akshare 的
+        BSE_LISTING_KEY: partial(relay_listing_frame, relay_call=relay_call),
     }
     # `partial` 而不是闭包：闭包捕获循环变量会让所有 key 都抓最后一只票，而 key 的名字
     # 全对得上——那种错只有 `partial` 的实参绑定才不会犯。
@@ -191,7 +244,12 @@ def build_fetchers(
     return fetchers
 
 
-def main(argv: list[str] | None = None, *, call: fetch.AkCall | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    call: fetch.AkCall | None = None,
+    relay_call: RelayCall | None = None,
+) -> int:
     """`capture_golden.py [start end] [symbols,csv]`，默认抓 2024 年 1 月的两只票。
 
     默认窗口是写死在这里的：黄金样本报的是"源在某个已知窗口里给了什么形状"，窗口跟着日期
@@ -208,7 +266,7 @@ def main(argv: list[str] | None = None, *, call: fetch.AkCall | None = None) -> 
     )
     symbols = tuple(args[2].split(",")) if len(args) >= 3 else ("sh600519", "sz300750")
     out_dir = golden_dir()
-    fetchers = build_fetchers(window, symbols, call=call)
+    fetchers = build_fetchers(window, symbols, call=call, relay_call=relay_call)
     records = capture(fetchers, out_dir, captured_at=datetime.now())
     for record in records:
         print(f"{record['status']:5} {record['key']} rows={record['rows']}")

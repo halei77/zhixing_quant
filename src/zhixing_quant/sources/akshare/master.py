@@ -31,10 +31,15 @@ from zhixing_quant.sources.rows import SourceSchemaError, pick, to_date
 CODE_ALIASES = ("证券代码", "A股代码", "ts_code", "code")
 NAME_ALIASES = ("证券简称", "A股简称", "name")
 LISTED_ALIASES = ("上市日期", "A股上市日期", "list_date")
-#: 两份交易所名单的文件名，与 `tools/capture_golden.py` 的 key 一致：两处不同名就是两份主数据。
-#: 四份名单（2026-09-22 用户裁决扩板：主板/创业板/科创板/北交所一个不能少——ADR-0013
-#: 补充决定三的待裁决就此了结）。北交所那份来自 relay 的 stock_basic（akshare 没有 BSE
-#: 名单接口），列名 ts_code/name/list_date 落在 ALIASES 的英文兜底里，不用特判。
+#: 四份上市名单的文件名——**主数据要什么，快照就得有什么**，这条清单是它唯一的出处。
+#: 2026-09-22 用户裁决扩板：主板/创业板/科创板/北交所一个不能少（ADR-0013 补充决定三）。
+#: 前三份来自 akshare（`fetch.LISTINGS`，科创板同函数换 symbol），北交所那份来自 relay 的
+#: stock_basic（akshare 没有 BSE 名单接口），列名 ts_code/name/list_date 落在 ALIASES 的
+#: 英文兜底里，不用特判。
+#: 这四份必须都能被 `tools/capture_golden.py` 抓到：那个工具重抓会**覆盖** manifest，少抓
+#: 一份就是把它的 captured_at 抹掉，`captured_on` 随即拒收（zx-daily / zx-site 全线断）。
+#: 该不变量由 `tests/test_capture_golden.py::test_the_capture_tool_covers_every_snapshot_
+#: the_master_needs` 机器判定——"两处同名"这种话写在注释里挡不住漂移，2026-09-23 漂过一次。
 SNAPSHOT_NAMES = (
     "stock_info_sh_name_code__主板A股",
     "stock_info_sz_name_code__A股列表",
@@ -135,7 +140,7 @@ def snapshot_paths(directory: Path | None = None) -> tuple[Path, ...]:
 def captured_on(directory: Path) -> date:
     """名单是哪一天抓的——ST 那段区间唯一的起点候选。
 
-    两份名单各有一条 `captured_at` 时取**最晚**的那个：09-01 抓的名单里的 ST 票，从 09-19
+    四份名单各有一条 `captured_at` 时取**最晚**的那个：09-01 抓的名单里的 ST 票，从 09-19
     起算才不越界（我们只见过 09-19 那天的名字）。宁可少判几天，不多判没有证据的日子。
     """
     path = directory / MANIFEST_NAME
@@ -149,14 +154,14 @@ def captured_on(directory: Path) -> date:
     days = [to_date(row.get("captured_at")) for row in rows if row.get("key") in SNAPSHOT_NAMES]
     if len(days) != len(SNAPSHOT_NAMES) or any(day is None for day in days):
         raise SourceSchemaError(
-            f"{path} 里没有两份名单完整的抓取时间（要 {sorted(SNAPSHOT_NAMES)}）："
+            f"{path} 里没有四份名单完整的抓取时间（要 {sorted(SNAPSHOT_NAMES)}）："
             "ST 帽从哪天起算判不出来，而判不出来在日报上与「今天没有 ST 票」长得一模一样"
         )
     return max(day for day in days if day is not None)
 
 
 def read_master(directory: Path | None = None) -> MasterLoad:
-    """离线读主数据快照：两份名单合起来读，跳过的行照原样带原因返回。
+    """离线读主数据快照：四份名单合起来读，跳过的行照原样带原因返回。
 
     合起来读而不是各读各的：`SecurityMaster` 要的是"那天在册的全市场"，两个入口迟早被
     用成一个（日报上就是少一半票）。这里不刷新、不联网——快照旧不旧是抓取边界的事。

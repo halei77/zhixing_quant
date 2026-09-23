@@ -132,12 +132,19 @@ def listing_frame(function: str, group: str, *, call: AkCall | None = None) -> R
     return _rows(function, call, symbol=group)
 
 
-#: 两所列表的 `(akshare 函数名, 源要求的 symbol)`，与 `master.SNAPSHOT_NAMES` 一一对应。
-#: 写在一处是因为漏掉一个交易所等于股票池凭空少一半，而这件事只有"这里列了两行"能挡住。
-LISTINGS = (("stock_info_sh_name_code", "主板A股"), ("stock_info_sz_name_code", "A股列表"))
+#: akshare 侧的三份上市列表 `(函数名, 源要求的 symbol)`。北交所那份**不在这里**：akshare
+#: 没有 BSE 名单接口，它走 relay（ADR-0013 补充决定三）。这三份加上 relay 那份才是
+#: `master.SNAPSHOT_NAMES` 的全部——那条"一份不能少"由 `tests/test_capture_golden.py`
+#: 的覆盖检查机器判定，不靠这段注释里的"一一对应"（2026-09-23 就是这句话先漂的）。
+#: 写在一处是因为漏掉一个板块等于股票池凭空少一块，而这件事只有"这里列了三行"能挡住。
+LISTINGS = (
+    ("stock_info_sh_name_code", "主板A股"),
+    ("stock_info_sz_name_code", "A股列表"),
+    ("stock_info_sh_name_code", "科创板"),
+)
 
 
 def fetch_listings(*, call: AkCall | None = None) -> Rows:
-    """沪深两所的主板/全列表主数据，拼成一份——`SecurityMaster` 要的形状。"""
+    """akshare 侧三份上市列表拼成一份。北交所那份不在内，见 `LISTINGS`。"""
     frames = [listing_frame(function, group, call=call) for function, group in LISTINGS]
     return [row for frame in frames for row in frame]

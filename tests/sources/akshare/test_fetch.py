@@ -121,12 +121,15 @@ def test_calendar_is_fetched_without_a_window() -> None:
     assert call.kwargs == [{}]
 
 
-def test_listings_ask_both_exchanges() -> None:
-    """两所各一次。漏一个交易所 = 股票池凭空少一半，而源不会报任何错。"""
-    call = Recorder([{"证券代码": "600519"}], [{"证券代码": "000001"}])
+def test_listings_ask_every_board_akshare_covers() -> None:
+    """akshare 侧三份名单各一次。漏一个板块 = 股票池凭空少一块，而源不会报任何错。
+
+    北交所那份不在这条路径上（akshare 没有 BSE 名单接口，走 relay），所以这里断的是三份。
+    """
+    call = Recorder([{"证券代码": "600519"}], [{"证券代码": "000001"}], [{"证券代码": "688001"}])
     rows = fetch.fetch_listings(call=call)
-    assert [k["symbol"] for k in call.kwargs] == ["主板A股", "A股列表"]
-    assert [r["证券代码"] for r in rows] == ["600519", "000001"]
+    assert [k["symbol"] for k in call.kwargs] == ["主板A股", "A股列表", "科创板"]
+    assert [r["证券代码"] for r in rows] == ["600519", "000001", "688001"]
 
 
 # --- 真 akshare 的入口 ---------------------------------------------------------------

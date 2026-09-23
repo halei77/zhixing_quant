@@ -148,7 +148,7 @@ CAPTURED = date(2024, 1, 3)
 def write_manifest(tmp_path: Path, days: Mapping[str, date] | None = None) -> None:
     """`tools/capture_golden.py` 写的那份清单，只留 ST 判定真正要读的 `captured_at`。
 
-    省略 `days` 就是两份名单同一天抓的——那是这个工具的正常产出。
+    省略 `days` 就是四份名单同一天抓的——那是这个工具的正常产出。
     """
     observed = dict.fromkeys(am.SNAPSHOT_NAMES, CAPTURED) if days is None else days
     lines = ["key,file,rows,columns,captured_at,status,detail"]
