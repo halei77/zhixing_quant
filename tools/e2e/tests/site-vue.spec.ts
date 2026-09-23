@@ -46,6 +46,9 @@ test("带正确口令后搜出候选、可选、生成出提示词", async ({ pa
 
   await page.locator('[data-testid="suggest"] button').first().click();
   await expect(page.locator("pre")).toContainText("你是资深", { timeout: 15_000 });
+  // 面板那一行由服务端 /api/kline 的 quote 渲染（docs/11 §六-2：壳不自己推涨跌幅）
+  await expect(page.locator('[data-testid="quote"]')).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('[data-testid="quote"]')).toContainText("%");
   await expect(page.locator('[data-testid="templates"]')).toBeVisible();
   await page.screenshot({ path: "test-results/vue-prompt.png", fullPage: true });
 });

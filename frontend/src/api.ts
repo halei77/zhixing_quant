@@ -37,6 +37,18 @@ export interface Bar {
   volume: number | null
 }
 
+/** 行情面板那一行的展示值：服务端已算好口径、做好格式化，壳只搬不改（docs/11 §六-2）。 */
+export interface Quote {
+  date: string | null
+  close: string
+  change_pct: string
+  up: boolean
+  open: string
+  high: string
+  low: string
+  volume: string
+}
+
 export interface PromptResult {
   text: string
   tokens: number
@@ -74,7 +86,7 @@ export const api = {
     call<{ hits: Hit[] }>('GET', `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   templates: () => call<{ templates: Template[] }>('GET', '/api/templates'),
   kline: (code: string, kind: string, days = 120) =>
-    call<{ bars: Bar[] }>(
+    call<{ bars: Bar[]; quote: Quote | null }>(
       'GET',
       `/api/kline?code=${encodeURIComponent(code)}&kind=${kind}&days=${days}`,
     ),

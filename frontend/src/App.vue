@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
-import { ApiError, api, getToken, setToken, type Bar, type Entry, type Hit, type Template } from '@/api'
+import { ApiError, api, getToken, setToken, type Bar, type Entry, type Hit, type Quote, type Template } from '@/api'
 import KLineChart from '@/components/KLineChart.vue'
 
 const THEME_KEY = 'zx.site.theme'
@@ -43,6 +43,8 @@ let tokenTimer: number | undefined
 
 const selected = ref<{ code: string; name: string; kind: 'stock' | 'index' } | null>(null)
 const bars = ref<Bar[]>([])
+// 面板那一行的展示值由服务端算好、格式化好（docs/11 §六-2）——壳不再自己推涨跌幅、不再自己 toFixed。
+const quote = ref<Quote | null>(null)
 
 const templates = ref<Template[]>([])
 const templateName = ref('')
@@ -61,14 +63,6 @@ let regenerateTimer: number | undefined
 
 const isCustom = computed(() => templateName.value === CUSTOM)
 const showPrompt = computed(() => selected.value?.kind === 'stock')
-const quote = computed(() => {
-  const list = bars.value
-  if (list.length === 0) return null
-  const last = list[list.length - 1]
-  const prev = list.length > 1 ? list[list.length - 2] : null
-  const change = prev ? ((last.close - prev.close) / prev.close) * 100 : 0
-  return { ...last, change }
-})
 const currentTemplate = computed(() => templates.value.find((t) => t.name === templateName.value))
 const hint = computed(() => {
   if (hits.value.length) return ''
@@ -113,6 +107,8 @@ async function pick(hit: Hit) {
   hits.value = []
   query.value = `${hit.code} ${hit.name}`
   selected.value = { code: hit.code, name: hit.name, kind: hit.kind }
+  bars.value = []
+  quote.value = null
   text.value = ''
   tokens.value = null
   warn.value = ''
@@ -148,6 +144,7 @@ async function loadQuote() {
   try {
     const body = await api.kline(target.code, target.kind, 120)
     bars.value = body.bars
+    quote.value = body.quote
     connected.value = true
     if (body.bars.length === 0) {
       say(`${target.name} 在盘上还没有日线数据——它在回填队列里，晚些再看`)
@@ -155,6 +152,8 @@ async function loadQuote() {
       say('')
     }
   } catch (error) {
+    bars.value = []
+    quote.value = null
     handleError(error)
   }
 }
@@ -397,18 +396,18 @@ onUnmounted(() => {
             <p class="text-[22px] font-semibold">{{ selected.name }}</p>
             <p class="num text-[13px]" style="color: var(--text-2)">{{ selected.code }}</p>
           </div>
-          <div v-if="quote" class="text-right">
+          <div v-if="quote" data-testid="quote" class="text-right">
             <p
               class="num text-[30px] font-bold"
-              :style="{ color: quote.change >= 0 ? 'var(--up)' : 'var(--down)' }"
+              :style="{ color: quote.up ? 'var(--up)' : 'var(--down)' }"
             >
-              {{ quote.close.toFixed(2) }}
+              {{ quote.close }}
             </p>
             <p
               class="num text-[15px]"
-              :style="{ color: quote.change >= 0 ? 'var(--up)' : 'var(--down)' }"
+              :style="{ color: quote.up ? 'var(--up)' : 'var(--down)' }"
             >
-              {{ quote.change >= 0 ? '+' : '' }}{{ quote.change.toFixed(2) }}%
+              {{ quote.change_pct }}
             </p>
           </div>
         </div>
@@ -420,21 +419,19 @@ onUnmounted(() => {
         <dl v-if="quote" class="num mt-2.5 grid grid-cols-4 gap-2 text-center">
           <div>
             <dt class="text-xs" style="color: var(--text-2)">开</dt>
-            <dd class="text-[15px]">{{ quote.open.toFixed(2) }}</dd>
+            <dd class="text-[15px]">{{ quote.open }}</dd>
           </div>
           <div>
             <dt class="text-xs" style="color: var(--text-2)">高</dt>
-            <dd class="text-[15px]">{{ quote.high.toFixed(2) }}</dd>
+            <dd class="text-[15px]">{{ quote.high }}</dd>
           </div>
           <div>
             <dt class="text-xs" style="color: var(--text-2)">低</dt>
-            <dd class="text-[15px]">{{ quote.low.toFixed(2) }}</dd>
+            <dd class="text-[15px]">{{ quote.low }}</dd>
           </div>
           <div>
             <dt class="text-xs" style="color: var(--text-2)">量</dt>
-            <dd class="text-[15px]">
-              {{ quote.volume == null ? '—' : Math.round(quote.volume).toLocaleString('zh-CN') }}
-            </dd>
+            <dd class="text-[15px]">{{ quote.volume }}</dd>
           </div>
         </dl>
       </div>

@@ -101,6 +101,45 @@ def read_kline(
     ]
 
 
+def _num(value: object) -> float | None:
+    """把 bar 里的数值字段读成 float；`bool` 不算数（`isinstance(True, int)` 为真）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _price(value: object) -> str:
+    number = _num(value)
+    return "—" if number is None else f"{number:.2f}"
+
+
+def quote_of(bars: list[dict[str, object]]) -> dict[str, object] | None:
+    """行情面板那一行的展示值。**涨跌幅是口径、金额是格式化，两样都在服务端做完**
+    （ADR-0013 决定 5、ADR-0018 决定 4、docs/11 §六-2）——壳只搬不改，不许自己再推一遍。
+
+    不足两根、或昨收非正时涨跌幅给 `—`（不编一个 0 出来）；空列表返回 None，前端不画那一行。
+    """
+    if not bars:
+        return None
+    last = bars[-1]
+    close = _num(last.get("close"))
+    if close is None:
+        return None
+    prev = _num(bars[-2].get("close")) if len(bars) > 1 else None
+    change = None if prev is None or prev <= 0 else (close - prev) / prev * 100
+    volume = _num(last.get("volume"))
+    return {
+        "date": last.get("date"),
+        "close": f"{close:.2f}",
+        "change_pct": "—" if change is None else f"{change:+.2f}%",
+        "up": change is None or change >= 0,
+        "open": _price(last.get("open")),
+        "high": _price(last.get("high")),
+        "low": _price(last.get("low")),
+        "volume": "—" if volume is None else f"{round(volume):,}",
+    }
+
+
 def title_of(dataset: str) -> str:
     """一段数据的小标题。周期就是名字里那个数，第二份"盘上有哪几个 dataset"的名单不写。"""
     if dataset == layout.DAILY:

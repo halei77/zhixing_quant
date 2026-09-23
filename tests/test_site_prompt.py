@@ -21,6 +21,7 @@ from zhixing_quant.site.prompt import (
     TemplateNotReady,
     UnnamedDataset,
     build,
+    quote_of,
     title_of,
     window,
 )
@@ -264,3 +265,43 @@ def test_every_cell_of_the_prompt_is_the_clean_zone_row_it_claims(
                 f"{one.amount:.0f}",
                 f"{one.volume * 100.0 / SHARES:.2f}",
             ], f"{label} {row[0]} 那格与干净区不符"
+
+
+def test_the_quote_is_computed_and_formatted_on_the_server() -> None:
+    """涨跌幅是口径、金额是格式化，两样都得在服务端做完——壳不许自己再推一遍（docs/11 §六-2）。"""
+
+    def _bar(day: str, close: float, volume: float | None) -> dict[str, object]:
+        return {
+            "date": day,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": volume,
+        }
+
+    bars = [_bar("2026-09-22", 10.0, 1000.0), _bar("2026-09-23", 11.0, 1234567.0)]
+    quote = quote_of(bars)
+    assert quote is not None
+    assert quote["close"] == "11.00"
+    assert quote["change_pct"] == "+10.00%"
+    assert quote["up"] is True
+    assert quote["volume"] == "1,234,567"
+    assert quote_of([]) is None
+
+
+def test_a_lone_bar_gets_a_dash_for_change_not_a_made_up_zero() -> None:
+    """只有一根时涨跌幅给 —："没昨收"和"没涨跌"是两件事，编一个 0 出来就是撒谎。"""
+    lone: dict[str, object] = {
+        "date": "2026-09-23",
+        "open": 5.0,
+        "high": 5.0,
+        "low": 5.0,
+        "close": 5.0,
+        "volume": None,
+    }
+    quote = quote_of([lone])
+    assert quote is not None
+    assert quote["close"] == "5.00"
+    assert quote["change_pct"] == "—"
+    assert quote["volume"] == "—"

@@ -307,10 +307,13 @@ def create_app(
         """K线查询（不复权；指数走参考表）。数据的口径与形状由 `prompt.read_kline` 定。"""
         if kind == "stock":
             code = _known(code, names)
+        bars = prompt.read_kline(code, days=days, kind=kind)
         return {
             "kind": kind,
             "code": code,
-            "bars": prompt.read_kline(code, days=days, kind=kind),
+            "bars": bars,
+            # 面板那一行的展示值（含涨跌幅）在纯层算好，壳只搬不改（ADR-0013 决定 5）。
+            "quote": prompt.quote_of(bars),
         }
 
     @app.get("/api/recent")

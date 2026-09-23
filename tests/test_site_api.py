@@ -356,6 +356,20 @@ def test_kline_serves_stocks_from_the_clean_zone(client: TestClient, root: Path)
     assert {"date", "open", "high", "low", "close", "volume", "amount"} <= set(body["bars"][-1])
 
 
+def test_kline_carries_the_panel_quote_computed_on_the_server(
+    client: TestClient, root: Path
+) -> None:
+    """面板那一行的值（涨跌幅、金额千分位）由服务端算好——前端不再自己推（docs/11 §六-2）。"""
+    from tests.fakes import bar as fake_bar
+
+    today = date.today()
+    store_bars([fake_bar(today, 99.5)], dataset=layout.DAILY, root=root)
+    quote = client.get("/api/kline", params={"code": "600519", "days": 5}).json()["quote"]
+    assert quote["close"] == "99.50"
+    assert isinstance(quote["change_pct"], str)
+    assert quote["volume"] == "1,000"
+
+
 def test_kline_serves_indexes_from_the_reference_table(client: TestClient) -> None:
     """指数 K线出自参考表 index_daily；未知指数是 404 不是空表。"""
     body = client.get("/api/kline", params={"code": "000001.SH", "kind": "index"}).json()
