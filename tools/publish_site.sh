@@ -25,6 +25,29 @@ for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily;
   rsync -az --delete "/home/lei/zhixing_data/data/$t" aliyun:/opt/zhixing_data/data/
 done
 
+# 1 分钟K（ADR-0022 决定 3 的 minute_1）**年分区截断**：只发「当前年−1」起的 year=*。
+#
+# 为什么截断（交付策略定案，见 reports/design-2026-09-24-site-data-expansion.md §三）：
+# 服务器是 40G 盘、实测空闲 34G，而 minute_1 全市场外推 **12.4 GB/年**（132 万行/日 × 39 B/行，
+# 按 minute_60 实测的 38.9 B/行口径）——发全历史 5 年约 63 GB，**第 3 个自然年就爆盘**。
+# 两年窗峰值约 25 GB，跨年后 `--delete` 自动把最老年份清掉。
+#
+# **全历史留在家里**（ADR-0006 的分工：重计算在家、云只服务站点）——站点模板对分钟最深只要
+# 30 天（1 分K 自定义封顶 30，site/api 那条），两年窗是冗余保险；真要查全历史回家里跑。
+# 冷热分层（站点按需远端拉取）被否：破 ADR-0012 决定 2「生成之路上不联网」。
+if [ -d /home/lei/zhixing_data/data/minute_1 ]; then
+  KEEP_FROM=$(( $(date +%Y) - 1 ))
+  _ex=()
+  for _d in /home/lei/zhixing_data/data/minute_1/year=*; do
+    [ -e "$_d" ] || continue
+    _y=${_d##*year=}
+    if [ "$_y" -lt "$KEEP_FROM" ]; then _ex+=(--exclude "year=$_y"); fi
+  done
+  # `${_ex[@]+...}`：空数组在 `set -u` 下展开会炸，这是 bash 的老坑
+  rsync -az --delete ${_ex[@]+"${_ex[@]}"} \
+    /home/lei/zhixing_data/data/minute_1 aliyun:/opt/zhixing_data/data/
+fi
+
 rsync -az --delete \
   /home/lei/zhixing_data/golden/manifest.csv \
   "/home/lei/zhixing_data/golden/stock_info_sh_name_code__主板A股.csv" \
@@ -47,6 +70,10 @@ ssh aliyun "mkdir -p /opt/zhixing_quant/frontend/dist"
 rsync -az --delete frontend/dist/ aliyun:/opt/zhixing_quant/frontend/dist/
 
 # 健康检查放最后：它报的是本次发布跑完之后的线上状态，不是数据 rsync 之后、前端之前的状态。
-ssh aliyun "curl -s -o /dev/null -w '远端健康：HTTP %{http_code}\n' http://127.0.0.1:8000/"
+# 除了 HTTP 200 还要看**磁盘余量**——minute_1 两年窗落地后 `/` 使用约 30G/40G、余约 10G
+# （交付策略的代价②）。只 curl 200 只证明进程活着，盘满了它照样 200 然后明天写不进去。
+ssh aliyun "curl -s -o /dev/null -w '远端健康：HTTP %{http_code}\n' http://127.0.0.1:8000/ \
+  && df -h / | awk 'NR==2 {printf \"远端磁盘：%s 已用 / %s 可用（%s）\\n\", \$3, \$4, \$5}' \
+  && du -sh /opt/zhixing_data/data/minute_1 2>/dev/null || echo '远端 minute_1：未发'"
 
 echo "发布完成 $(date '+%F %T')"
