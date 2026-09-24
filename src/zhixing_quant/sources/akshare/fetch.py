@@ -123,6 +123,25 @@ def fetch_calendar(*, call: AkCall | None = None) -> Rows:
     return _rows("tool_trade_date_hist_sina", call)
 
 
+#: 停牌快照的地板日期（`date=` 参数 / 百度回填起点）。东财语义是「停牌截止 ≥ date 或
+#: 未复牌」：新停市的 end 一定 ≥ 今天 ≥ 地板，**同一地板重抓永远包含新增，地板无需前移**
+#: （任务 #57 调研实测）。百度侧按交易日循环回填 floor..today，吃的是同一条"区间只会往后
+#: 长"的性质。
+SUSPEND_FLOOR = "20240830"
+
+
+def em_suspend_frame(*, call: AkCall | None = None) -> Rows:
+    """东财停牌**区间**快照（`stock_tfp_em`）：一次调用回全市场在册停牌，实测 865 行 / 0.6s。"""
+    return _rows("stock_tfp_em", call, date=SUSPEND_FLOOR)
+
+
+def baidu_suspend_frame(day: date, *, call: AkCall | None = None) -> Rows:
+    """百度停牌**按日事件**快照（`news_trade_notify_suspend_baidu`）：一天一次调用，实测
+    mean 0.28s/日。调用方负责按交易日循环与限速——循环边界（floor..today、日历读盘）是
+    抓取编排，不是单次请求的形状。"""
+    return _rows("news_trade_notify_suspend_baidu", call, date=day.strftime("%Y%m%d"))
+
+
 def listing_frame(function: str, group: str, *, call: AkCall | None = None) -> Rows:
     """一所的上市列表。
 

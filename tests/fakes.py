@@ -197,21 +197,32 @@ def snapshot_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (golden / "tool_trade_date_hist_sina.csv").write_text(
         "trade_date\n" + "\n".join(CALENDAR_DAYS) + "\n", encoding="utf-8"
     )
-    #: 四份名单（主数据 2026-09-22 扩板）：这里只给 0/1 装真实行——需要科创板/北交所
-    #: 行的测试自己往 golden 里再写，缺省形状保证 read_master 的完整性检查能过。
-    _master_rows = {
-        0: "600519,贵州茅台,2001-08-27\n",
-        1: "300750,宁德时代,2018-06-11\n",
+    #: 名单组四份 + 停牌组两份（任务 #57 扩到 SNAPSHOT_NAMES）。**按名字配表头**——
+    #: 按下标配会在第 5、6 个名字上落进 BSE 的 `ts_code` 分支（2026-09-24 加停牌组时踩过）。
+    _snapshot_shapes: dict[str, tuple[str, str]] = {
+        "stock_info_sh_name_code__主板A股": (
+            "证券代码,证券简称,上市日期",
+            "600519,贵州茅台,2001-08-27\n",
+        ),
+        "stock_info_sz_name_code__A股列表": (
+            "A股代码,A股简称,A股上市日期",
+            "300750,宁德时代,2018-06-11\n",
+        ),
+        "stock_info_sh_name_code__科创板": ("证券代码,证券简称,上市日期", ""),
+        "relay_stock_basic__BJ": ("ts_code,name,list_date", ""),
+        # 停牌两份：给一行能过解析器的样本，read_master 的完整性与 to_master 都吃它
+        "stock_tfp_em__suspend": (
+            "代码,名称,停牌时间,停牌截止时间",
+            "000008,样本,2024-01-02,2024-01-03\n",
+        ),
+        "news_trade_notify_suspend_baidu__suspend": (
+            "股票代码,股票简称,交易所代码,停牌时间,复牌时间,证券类型,市场类型",
+            "000010,样本,SZ,2024-01-04,2024-01-05,stock,ab\n",
+        ),
     }
-    for i, name in enumerate(akshare_master.SNAPSHOT_NAMES):
-        header = (
-            "证券代码,证券简称,上市日期"
-            if i in (0, 2)
-            else ("A股代码,A股简称,A股上市日期" if i == 1 else "ts_code,name,list_date")
-        )
-        (golden / f"{name}.csv").write_text(
-            f"{header}\n{_master_rows.get(i, '')}", encoding="utf-8"
-        )
+    for name in akshare_master.SNAPSHOT_NAMES:
+        header, body = _snapshot_shapes[name]
+        (golden / f"{name}.csv").write_text(f"{header}\n{body}", encoding="utf-8")
     rows = [
         f"{name},{name}.csv,2,,2024-01-03T08:56:05,ok," for name in akshare_master.SNAPSHOT_NAMES
     ]

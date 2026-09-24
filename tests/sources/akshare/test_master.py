@@ -123,22 +123,45 @@ _HEADERS = {
     3: "ts_code,name,list_date",  # relay stock_basic 那份 BSE
 }
 
+#: 停牌两份的表头与缺省行（任务 #57）：各给一行互不相交的样本，完整性检查与 to_master
+#: 都吃它；要测合并/缺失的用例自己覆盖 `bodies`。
+_SUSPEND_HEADERS = {
+    "stock_tfp_em__suspend": "代码,名称,停牌时间,停牌截止时间",
+    "news_trade_notify_suspend_baidu__suspend": (
+        "股票代码,股票简称,交易所代码,停牌时间,复牌时间,证券类型,市场类型"
+    ),
+}
+_SUSPEND_DEFAULT = {
+    "stock_tfp_em__suspend": "000008,样本,2024-01-02,2024-01-03",
+    "news_trade_notify_suspend_baidu__suspend": "000010,样本,SZ,2024-01-04,2024-01-05,stock,ab",
+}
+
 
 def write_listings(tmp_path: Path, index: int, body: str) -> None:
-    """只写 `index` 那一份。主数据 2026-09-22 扩成四份后，read_master 缺任何一份都拒收——
-    要一次写全的用 `write_listings_all`。"""
+    """只写 `index` 那一份名单。主数据 2026-09-22 扩成四份后，read_master 缺任何一份都
+    拒收——要一次写全的用 `write_listings_all`（它连停牌两份一起写）。"""
     tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / f"{am.SNAPSHOT_NAMES[index]}.csv").write_text(
+    (tmp_path / f"{am.LISTING_SNAPSHOT_NAMES[index]}.csv").write_text(
         f"{_HEADERS[index]}\n{body}\n", encoding="utf-8"
     )
 
 
+def write_suspensions(tmp_path: Path, bodies: Mapping[str, str] | None = None) -> None:
+    """停牌两份快照：`bodies` 给到的装内容，缺的用缺省样本行。"""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for name in am.SUSPENSION_SNAPSHOT_NAMES:
+        body = (bodies or {}).get(name, _SUSPEND_DEFAULT[name])
+        (tmp_path / f"{name}.csv").write_text(
+            f"{_SUSPEND_HEADERS[name]}\n{body}\n", encoding="utf-8"
+        )
+
+
 def write_listings_all(tmp_path: Path, bodies: Mapping[int, str]) -> None:
-    """四份名单全写：`bodies` 给到的装内容，缺的只给表头（零行）——
+    """名单组四份全写（`bodies` 给到的装内容，缺的只给表头）+ 停牌组两份缺省行——
     夹具不许再造"两份名单"的老形状，那形状现在过不了 read_master 的完整性检查。"""
-    for i in range(len(am.SNAPSHOT_NAMES)):
-        body = bodies.get(i, "")
-        write_listings(tmp_path, i, body)
+    for i in range(len(am.LISTING_SNAPSHOT_NAMES)):
+        write_listings(tmp_path, i, bodies.get(i, ""))
+    write_suspensions(tmp_path)
 
 
 #: 快照的抓取日：ST 帽那段区间的起点，只能来自这里。
@@ -148,7 +171,7 @@ CAPTURED = date(2024, 1, 3)
 def write_manifest(tmp_path: Path, days: Mapping[str, date] | None = None) -> None:
     """`tools/capture_golden.py` 写的那份清单，只留 ST 判定真正要读的 `captured_at`。
 
-    省略 `days` 就是四份名单同一天抓的——那是这个工具的正常产出。
+    省略 `days` 就是**六份**（名单组四 + 停牌组两）同一天抓的——那是这个工具的正常产出。
     """
     observed = dict.fromkeys(am.SNAPSHOT_NAMES, CAPTURED) if days is None else days
     lines = ["key,file,rows,columns,captured_at,status,detail"]
@@ -163,7 +186,10 @@ def test_the_snapshot_paths_follow_the_data_root(
 ) -> None:
     monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
     assert [p.parent.name for p in am.snapshot_paths()] == ["golden"] * 4
-    assert [p.name for p in am.snapshot_paths()] == [f"{n}.csv" for n in am.SNAPSHOT_NAMES]
+    assert [p.name for p in am.snapshot_paths()] == [f"{n}.csv" for n in am.LISTING_SNAPSHOT_NAMES]
+    assert [p.name for p in am.suspension_snapshot_paths()] == [
+        f"{n}.csv" for n in am.SUSPENSION_SNAPSHOT_NAMES
+    ]
 
 
 def test_read_master_merges_both_exchange_lists(tmp_path: Path) -> None:
@@ -177,15 +203,54 @@ def test_read_master_merges_both_exchange_lists(tmp_path: Path) -> None:
     assert [x.code for x in load.listings] == ["600519", "300750"]
     assert load.skipped == ()
     assert load.st_periods == ()  # 没人挂帽，就没有 ST 区间——这与"没判"是两件事，见下面的拒收测试
+    # 停牌缺省行（东财 000008 一段 + 百度 000010 一段）进 MasterLoad，to_master 不抛冲突
+    assert {(x.code, x.start.isoformat()) for x in load.suspensions} == {
+        ("000008", "2024-01-02"),
+        ("000010", "2024-01-04"),
+    }
+    assert load.to_master().suspended_on("000008", date(2024, 1, 3))
 
 
 def test_a_single_missing_list_is_rejected_not_partial(tmp_path: Path) -> None:
     """只有三份名单在，看起来"还能用"：缺的那一份的票凭空消失而健康分照样满分，所以拒收。"""
     write_listings_all(tmp_path, dict.fromkeys(range(4), "600519,贵州茅台,2001-08-27"))
     write_manifest(tmp_path)
-    (tmp_path / f"{am.SNAPSHOT_NAMES[3]}.csv").unlink()
+    (tmp_path / f"{am.LISTING_SNAPSHOT_NAMES[3]}.csv").unlink()
     with pytest.raises(SourceSchemaError, match="没有主数据快照"):
         am.read_master(tmp_path)
+
+
+def test_a_missing_suspension_snapshot_is_rejected(tmp_path: Path) -> None:
+    """停牌快照缺一份：R006 豁免通道断线，而"断线"在日报上与"今天没有停牌"同形——拒收。"""
+    write_listings_all(tmp_path, {0: "600519,贵州茅台,2001-08-27"})
+    write_manifest(tmp_path)
+    (tmp_path / f"{am.SUSPENSION_SNAPSHOT_NAMES[0]}.csv").unlink()
+    with pytest.raises(SourceSchemaError, match="没有主数据快照"):
+        am.read_master(tmp_path)
+
+
+def test_overlapping_source_intervals_are_merged_not_refused(tmp_path: Path) -> None:
+    """东财与百度对同一次停市必然重叠、百度自己就有首尾相接的两条：不并集合并就
+    `MasterConflict` → `read_master` 六个入口全线退出码 2（任务 #57 的雷）。"""
+    write_listings_all(tmp_path, {0: "600519,贵州茅台,2001-08-27"})
+    write_suspensions(
+        tmp_path,
+        {
+            # 东财：06-15→06-23（含头含尾）；百度：同一次停市拆成 06-15→06-16 与 06-16→06-23
+            "stock_tfp_em__suspend": "603159,样本,2026-06-15,2026-06-23",
+            "news_trade_notify_suspend_baidu__suspend": (
+                "603159,样本,SH,2026-06-15,2026-06-16,stock,ab\n"
+                "603159,样本,SH,2026-06-16,2026-06-24,stock,ab"
+            ),
+        },
+    )
+    write_manifest(tmp_path)
+    master = am.read_master(tmp_path).to_master()  # 不抛 MasterConflict 就是过了
+    assert [(x.start.isoformat(), x.end and x.end.isoformat()) for x in master.suspensions] == [
+        ("2026-06-15", "2026-06-23")
+    ]
+    assert master.suspended_on("603159", date(2026, 6, 16))
+    assert not master.suspended_on("603159", date(2026, 6, 24))  # 复牌日当天不算停牌
 
 
 def test_skips_survive_the_round_trip_from_a_file(tmp_path: Path) -> None:
@@ -252,10 +317,13 @@ def test_the_newer_capture_is_the_only_one_we_vouch_for(tmp_path: Path) -> None:
     write_manifest(
         tmp_path,
         {
-            am.SNAPSHOT_NAMES[0]: date(2024, 1, 3),
-            am.SNAPSHOT_NAMES[1]: date(2023, 10, 1),
-            am.SNAPSHOT_NAMES[2]: date(2024, 1, 3),
-            am.SNAPSHOT_NAMES[3]: date(2024, 1, 3),
+            am.LISTING_SNAPSHOT_NAMES[0]: date(2024, 1, 3),
+            am.LISTING_SNAPSHOT_NAMES[1]: date(2023, 10, 1),
+            am.LISTING_SNAPSHOT_NAMES[2]: date(2024, 1, 3),
+            am.LISTING_SNAPSHOT_NAMES[3]: date(2024, 1, 3),
+            # 停牌两份同日：完整性是六份一起数的，少两天 captured_on 直接拒
+            am.SUSPENSION_SNAPSHOT_NAMES[0]: date(2024, 1, 3),
+            am.SUSPENSION_SNAPSHOT_NAMES[1]: date(2024, 1, 3),
         },
     )
     master = am.read_master(tmp_path).to_master()

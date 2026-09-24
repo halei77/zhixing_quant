@@ -96,8 +96,12 @@ def _row(draft: BarDraft, **over: Any) -> RowFacts:
     return RowFacts(**facts)
 
 
-def _batch(*drafts: BarDraft, calendar: TradingCalendar | None = CALENDAR) -> BatchFacts:
-    return BatchFacts(drafts=drafts, master=None, calendar=calendar)
+def _batch(
+    *drafts: BarDraft,
+    calendar: TradingCalendar | None = CALENDAR,
+    master: SecurityMaster | None = None,
+) -> BatchFacts:
+    return BatchFacts(drafts=drafts, master=master, calendar=calendar)
 
 
 def _said(reason: str | None) -> str:
@@ -357,6 +361,15 @@ def test_r005_says_it_cannot_judge_a_broken_factor(bad: float) -> None:
 # --- R006 交易日历对齐（整批 FATAL）------------------------------------------------
 
 
+def _suspended_master(*intervals: Interval) -> SecurityMaster:
+    """带停牌登记的主数据：listings 给测试批里出现的每只票一个合法上市记录。"""
+    codes = sorted({iv.code for iv in intervals} | {"600519", "000001"})
+    return SecurityMaster(
+        [Listing(code, "测试", date(2000, 1, 4)) for code in codes],
+        suspensions=intervals,
+    )
+
+
 def test_r006_accepts_a_contiguous_trading_window() -> None:
     drafts = [_draft(trade_date=d) for d in WEEK_DAYS[:4]]
     assert calendar_alignment(_batch(*drafts), PARAMS) == ()
@@ -374,10 +387,62 @@ def test_r006_rejects_non_trading_dates() -> None:
 
 
 def test_r006_flags_missing_trading_days_inside_the_window() -> None:
-    """观测区间中间断了：04 §二 R006 的"交易日缺失无说明"半边。"""
+    """观测区间中间断了：04 §二 R006 的"交易日缺失无说明"半边（master=None，照报）。"""
     drafts = [_draft(trade_date=d) for d in (WEEK_DAYS[0], WEEK_DAYS[2])]
     reasons = calendar_alignment(_batch(*drafts), PARAMS)
     assert any("缺 1 个交易日" in r for r in reasons)
+
+
+def test_r006_exempts_a_missing_day_registered_as_suspension() -> None:
+    """缺失日 ∈ 登记停牌区间 → 豁免（04 §二"已登记停牌日除外"；任务 #57）。"""
+    drafts = [_draft(trade_date=d) for d in (WEEK_DAYS[0], WEEK_DAYS[2])]  # 缺 WEEK_DAYS[1]
+    master = _suspended_master(Interval("600519", WEEK_DAYS[1], WEEK_DAYS[1]))
+    assert calendar_alignment(_batch(*drafts, master=master), PARAMS) == ()
+
+
+def test_r006_still_reports_a_missing_day_outside_the_registry() -> None:
+    """缺失日**不在**任何登记区间 → 照报 FATAL。豁免只认自己那天的登记，不认"它停牌过"。"""
+    drafts = [_draft(trade_date=d) for d in (WEEK_DAYS[0], WEEK_DAYS[2])]
+    master = _suspended_master(Interval("600519", WEEK_DAYS[3], WEEK_DAYS[4]))
+    reasons = calendar_alignment(_batch(*drafts, master=master), PARAMS)
+    assert any("缺 1 个交易日" in r for r in reasons)
+
+
+def test_r006_reports_when_suspensions_are_empty() -> None:
+    """fail-closed：主数据在、`suspensions` 恒空（#57 修复前的真实形状）→ 照报。"""
+    drafts = [_draft(trade_date=d) for d in (WEEK_DAYS[0], WEEK_DAYS[2])]
+    master = SecurityMaster([Listing("600519", "测试", date(2000, 1, 4))])
+    assert master.suspensions == ()
+    reasons = calendar_alignment(_batch(*drafts, master=master), PARAMS)
+    assert any("缺 1 个交易日" in r for r in reasons)
+
+
+def test_r006_multi_symbol_batch_needs_every_code_registered() -> None:
+    """多票批里有一票没登记 → **整批不豁免**。豁免是"这批缺口全有说明"，不是"有的有"。"""
+    drafts = [
+        _draft(symbol="600519", trade_date=WEEK_DAYS[0]),
+        _draft(symbol="000001", trade_date=WEEK_DAYS[0]),
+        _draft(symbol="600519", trade_date=WEEK_DAYS[2]),
+        _draft(symbol="000001", trade_date=WEEK_DAYS[2]),
+    ]
+    # 只有 600519 登记了缺失日的停牌；000001 没有
+    master = _suspended_master(Interval("600519", WEEK_DAYS[1], WEEK_DAYS[1]))
+    reasons = calendar_alignment(_batch(*drafts, master=master), PARAMS)
+    assert any("缺 1 个交易日" in r for r in reasons)
+    # 两只票都登记 → 豁免
+    both = _suspended_master(
+        Interval("600519", WEEK_DAYS[1], WEEK_DAYS[1]),
+        Interval("000001", WEEK_DAYS[1], WEEK_DAYS[1]),
+    )
+    assert calendar_alignment(_batch(*drafts, master=both), PARAMS) == ()
+
+
+def test_r006_suspension_does_not_exempt_non_trading_dates() -> None:
+    """停牌**不**豁免「数据日期不是交易日」半边：那是另一回事，登记也救不了。"""
+    saturday = date(2024, 1, 6)
+    master = _suspended_master(Interval("600519", saturday, saturday))
+    reasons = calendar_alignment(_batch(_draft(trade_date=saturday), master=master), PARAMS)
+    assert any("不是交易日" in r for r in reasons)
 
 
 def test_r006_ignores_days_beyond_the_observed_window() -> None:
@@ -447,6 +512,19 @@ def test_r007_exempts_resumption_day() -> None:
     )
     row = _gap_row("600519", 10.0, 12.0, state=_state(), master=master, calendar=CALENDAR)
     assert prev_close_consistency(row, PARAMS) is None
+
+
+def test_r007_resumption_day_itself_is_not_suspended() -> None:
+    """end = 复牌 − 1 的语义：复牌日**当天** `is_suspended` 必须是 False——
+    那天有分钟/日线行，再标停牌会让 R003 幽灵K线与回测成交判据一起读错。"""
+    master = SecurityMaster(
+        [Listing("600519", "测试", date(2000, 1, 4))],
+        suspensions=[Interval("600519", date(2024, 1, 2), date(2024, 1, 4))],
+    )
+    assert master.suspended_on("600519", date(2024, 1, 4))  # 停牌末日仍算停牌
+    assert not master.suspended_on("600519", date(2024, 1, 5))  # 复牌日（end+1）不算
+    assert not master.state_on("600519", date(2024, 1, 5)).is_suspended
+    assert master.state_on("600519", date(2024, 1, 4)).is_suspended
 
 
 def test_r007_rejects_an_unexplained_gap() -> None:

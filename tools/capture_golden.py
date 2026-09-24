@@ -1,10 +1,11 @@
 """黄金样本抓取：把源的真实响应落成可重放的 CSV（03 §二 L2；Step 2a）。
 
-绡大多数样本来自 akshare，唯一的例外是北交所上市名单：akshare 没有 BSE 名单接口，它走 relay
-的 `stock_basic`（ADR-0013 补充决定三）。四份名单（主板/创业板/科创板/北交所）合起来正是
-`master.SNAPSHOT_NAMES`，**一份都不能少**——本文件重抓会覆盖 manifest，少抓一份就是把那份的
-captured_at 抹掉，`master.captured_on` 随即拒收，zx-daily 与 zx-site 一起起不来（2026-09-23
-实测过）。这条不变量由 `tests/test_capture_golden.py` 的覆盖检查机器判定。
+绝大多数样本来自 akshare，唯一的例外是北交所上市名单：akshare 没有 BSE 名单接口，它走 relay
+的 `stock_basic`（ADR-0013 补充决定三）。四份名单（主板/创业板/科创板/北交所）+ 两份停牌
+（东财区间 / 百度按日，任务 #57）合起来正是 `master.SNAPSHOT_NAMES`，**一份都不能少**——
+本文件重抓会覆盖 manifest，少抓一份就是把那份的 captured_at 抹掉，`master.captured_on`
+随即拒收，zx-daily 与 zx-site 一起起不来（2026-09-23 实测过）。这条不变量由
+`tests/test_capture_golden.py` 的覆盖检查机器判定。
 
 为什么样本先落在数据根（`$ZX_DATA_ROOT/golden/`）而不是直接进仓：真实快照进仓等于把
 "外部服务器那天给了什么"变成仓库历史的一部分——它是数据不是代码，而且一次落错就会永久
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import sys
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime
 from functools import partial
@@ -31,6 +33,8 @@ from typing import Any
 
 from zhixing_quant.config import golden_dir
 from zhixing_quant.sources.akshare import fetch
+from zhixing_quant.sources.akshare.master import SUSPENSION_SNAPSHOT_NAMES
+from zhixing_quant.sources.rows import SourceSchemaError, to_date
 
 #: 一行源数据。适配器收到的就是这个形状，样本落盘再读回来也必须是它。
 Row = Mapping[str, Any]
@@ -164,6 +168,56 @@ FRAMES = (("", "raw"), ("hfq", "hfq"))
 BSE_LISTING_KEY = "relay_stock_basic__BJ"
 BSE_LISTING_PARAMS: Mapping[str, object] = {"exchange": "BSE"}
 
+#: 停牌两份的 key（任务 #57）：与 `master.SUSPENSION_SNAPSHOT_NAMES` 一字不差，
+#: 覆盖检查由 `tests/test_capture_golden.py` 机器判定（2026-09-23 名单组漂过一次）。
+EM_SUSPEND_KEY = SUSPENSION_SNAPSHOT_NAMES[0]
+BAIDU_SUSPEND_KEY = SUSPENSION_SNAPSHOT_NAMES[1]
+#: 百度回填时相邻两日请求的间隔（秒）。04 §五 / 纪律：探接口限速 0.2-0.3s，别把源打挂。
+#: 只在**真联网**（`call is None`）时睡——假 fetcher 没有源可打，睡了只是拖慢测试。
+BAIDU_PAUSE_SECONDS = 0.25
+
+
+def em_suspend_frame(*, call: fetch.AkCall | None = None) -> list[dict[str, Any]]:
+    """东财停牌区间快照：单次调用、`date=fetch.SUSPEND_FLOOR` 地板写死在 `fetch` 里。
+
+    地板**无需前移**：EM 语义是「停牌截止 ≥ date 或未复牌」，新停市的 end 一定 ≥ 今天 ≥
+    地板，同一地板重抓永远包含新增（任务 #57 实测）。
+    """
+    return [dict(row) for row in fetch.em_suspend_frame(call=call)]
+
+
+def baidu_suspend_frame(
+    *,
+    call: fetch.AkCall | None = None,
+    calendar_path: Path | None = None,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    """百度停牌按日事件快照：按交易日循环回填 `floor..today`，行拼成一份。
+
+    **日历读盘上已有的** `golden/tool_trade_date_hist_sina.csv`，不依赖「本次刚抓的日历」：
+    `capture()` 按 `sorted(fetchers)` 跑，`news_…` 排在 `tool_…` **前面**，本次那份还没落盘。
+    文件缺失就拒——编不出来一个交易日序列，而"回填了 0 天"在清单上与"那天真的没停牌"同形。
+    """
+    path = (
+        calendar_path
+        if calendar_path is not None
+        else golden_dir() / "tool_trade_date_hist_sina.csv"
+    )
+    if not path.is_file():
+        raise SourceSchemaError(
+            f"百度停牌回填读不到日历 {path}：先让 tool_trade_date_hist_sina 落过一次盘"
+        )
+    floor = datetime.strptime(fetch.SUSPEND_FLOOR, "%Y%m%d").date()
+    end = today if today is not None else date.today()
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8", newline="") as fh:
+        days = [d for row in csv.DictReader(fh) if (d := to_date(row.get("trade_date")))]
+    for index, day in enumerate(d for d in days if floor <= d <= end):
+        if index and call is None:
+            time.sleep(BAIDU_PAUSE_SECONDS)  # 真源才限速；假件睡了只是拖慢 CI
+        rows += [dict(row) for row in fetch.baidu_suspend_frame(day, call=call)]
+    return rows
+
 
 def relay_listing_frame(*, relay_call: RelayCall | None = None) -> list[dict[str, Any]]:
     """北交所上市名单（relay `stock_basic`，exchange=BSE）→ 源给的整行。
@@ -207,9 +261,10 @@ def build_fetchers(
 ) -> dict[str, Fetcher]:
     """这次抓取要落哪些样本：窗口与代码写在这一处，不散落在调用处。
 
-    **上市名单一份不能少**：四份（主板/创业板/科创板/北交所）各自一个 key，与
-    `master.SNAPSHOT_NAMES` 一致——重抓会覆盖 manifest，少一份就会把 `read_master` 弄断。
-    前三份从 `fetch.LISTINGS` 来，北交所那份走 relay（见 `BSE_LISTING_KEY`）。
+    **主数据要的快照一份不能少**：名单组四份（主板/创业板/科创板/北交所）+ 停牌组两份
+    （东财区间 / 百度按日），与 `master.SNAPSHOT_NAMES` 一致——重抓会覆盖 manifest，
+    少一份就会把 `read_master` 弄断。名单前三份从 `fetch.LISTINGS` 来、北交所走 relay
+    （见 `BSE_LISTING_KEY`），停牌两份见 `em_suspend_frame` / `baidu_suspend_frame`。
 
     真正发请求的是 `sources/akshare/fetch.py`——每日任务用的就是它。在这里再写一遍参数拼装
     迟早漂：漂了的样子是"样本重放全绿、线上天天告警"，两边各自都测得过。
@@ -225,8 +280,11 @@ def build_fetchers(
     tag = f"{start:%Y%m%d}_{end:%Y%m%d}"
     fetchers: dict[str, Fetcher] = {
         "tool_trade_date_hist_sina": partial(fetch.fetch_calendar, call=call),
-        # 北交所名单（relay）：`master.SNAPSHOT_NAMES` 四份里的第四份，也是唯一不走 akshare 的
+        # 北交所名单（relay）：`master.SNAPSHOT_NAMES` 名单组的第四份，也是唯一不走 akshare 的
         BSE_LISTING_KEY: partial(relay_listing_frame, relay_call=relay_call),
+        # 停牌两份（任务 #57）：键进 `master.SUSPENSION_SNAPSHOT_NAMES`，缺一份 read_master 拒收
+        EM_SUSPEND_KEY: partial(em_suspend_frame, call=call),
+        BAIDU_SUSPEND_KEY: partial(baidu_suspend_frame, call=call),
     }
     # `partial` 而不是闭包：闭包捕获循环变量会让所有 key 都抓最后一只票，而 key 的名字
     # 全对得上——那种错只有 `partial` 的实参绑定才不会犯。

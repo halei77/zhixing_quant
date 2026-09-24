@@ -166,7 +166,14 @@ def adjustment_factor_jump(facts: RowFacts, params: RuleParams) -> str | None:
 
 
 def calendar_alignment(facts: BatchFacts, _params: RuleParams) -> Sequence[str]:
-    """R006 交易日历对齐（整批 FATAL）。"""
+    """R006 交易日历对齐（整批 FATAL）。
+
+    「交易日缺失**无说明**」半边读主数据的停牌登记（04 §二；报文那句"已知停市需由调用方
+    登记"就是这条豁免通道）。**fail-closed 全保留**：`master is None`、`suspensions` 空、
+    票不在登记里、多票批里有一票没登记 → 一律照旧计缺失 FATAL。
+
+    「非法日期」半边**不**豁免：停牌解释不了"数据日期不是交易日"，那是另一回事。
+    """
     if facts.calendar is None:
         return ("未装载交易日历，无法判定日期有效性",)
     observed = [d.trade_date for d in facts.drafts if d.trade_date is not None]
@@ -176,7 +183,12 @@ def calendar_alignment(facts: BatchFacts, _params: RuleParams) -> Sequence[str]:
     illegal = sorted({d for d in observed if not facts.calendar.is_trading_day(d)})
     if illegal:
         out.append(f"{len(illegal)} 个数据日期不是交易日，如 {illegal[0]}")
-    missing = facts.calendar.missing_days(observed)
+    missing = list(facts.calendar.missing_days(observed))
+    codes = {d.code for d in facts.drafts}
+    if facts.master is not None and codes:
+        # 逐日过滤：该日**整批每一只票**都登记了停牌才豁免——有一票没登记就照报
+        # （`all()` 对空 codes 为 True，但上面 `and codes` 已挡住空批）。
+        missing = [d for d in missing if not all(facts.master.suspended_on(c, d) for c in codes)]
     if missing:
         out.append(
             f"观测窗口内缺 {len(missing)} 个交易日，如 {missing[0]}"

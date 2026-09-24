@@ -158,17 +158,21 @@ def _bse_relay(*rows: list[str], count: int | None = None, has_more: bool = Fals
 
 
 def test_the_capture_tool_covers_every_snapshot_the_master_needs() -> None:
-    """主数据要的四份名单，抓取工具必须一份不少——这是本文件最贵的一条不变量。
+    """主数据要的**全部**快照（名单组四 + 停牌组两），抓取工具必须一份不少——这是本文件
+    最贵的一条不变量。
 
     重抓会**覆盖** manifest（`capture()` 的写法），少抓一份就是把那份的 captured_at 抹掉，
     `master.captured_on` 随即拒收，zx-daily / zx-site / zx-backtest 全线起不来。2026-09-23
     实测过一次：扩板加了科创板与北交所两份名单，工具却还只抓原来的两份，`read_master` 直接
-    `SourceSchemaError`。注释里写"两处同名"挡不住这件事，只有这条断言能。
+    `SourceSchemaError`。注释里写"两处同名"挡不住这件事，只有这条断言能。断言的是**并集**
+    ——名单组与停牌组各自漏了哪份都能从差集里读出来（任务 #57 扩到六份）。
     """
     from zhixing_quant.sources.akshare import master
 
     keys = set(cg.build_fetchers(WINDOW, SYMBOLS))
-    assert set(master.SNAPSHOT_NAMES) <= keys, sorted(set(master.SNAPSHOT_NAMES) - keys)
+    needed = set(master.LISTING_SNAPSHOT_NAMES) | set(master.SUSPENSION_SNAPSHOT_NAMES)
+    assert needed == set(master.SNAPSHOT_NAMES)
+    assert needed <= keys, sorted(needed - keys)
 
 
 def test_the_relay_listing_frame_keeps_the_source_columns() -> None:
@@ -206,13 +210,32 @@ def test_fetcher_keys_encode_the_window_and_the_symbol() -> None:
     assert "stock_info_sh_name_code__科创板" in keys
     # 北交所名单（relay）：四份上市名单里唯一不走 akshare 的一份
     assert cg.BSE_LISTING_KEY in keys
+    # 停牌两份（任务 #57）：地板写死在 fetch 里，key 不带窗口——同地板重抓永远含新增
+    assert cg.EM_SUSPEND_KEY in keys
+    assert cg.BAIDU_SUSPEND_KEY in keys
     # 分钟线的 key 不带窗口：源没有窗口参数（ADR-0009 决定 6），能带的参数只有周期。
     assert "stock_zh_a_minute__sh600519__5min" in keys
     assert "stock_zh_a_minute__sz300750__60min" in keys
 
 
-def test_each_symbol_binds_its_own_arguments() -> None:
+def _write_calendar(tmp_path: Path, *days: str) -> Path:
+    """数据根里放一份日历：百度回填**读盘上已有的**日历（`news_…` 排在 `tool_…` 前面，
+    本次刚抓的那份还不存在）。"""
+    golden = tmp_path / "golden"
+    golden.mkdir(parents=True, exist_ok=True)
+    path = golden / "tool_trade_date_hist_sina.csv"
+    path.write_text("trade_date\n" + "\n".join(days) + "\n", encoding="utf-8")
+    return path
+
+
+def test_each_symbol_binds_its_own_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """闭包捕获循环变量的经典事故：所有 key 都抓最后一只票，样本名字却全都对得上。"""
+    # 日历只给地板**之前**的日子 → 百度回填 0 天、不发请求（否则它内部循环会把
+    # Recorder 的帧序列耗尽——那是回填编排，不是"每 key 一次"的绑定判据）。
+    monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
+    _write_calendar(tmp_path, "2024-01-02", "2024-01-03")
     call = Recorder(*[[] for _ in cg.build_fetchers(WINDOW, SYMBOLS)])
     fetchers = cg.build_fetchers(WINDOW, SYMBOLS, call=call, relay_call=_bse_relay())
     for key, fetcher in fetchers.items():
@@ -254,9 +277,15 @@ def test_a_full_capture_exits_zero(
 ) -> None:
     """成功路径也要有人走一遍：退出码写反了，日报上"抓到"和"没抓到"就反了。"""
     monkeypatch.setenv("ZX_DATA_ROOT", str(tmp_path))
+    # 地板（20240830）**之后**至少一个交易日：百度回填才有得抓，0 天会被判 empty。
+    _write_calendar(tmp_path, "2024-01-02", "2024-09-02")
     one = _bse_relay(["920229.BJ", "N世纪", "20260922"])
     rc = cg.main(
         ["20240102", "20240131", "sh600519"], call=lambda **_k: FakeFrame(RAW), relay_call=one
     )
     assert rc == 0
     assert "需用户批准" in capsys.readouterr().out
+    # 停牌两份真的落了盘（覆盖检查的运行时对偶：key 在 ≠ 文件在）
+    out = tmp_path / "golden"
+    assert (out / f"{cg.EM_SUSPEND_KEY}.csv").is_file()
+    assert (out / f"{cg.BAIDU_SUSPEND_KEY}.csv").is_file()
