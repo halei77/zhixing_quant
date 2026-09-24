@@ -11,10 +11,14 @@
 4. **失败要说清是哪一天停的**。`newest` 是唯一能把"源停更了"与"跑早了"分开的东西。
 5. **对账读的就是刚落的那块盘**。dataset 名、列序、不复权口径这三件事只有走真存储才测得到，
    而 R011 报的每一句都建立在"它们没错"之上。判据本身在 `test_reconcile.py`，这里不重复。
+6. **周期 → 源的分派不许漂**。1 分走 ngw（`ngw_minute_1`）、5/30/60 走 sina
+   （`akshare_minute_*`）：一批一源是 quality engine 的强制，源标识混了健康分就说不清扣的是谁；
+   日报/告警的窗口口径（1970 根 vs 单页 + start 翻页）也按同一条分派分流。
 
 网络层不在这里测：`fetch` 是参数，全部测试离线可跑（03 §二 L2）。
 """
 
+import json
 from collections.abc import Sequence
 from datetime import date, datetime
 from functools import partial
@@ -28,9 +32,11 @@ from zhixing_quant import config
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Listing, SecurityMaster
 from zhixing_quant.quality.reconcile import Finding, Recon
+from zhixing_quant.sources.akshare import fetch as akshare_fetch
 from zhixing_quant.sources.jobs import minute as job
 from zhixing_quant.sources.jobs import minute_cli
 from zhixing_quant.sources.jobs.daily import REASON_BREAKER, REASON_NO_ROWS, Store
+from zhixing_quant.sources.ngw.client import MAX_KLINE_COUNT, NgwClient
 from zhixing_quant.sources.rows import Rows
 from zhixing_quant.storage import layout, query
 from zhixing_quant.storage.quarantine import entries_on, store_quarantined
@@ -56,6 +62,20 @@ def bar(when: datetime, close: float = 100.0) -> dict[str, Any]:
         "close": str(close),
         "volume": "1000",
         "amount": str(close * 1000),
+    }
+
+
+def ngw_bar(when: datetime, close_yuan: float = 100.0) -> dict[str, Any]:
+    """一根 ngw 侧原样 `timedata` 行（B 刀实测形状）：OHLC 是字符串·分，`curvalue` 是元。"""
+    fen = round(close_yuan * 100)
+    return {
+        "times": f"{when:%Y%m%d%H%M%S}",
+        "openp": str(fen),
+        "highp": str(round(fen * 1.01)),
+        "lowp": str(round(fen * 0.99)),
+        "nowv": str(fen),
+        "curvol": "1000",
+        "curvalue": str(round(close_yuan * 1000)),  # 元 = 价(元) × 量(股)，不除 100
     }
 
 
@@ -398,6 +418,197 @@ def test_an_unlanded_dataset_says_so_instead_of_inventing_a_start(tmp_path: Path
     assert "2024-01-03 .." not in result.markdown
 
 
+# --- 周期 → 源分派：1 → ngw，5/30/60 → sina（一批一源、口径按源分流）---------------------
+
+
+def test_period_one_lands_as_ngw_minute_1(tmp_path: Path) -> None:
+    """`--periods 1` 的行进 minute_1、源标识 `ngw_minute_1`——不是 `akshare_minute_1`。
+
+    单位顺带钉死（B 刀硬约束 4）：分→元后 close=100.0，`curvalue` 不除 100 后 amount=100000.0。
+    源标识错了的表现是同一个 minute_1 dataset 里两种 source 混着，健康分从此说不清扣的是谁。
+    """
+    result = run_job(
+        tmp_path,
+        fetch=frame_of(ngw_bar(MORNING), ngw_bar(AFTERNOON, 101.0)),
+        periods=("1",),
+    )
+    assert result.ok and not result.fatal
+    back = query.read_bars("600519", DAY, DAY, dataset=layout.MINUTE_1, root=tmp_path)
+    assert [b.ts for b in back] == [MORNING, AFTERNOON]
+    assert [b.source for b in back] == ["ngw_minute_1"] * 2
+    assert back[0].close == 100.0
+    assert back[0].amount == 100000.0  # curvalue 原样是元；除 100 会得到 1000.0
+    # 日报的「各源」表给 ngw_minute_1 自己的一行健康分，且不冒出 akshare_minute_1
+    assert "| ngw_minute_1 |" in result.markdown
+    assert "akshare_minute_1" not in result.markdown
+    assert result.report.source("ngw_minute_1").total == 2
+
+
+def test_a_mixed_run_keeps_one_source_per_dataset(tmp_path: Path) -> None:
+    """混周期运行下一批一源（quality engine 的强制）：1 分全 ngw、60 分全 sina，互不串。
+
+    每个 (票 × 周期) 是一个批次，分派按周期走——两种源混进同一批会被 engine 直接拒，而
+    分派错了的表现正是混批：门禁响的是"混源"，病根却在接线。
+    """
+
+    def fetch(_symbol: str, period: str) -> Rows:
+        return [ngw_bar(MORNING)] if period == "1" else [bar(MORNING)]
+
+    result = run_job(tmp_path, fetch=fetch, periods=("1", "60"))
+    one = query.read_bars("600519", DAY, DAY, dataset=layout.MINUTE_1, root=tmp_path)
+    sixty = query.read_bars("600519", DAY, DAY, dataset=layout.MINUTE_60, root=tmp_path)
+    assert [b.source for b in one] == ["ngw_minute_1"]
+    assert [b.source for b in sixty] == ["akshare_minute_60"]
+    assert {m.source for m in result.report.metrics} == {"ngw_minute_1", "akshare_minute_60"}
+    assert "| ngw_minute_1 |" in result.markdown and "| akshare_minute_60 |" in result.markdown
+    assert "akshare_minute_1" not in result.markdown
+
+
+def test_sina_periods_keep_their_source_id(tmp_path: Path) -> None:
+    """回归钉：5/30/60 仍走 sina、源标识一字不改（ADR-0009 决定 1、ADR-0021 决定 2）。"""
+    result = run_job(tmp_path, periods=("5", "30", "60"))
+    for period in ("5", "30", "60"):
+        back = query.read_bars(
+            "600519", DAY, DAY, dataset=layout.minute_dataset(period), root=tmp_path
+        )
+        assert {b.source for b in back} == {f"akshare_minute_{period}"}
+    assert "ngw_minute_1" not in result.markdown
+
+
+def test_the_depth_note_splits_the_window_by_source(tmp_path: Path) -> None:
+    """「起点那天不足全天」的窗口口径按源分流：1970 根是 sina 的话，ngw 说的是单页截断。"""
+    cover = query.Cover(first=PREV, last=DAY, days=1, symbols=200)
+    ngw_only = run_job(
+        tmp_path / "ngw",
+        periods=("1",),
+        fetch=frame_of(ngw_bar(MORNING)),
+        reconcile=lambda *_a: Recon(1, (), {layout.MINUTE_1: cover}),
+    )
+    assert "ngw 单页" in ngw_only.markdown
+    assert "1970" not in ngw_only.markdown  # sina 的窗口句不许挂到 ngw 的报告上
+    sina_only = run_job(
+        tmp_path / "sina",
+        periods=("60",),
+        reconcile=lambda *_a: Recon(1, (), {layout.MINUTE_60: cover}),
+    )
+    assert "1970 根窗口" in sina_only.markdown
+    assert "ngw 单页" not in sina_only.markdown
+    both = run_job(
+        tmp_path / "both",
+        periods=("1", "60"),
+        fetch=lambda _s, p: [ngw_bar(MORNING)] if p == "1" else [bar(MORNING)],
+        reconcile=lambda *_a: Recon(2, (), {layout.MINUTE_1: cover, layout.MINUTE_60: cover}),
+    )
+    assert "1970 根窗口" in both.markdown and "ngw 单页" in both.markdown
+
+
+def test_the_no_data_alert_splits_the_urgency_by_source(tmp_path: Path) -> None:
+    """无数据告警的"漏了有多急"按源说：sina 是永久缺失，ngw 是翻页可补——反了会误导处置。"""
+
+    def verdict(alerts: list[tuple[str, str]]) -> str:
+        # 全失败时第 0 条是 with_retry 的逐票告警，"今日无数据"是收尾那条：按标题取。
+        return next(body for title, body in alerts if title.startswith("分钟线今日无数据"))
+
+    ngw_alerts: list[tuple[str, str]] = []
+    run_job(tmp_path / "ngw", periods=("1",), fetch=failing, alerts=ngw_alerts)
+    ngw_body = verdict(ngw_alerts)
+    assert "补得回来" in ngw_body
+    assert "1970" not in ngw_body
+    sina_alerts: list[tuple[str, str]] = []
+    run_job(tmp_path / "sina", periods=("5",), fetch=failing, alerts=sina_alerts)
+    sina_body = verdict(sina_alerts)
+    assert "1970 根" in sina_body
+    assert "永久没了" in sina_body
+    assert "补得回来" not in sina_body
+
+
+# --- live_fetcher：真网络装配的分派（transport 注入，零外发）-----------------------------
+
+
+def _stub_ngw_client(*responses: dict[str, Any]) -> tuple[NgwClient, list[str]]:
+    """可注入 transport 的真 `NgwClient` + 记下每次完整 URL 的账本（03 §二 L2 离线重放）。"""
+    script = list(responses)
+    calls: list[str] = []
+
+    def transport(url: str, _headers: Any, _timeout: float) -> tuple[int, bytes]:
+        calls.append(url)
+        assert script, f"脚本用完了还来一发：{url}"
+        return 200, json.dumps(script.pop(0)).encode("utf-8")
+
+    client = NgwClient(
+        token_path=Path("/nonexistent/ngw.token"),
+        interval=0.0,
+        sleep=lambda _s: None,
+        transport=transport,
+    )
+    return client, calls
+
+
+SEARCH_HIT = {
+    "stocks": [
+        {
+            "innercode": "3143",
+            "stockcode": "600519",
+            "stockname": "贵州茅台",
+            "market": "1",
+            "boardName": "主板",
+            "tagDisplay": "白酒",
+        }
+    ]
+}
+
+
+def test_live_fetcher_wires_period_one_through_ngw() -> None:
+    """1 分路径的真装配：innercode → kline(count=MAX_KLINE_COUNT) → ngw 行，全程零网络。
+
+    分派错了的两种病这里各钉一条：走了 sina（会发 `stock_zh_a_minute`——脚本没有那个应答，
+    第一发就炸）和 count 发错（`count=1500` 源侧静默 0 行，硬约束 3）。
+    """
+    client, calls = _stub_ngw_client(SEARCH_HIT, {"timedata": [ngw_bar(MORNING)]})
+    fetch = job.live_fetcher(("1",), client=client)
+    rows = fetch("600519", "1")
+    assert len(calls) == 2
+    assert "homesearch" in calls[0] and "q=600519" in calls[0]
+    assert "kline" in calls[1] and f"count={MAX_KLINE_COUNT}" in calls[1]
+    drafts = job.drafts_for(rows, symbol="600519", period="1")
+    assert drafts and all(d.source == "ngw_minute_1" for d in drafts)
+    assert drafts[0].ts == MORNING
+
+
+def test_live_fetcher_splits_periods_between_the_two_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """混周期一轮：1 分走注入的 ngw client，60 分走 akshare——两条路各自认领各自的周期。"""
+    seen: list[tuple[str, str]] = []
+
+    def fake_minute_frame(code: str, period: str = "5") -> Rows:
+        seen.append((code, period))
+        return [bar(MORNING)]
+
+    monkeypatch.setattr(akshare_fetch, "minute_frame", fake_minute_frame)
+    client, calls = _stub_ngw_client(SEARCH_HIT, {"timedata": [ngw_bar(MORNING)]})
+    fetch = job.live_fetcher(("1", "60"), client=client)
+    assert fetch("600519", "1")
+    assert fetch("600519", "60") == [bar(MORNING)]
+    assert seen == [("600519", "60")]  # 60 分一次都没往 ngw 发
+    # 1 分那轮只打了两发：innercode 检索 + kline 一页；60 分走的是 akshare，不在这本账上
+    assert len(calls) == 2
+    assert "homesearch" in calls[0] and "kline" in calls[1]
+
+
+def test_live_fetcher_builds_its_client_only_when_period_one_was_asked() -> None:
+    """没注入 client 时才在这里构造（1.5s 起步的那个装配点）；不含 1 的轮次不摸 token 路径。"""
+    assert callable(job.live_fetcher(("1",)))  # 构造真 NgwClient：不联网，只读 token 盘
+    assert callable(job.live_fetcher(("5", "30", "60")))
+
+
+def test_live_fetcher_refuses_period_one_when_its_client_was_never_built() -> None:
+    """装配 bug 的兜底：建轮时没给 1 分排 client，抓 1 分要在这里响，不是把行送错解析。"""
+    fetch = job.live_fetcher(("5",))
+    with pytest.raises(ValueError, match="不含它"):
+        fetch("600519", "1")
+
+
 # --- 命令行入口：只剩"装配对不对"可测 --------------------------------------------------
 
 
@@ -429,6 +640,12 @@ def test_the_cli_refuses_a_period_it_cannot_store() -> None:
     with pytest.raises(SystemExit) as stop:
         minute_cli.build_parser().parse_args(["--periods", "15"])
     assert stop.value.code == 2
+
+
+def test_the_cli_accepts_period_one() -> None:
+    """`--periods 1` 是合法周期（minute_1 已注册）：在参数期放行，源分派在 job 层接住。"""
+    parsed = minute_cli.build_parser().parse_args(["--periods", "1,60"])
+    assert parsed.periods == ("1", "60")
 
 
 def test_the_cli_refuses_an_empty_period_list() -> None:

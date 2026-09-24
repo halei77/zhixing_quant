@@ -1,7 +1,9 @@
 """`zx-minute`：分钟线采集的命令行入口（01 Step 4；ADR-0009 决定 8）。
 
 只做装配，和 `zx-daily` 一样：判定、重试、落盘、日报都在 `jobs.minute`，周期 → dataset 的
-映射在 `storage.layout`，抓取在 `sources.akshare.fetch`。这个文件里没有一条业务规则。
+映射在 `storage.layout`，**周期 → 源**（1 → ngw `ngw_minute_1`，5/30/60 → akshare/sina
+`akshare_minute_*`）也住在 `jobs.minute`（`live_fetcher` 抓取分派 + `drafts_for` 行解析分派，
+同一个 `NGW_PERIOD` 键）。这个文件里没有一条业务规则。
 
 它**拒绝猜范围**：`--symbols` 与 `--limit` 都不给时不启动（退出码 2）。全市场三周期约 13290
 请求、2–3 小时/日，而"采几个周期、票池多大"是 ADR-0009 决定 8 里等用户裁决的那一条——给一个
@@ -18,7 +20,6 @@ import sys
 from functools import partial
 
 from zhixing_quant import config
-from zhixing_quant.sources.akshare import fetch as akshare_fetch
 from zhixing_quant.sources.akshare.calendar import load_calendar
 from zhixing_quant.sources.akshare.master import read_master
 from zhixing_quant.sources.jobs import minute as job
@@ -28,7 +29,9 @@ from zhixing_quant.storage import layout
 from zhixing_quant.storage.quarantine import store_quarantined
 from zhixing_quant.storage.write import store_bars
 
-#: 默认周期 = `layout` 里那三个 dataset（ADR-0009 决定 7）。票池仍然要显式给，见模块说明。
+#: 默认周期 = ADR-0009 决定 7 的三周期（ADR-0021 决定 2 管的是"每日必采范围 = 60"，不改这里
+#: 的 CLI 默认）。**1 分钟不进默认**：它的源是 ngw、按 `--periods 1`（或含 1 的列表）显式开
+#: （ADR-0022 决定 3）。票池仍然要显式给，见模块说明。
 DEFAULT_PERIODS = ("5", "30", "60")
 
 
@@ -36,7 +39,7 @@ def _periods(text: str) -> tuple[str, ...]:
     """`--periods 5,30` → 周期元组。认不出的周期在这里就报，不等第一个请求打完再发现没处落。"""
     periods = tuple(p.strip() for p in text.split(",") if p.strip())
     if not periods:
-        raise argparse.ArgumentTypeError("--periods 至少要写一个周期（5/30/60）")
+        raise argparse.ArgumentTypeError("--periods 至少要写一个周期（1/5/30/60）")
     for period in periods:
         try:
             layout.minute_dataset(period)
@@ -56,8 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--periods",
         type=_periods,
         default=DEFAULT_PERIODS,
-        metavar="5[,30…]",
-        help=f"采哪几个周期，默认 {','.join(DEFAULT_PERIODS)}",
+        metavar="1[,5…]",
+        help=(
+            f"采哪几个周期，默认 {','.join(DEFAULT_PERIODS)}；"
+            f"{job.NGW_PERIOD} 走 ngw（源标识 ngw_minute_1），5/30/60 走 sina（akshare_minute_*）"
+        ),
     )
     parser.add_argument(
         "--symbols",
@@ -83,7 +89,9 @@ def main(argv: list[str] | None = None, *, fetcher: job.MinuteFetcher | None = N
     `fetcher` 是抓取边界的注入点（测试与"换源"用它），命令行上不暴露——理由与 `zx-daily` 同一条。
     """
     args = build_parser().parse_args(argv)
-    grab = akshare_fetch.minute_frame if fetcher is None else fetcher
+    # 周期 → 源的抓取分派在 job.live_fetcher 里（与行解析分派同一个 NGW_PERIOD 键）：
+    # 这里再写一遍 "1 走 ngw" 就是第二份周期表，而它迟早和 drafts_for 漂开。
+    grab = job.live_fetcher(args.periods) if fetcher is None else fetcher
     try:
         calendar = load_calendar(until=args.day)
         result = job.run(

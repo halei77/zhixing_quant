@@ -3,8 +3,11 @@
 与 `daily.py` 共用的部分直接 import（重试与熔断、失败清单的措辞、落盘账的合并、日报渲染）：
 这条路径上的每一次复制迟早都会漂成两种"今天到底算成功没有"。四处不同决定了这个文件单独存在：
 
-- **没有窗口**。源固定回最近 1970 根（决定 6），所以"抓哪几天"这个问题在这里没有对应物——
-  交回来的是一条尾巴，报告日只是尾巴的右端。`--previous-days` 那套往回带的旋钮因此不存在。
+- **没有回填旋钮**（`--previous-days` 不存在），而"尾巴有多长、漏一天有多急"**按源分两半**：
+  5/30/60 走 akshare/sina，源固定回最近 1970 根（决定 6），交回来的是一条尾巴、报告日只是
+  尾巴的右端；1 分钟走 ngw（ADR-0022 决定 3 的源），单页 count≤1400（约 5.8 个交易日）且有
+  `start` 截止参数能向过去翻页（B 刀 2026-09-24 实测翻到 2019）。两半的日报与告警口径因此
+  分开写——sina 的"1970 根窗口"句挂到 ngw 的报告上是替源传错了话。
 - **一只票 × 一个周期 = 一批**。两种周期混成一批会在 `(symbol, ts)` 上撞键（10:00 那根在 5min
   与 30min 里都存在），R008 会把后到的判成重复；而它们本来就要落进两个 dataset。
 - **跑多大由人说**（决定 8）。`symbols` 与 `limit` 至少给一个，都不给就抛 `ScopeNotConfigured`。
@@ -13,7 +16,8 @@
   所以这一层多一个读盘的边界（`reconcile_pool`），而它是门禁之外的一条规则（04 §二 的表外规则）。
 
 尾巴意味着"每天多攒一点"一旦停下就少一截（代价三）：停一天，第二天的整段重落盘还补得回来；
-停到那天滑出 1970 根的窗口，就永久没了。所以这里比日线多报两样东西——**这次见到的最后一根K线是哪天**
+对 sina 三周期，停到那天滑出 1970 根的窗口就永久没了（ngw 有 `start` 翻页、漏的天补得回来，
+是另一种急法）。所以这里比日线多报两样东西——**这次见到的最后一根K线是哪天**
 （`Tally.newest`）与**报告日两本账对不对得上**（R011）。没有它们，"源不更新了"和"网络炸了"在日报上
 是同一句话。
 
@@ -37,12 +41,14 @@ from functools import partial
 from pathlib import Path
 
 from zhixing_quant import config
+from zhixing_quant.domain.bar import BarDraft
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import SecurityMaster
 from zhixing_quant.quality import gate_config
 from zhixing_quant.quality.engine import GateEngine, GateOutcome
 from zhixing_quant.quality.reconcile import Finding, Recon, counts, reconcile_day
 from zhixing_quant.quality.report import DataQualityReport
+from zhixing_quant.sources.akshare import fetch as akshare_fetch
 from zhixing_quant.sources.akshare import minute as akshare_minute
 from zhixing_quant.sources.jobs.daily import (
     REASON_BREAKER,
@@ -58,6 +64,8 @@ from zhixing_quant.sources.jobs.daily import (
     sum_writes,
     with_retry,
 )
+from zhixing_quant.sources.ngw import minute as ngw_minute
+from zhixing_quant.sources.ngw.client import MAX_KLINE_COUNT, NgwClient
 from zhixing_quant.sources.rows import Rows
 from zhixing_quant.storage import layout, query
 from zhixing_quant.storage.quarantine import QuarantineReport
@@ -75,6 +83,25 @@ MINUTE_REPORTS = "minute"
 #: 挤出日报，而"今天既有断档又有价差"恰恰是最需要一眼看见的那种日子（`daily_report` 的
 #: "每个源 Top10 而不是全局 Top10"是同一条理由）。
 KIND_SAMPLE = 3
+
+#: **周期 → 源的分派键**：`"1"` 走 ngw（源标识 `ngw_minute_1`），其余（5/30/60）走
+#: akshare/sina（`akshare_minute_*`，ADR-0009 决定 1、ADR-0021 决定 2 的口径，一个字节不改）。
+#: 一个周期一个源不是口味：04 §三 按源打分，ngw 的接口挂了不该扣 sina 分钟的健康分，反向
+#: 同理（ADR-0009 把 5/30/60 拆成三个源名的同款理由）。抓取分派（`live_fetcher`）与行解析
+#: 分派（`drafts_for`）都只看这一个常量，两处各列一份周期表迟早漂成"抓的是 ngw、解析按 sina"
+#: ——那会让整批挂在 R010（批级 FATAL 扣健康分），而真相只是接线错了。
+NGW_PERIOD = "1"
+
+#: ngw pacer 的起步间隔（秒）。**选 1.5s**：Qoute T-001 的纪律原文是"串行 ≥1.5s 起步，
+#: 429 阈值未知，Qoute 按 1.5s 跑一个月无事故"（B 刀 client.py 抄了同一条并注明"首周批量
+#: 把 interval 调到 1.5 再跑"）。`client.py` 的 `DEFAULT_MIN_INTERVAL=0.3` 是通用起步值
+#: （B 刀实测 0.3s 也通），本刀是首周批量接线，按纪律取 1.5：10 个请求 ≈ 15s 的代价换
+#: "不知道阈值时不逼近阈值"。限速住在这个装配常量而不是 CLI 旋钮——能随手调低的限速不是纪律。
+NGW_MIN_INTERVAL = 1.5
+
+#: ngw 一个完整交易日的 1 分钟根数（B 刀实测 241：09:30 开盘竞价栏 + 240 根标准右端点）。
+#: 只用于把单页根数换算成"约几个交易日"写进日报/告警，不参与任何判定。
+BARS_PER_DAY_1M = 241
 
 
 class ScopeNotConfigured(ValueError):
@@ -120,6 +147,54 @@ def label(symbol: str, period: str) -> str:
     而日报的"重试后仍失败 3 只"就把一只票算成了三只。
     """
     return f"{symbol}/{period}min"
+
+
+def drafts_for(rows: Rows, *, symbol: str, period: str) -> list[BarDraft]:
+    """源行 → 待判定草稿。**周期决定用哪个适配器**——本任务唯一的行解析分派。
+
+    与 `live_fetcher` 共用 `NGW_PERIOD` 这一个分派键：抓取按一个周期表、解析按另一个周期表，
+    迟早漂成"抓回 ngw 的 `timedata` 却按 sina 的 `day` 列解析"——整批挂在 R010（批级 FATAL
+    扣整源 40 分），而日报上看起来像源改了列名，查的方向整个是错的。
+    """
+    if period == NGW_PERIOD:
+        return ngw_minute.minute_drafts(rows, symbol=symbol)
+    return akshare_minute.minute_drafts(rows, symbol=symbol, period=period)
+
+
+def live_fetcher(periods: Sequence[str], *, client: NgwClient | None = None) -> MinuteFetcher:
+    """真网络抓取的周期分派（生产装配在 `minute_cli`，它调这一个函数）。
+
+    - `NGW_PERIOD` → `client.innercode`（六位码换 K 线接口要的 innercode）+ `client.kline`
+      一页（`count=MAX_KLINE_COUNT`，单页最深；`start` 不传 = 从最新往回，每日增量要的就是
+      这条尾巴）。
+    - 5/30/60 → `akshare_fetch.minute_frame`，与接线前逐字同一条老路径。
+
+    三件装配事实：
+
+    - **client 整轮共享**：pacer 的 `_last_at` 活在 client 上，每只票新建一个等于没有限速
+      （Qoute 纪律：串行是它没被封的原因）。一次 `zx-minute` 运行 = 一个 client。
+    - **`periods` 不含 `NGW_PERIOD` 就不构造 client**：不摸 token 路径、不建没用的锁，
+      5/30/60 的老路径一个字节都不变（回归钉在测试里）。
+    - **`client` 是测试注入点**（可注入 transport 的真 client，03 §二 L2 离线重放），
+      生产不传、在这里按 `NGW_MIN_INTERVAL` 构造。
+    """
+    ngw: NgwClient | None = None
+    if NGW_PERIOD in periods:
+        ngw = client if client is not None else NgwClient(interval=NGW_MIN_INTERVAL)
+
+    def fetch(symbol: str, period: str) -> Rows:
+        if period == NGW_PERIOD:
+            if ngw is None:
+                # 谁调谁错：`live_fetcher` 的 periods 与 `stores` 的键在 CLI 里是同一份清单，
+                # 这条只可能出自装配 bug。响在这里比把 sina 的 1 分钟行送进 ngw 解析便宜。
+                raise ValueError(
+                    f"周期 {NGW_PERIOD} 要走 ngw，但 live_fetcher 建轮时 periods={tuple(periods)}"
+                    " 不含它：抓取分派与 stores 的键必须是同一份清单"
+                )
+            return ngw.kline(ngw.innercode(symbol), count=MAX_KLINE_COUNT).rows
+        return akshare_fetch.minute_frame(symbol, period)
+
+    return fetch
 
 
 def collect(
@@ -175,7 +250,7 @@ def collect(
                 consecutive += 1
                 continue
             consecutive = 0
-            drafts = akshare_minute.minute_drafts(grabbed, symbol=symbol, period=period)
+            drafts = drafts_for(grabbed, symbol=symbol, period=period)
             if not drafts:
                 # 请求成功、帧是空的：不是"抓取失败"，也不是一批可判的数据。理由同 `daily`：
                 # 交给门禁会得到 R006 的整批 FATAL，而那条要扣整源 40 分。
@@ -302,9 +377,19 @@ def _disk_sections(recon: Recon | None, periods: Sequence[str]) -> str:
             f"- {dataset}：{cover.first.isoformat()} .. {cover.last.isoformat()}"
             f"，{cover.days} 个有行交易日 × {cover.symbols} 只票"
         )
-    if any(cover is not None for cover in recon.covers.values()):
+    # 「起点那天不足全天」的注脚按源说：1970 根窗口是 sina 三周期的口径，挂到 ngw 的
+    # minute_1 上是替源传错话（ngw 是单页截断 + start 翻页，B 刀实测）。
+    ngw_dataset = layout.minute_dataset(NGW_PERIOD)
+    covered = [name for name, cover in recon.covers.items() if cover is not None]
+    if any(name != ngw_dataset for name in covered):
         lines.append(
             "- 起点那天是从源的 1970 根窗口里掉出来的，通常不足全天：算段长别把它当完整的一天"
+        )
+    if ngw_dataset in covered:
+        lines.append(
+            f"- {ngw_dataset} 的起点那天是 ngw 单页（count={MAX_KLINE_COUNT}，约 "
+            f"{MAX_KLINE_COUNT / BARS_PER_DAY_1M:.1f} 个交易日）截出来的，通常不足全天："
+            "算段长别把它当完整的一天"
         )
     return "\n".join(lines) + "\n"
 
@@ -387,6 +472,31 @@ def run(
     return result
 
 
+def _tail_urgency(periods: Sequence[str]) -> str:
+    """“这一天的尾巴漏了有多急”按本次跑的源分开说——两种急法处置不同。
+
+    - sina 三周期：固定 1970 根 tail，滑出就**永久没了**（ADR-0009 代价三）——要立刻补采，
+      而补采窗口正在关。
+    - ngw（`NGW_PERIOD`）：单页 `count=MAX_KLINE_COUNT` 截一段最近的尾巴，另有 `start`
+      截止参数能向过去翻页（B 刀实测翻到 2019）——漏的这几天**补得回来**，先查源与网络，
+      不必按"永久缺失"的节奏处置。
+
+    只跑其中一半就只说那一半：把 1970 句挂到纯 ngw 的告警上，会把"翻页可补"误报成"永久缺失"。
+    """
+    parts: list[str] = []
+    if any(period != NGW_PERIOD for period in periods):
+        parts.append(
+            "分钟线（sina）只能取回源窗口内的最近 1970 根：这一天的尾巴滑出窗口就永久没了。"
+        )
+    if NGW_PERIOD in periods:
+        parts.append(
+            f"1 分钟（ngw）单页 count={MAX_KLINE_COUNT}（约 "
+            f"{MAX_KLINE_COUNT / BARS_PER_DAY_1M:.1f} 个交易日），且有 start 截止参数可向过去"
+            "翻页（B 刀实测翻到 2019）：漏的这几天补得回来，先查源与网络。"
+        )
+    return "".join(parts)
+
+
 def _alert(result: MinuteResult, alert: Alert) -> None:
     """跑坏了才响。两种坏法分开说，因为处置不同。
 
@@ -406,8 +516,7 @@ def _alert(result: MinuteResult, alert: Alert) -> None:
             f"股票池 {result.pool} 只 × {'/'.join(result.periods)} 分钟 = {requests} 个请求，"
             f"一只都没判成（无行 {empty}、熔断 {breaker}、其余是请求失败）。"
             f"这次见到的最后一根K线属于 {result.tally.newest}——那只是尾巴的右端。报告日 "
-            f"{result.day} 到底在不在盘上，看日报的 R011 那一节。"
-            "分钟线只能取回源窗口内的最近 1970 根：这一天的尾巴滑出窗口就永久没了。",
+            f"{result.day} 到底在不在盘上，看日报的 R011 那一节。" + _tail_urgency(result.periods),
         )
     elif result.fatal:
         count = sum(1 for outcome in result.tally.outcomes if outcome.has_fatal)
