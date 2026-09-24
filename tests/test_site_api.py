@@ -1,11 +1,12 @@
-"""`site/api.py`：壳的鉴权、四个端点与最近搜索留痕（ADR-0013 决定 3/4/5）。
+"""`site/api.py`：壳的四个端点与最近搜索留痕（ADR-0013 决定 4/5；口令鉴权已按 ADR-0019 撤销）。
 
 判的全是**外部形状**：状态码、响应体、盘上那个 JSON 文件。壳里没有可单独判的东西——ADR-0013
 决定 5 说它不产生口径，所以这些测试怎么发请求就怎么读响应：400 里那句话是 `prompt.build` 与
 `templates` 的原话，不是这里转述的（第 12、15 两条就是这句话的可执行版本）。
 
-口令是 ASCII 串：它要经过 HTTP 头，而头不是给汉字准备的通道。决定 3 把口令钉在请求头上，
-传输形状本身就得能写成测试——第 5 条判的就是这个形状。
+口令那组测试已改写为新契约（ADR-0019）：端点全开放、残留的 `X-Token` 头与 `?token=` 查询参数
+被无视、`ZX_SITE_TOKEN` 不再是启动条件。`TOKEN`/`AUTH` 两个常量留着不删——它们是撤销前的旧
+口令，专门给"残留头被无视"那两条当已知值；删了它们，那两条就没得可测了。
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ D1, D2, D3 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
 CALENDAR = TradingCalendar([D1, D2, D3])
 TOKEN = "sesame-open-17"
 AUTH = {"X-Token": TOKEN}
+#: 上面两个是**撤销前的旧口令**（ADR-0019）：不再鉴权，只给"残留头被无视"那两条测试当已知值。
 
 #: 与真表同名的两条：响应体读起来就该是站点将来要显示的东西，而不是 test1/test2。
 READY = Template(
@@ -79,8 +81,8 @@ PROMPT_OK = {"code": "600519", "template": "短期投资", "as_of": "2024-01-04"
 #: 同一条请求，只是少了 `as_of`——那个默认值本身就是被测的东西。
 PROMPT_NO_DATE: dict[str, object] = {"code": "600519", "template": "短期投资"}
 
-#: 每个回数据的端点都上这份表，中间那格是"方法 + 路径"。中间件按前缀鉴权，运行时做不到
-#: 漏一个端点（决定 3），但**这张表**会漏——所以 `test_the_endpoint_table_is_the_real_routing`
+#: 每个回数据的端点都上这份表，中间那格是"方法 + 路径"。鉴权中间件已随 ADR-0019 撤销，于是
+#: **这张表**是唯一一处会漏的东西——所以 `test_the_endpoint_table_is_the_real_routing`
 #: 拿真路由表核对它，逼我在新加端点时回来加一格。
 ENDPOINTS: tuple[tuple[str, str, Callable[[TestClient], httpx.Response]], ...] = (
     ("搜索", "GET /api/search", lambda c: c.get("/api/search", params={"q": "600"})),
@@ -99,38 +101,35 @@ def make_app(
     listings: Sequence[Listing] = BOOK,
     cfg: Config = CFG,
     cap: int = api.RECENT_CAP,
-    token: str = TOKEN,
 ) -> FastAPI:
     """装配一个应用，只换指名的那些零件。
 
-    默认那套是"两只在册、三天在盘、口令为真"。`trace` 必填而不是内置：留痕落在哪是这条测试要
-    不要观察它的前提，藏在默认值里就没法比对盘上那个文件。
+    默认那套是"两只在册、三天在盘"。`trace` 必填而不是内置：留痕落在哪是这条测试要
+    要不要观察它的前提，藏在默认值里就没法比对盘上那个文件。
     """
     return api.create_app(
         listings=listings,
         cfg=cfg,
         calendar=calendar,
         recent=api.Recent(trace, cap=cap),
-        token=token,
     )
 
 
 def make_client(
     trace: Path,
     *,
-    headers: dict[str, str] = AUTH,
+    headers: dict[str, str] | None = None,
     calendar: TradingCalendar = CALENDAR,
     listings: Sequence[Listing] = BOOK,
     cfg: Config = CFG,
     cap: int = api.RECENT_CAP,
 ) -> TestClient:
-    """`make_app` 加一个默认口令。
+    """`make_app` 一个客户端；`headers` 默认不带任何头（ADR-0019：匿名就是常态）。
 
-    口令从 `headers` 走而不是混进零件：绝大多数测试要的是"带对了口令"，只有鉴权那几条需要
-    刻意带错，两个入口各管一头，写错的测试一眼看得出来。
+    要发残留头的测试自己指名 `headers`，两个入口各管一头，写错的测试一眼看得出来。
     """
     app = make_app(trace, calendar=calendar, listings=listings, cfg=cfg, cap=cap)
-    return TestClient(app, headers=headers)
+    return TestClient(app, headers={} if headers is None else headers)
 
 
 @pytest.fixture
@@ -165,24 +164,24 @@ def client(trace: Path) -> TestClient:
     return make_client(trace)
 
 
-# ── 决定 3：口令 ──────────────────────────────────────────────────────────────
+# ── 开放访问（ADR-0019：口令鉴权已撤销）───────────────────────────────────────────
 
 
 def test_the_page_and_its_assets_are_public(trace: Path) -> None:
-    """静态壳不鉴权（决定 3）：口令是为了不让公网把全市场扫一遍，页本身不是数据。
+    """整站没有口令这回事（ADR-0019）：页与静态件，谁来都给。
 
-    页面上就有口令输入框，被拒的人得先看见它才能填——把 `/` 也 gate 掉的话，第一次访问的人
-    对着一个 401 的空白页，永远走不进 06 §八-1 那条流程。
+    页面上连口令输入框都没有了（`id="token"` 一个都不许存在）——撤销不彻底的典型形态就是
+    代码不验了、框还挂在页上让人填一个被忽略的值。
     """
-    anonymous = make_client(trace, headers={})
-    page = anonymous.get("/")
+    client = make_client(trace)
+    page = client.get("/")
     assert page.status_code == 200
     assert 'id="preview"' in page.text
-    assert TOKEN not in page.text
+    assert 'id="token"' not in page.text, "口令框还挂在页上：ADR-0019 撤销得不彻底"
     for asset in ("/assets/app.js", "/assets/style.css"):
-        served = anonymous.get(asset)
+        served = client.get(asset)
         assert served.status_code == 200, asset
-        assert TOKEN not in served.text, "静态件是公用的、明文可取的，口令的值一个字符都不许写进去"
+        assert "zx.site.token" not in served.text, "静态件里还有口令存储的残留"
 
 
 def test_no_asset_path_escapes_the_package_directory(trace: Path) -> None:
@@ -201,9 +200,9 @@ def test_no_asset_path_escapes_the_package_directory(trace: Path) -> None:
 def test_the_page_writes_text_and_never_markup() -> None:
     """票名与提示词正文一律走 `textContent`：那两段文字一个来自 akshare、一个来自表格里的数据。
 
-    `innerHTML` 把"数据"当"标记"读，是这一层唯一能把外部内容变成代码的路。页面没有账号也没有
-    会话，口令就存在 `sessionStorage` 里——一次 XSS 换走的正是那串东西（代价六）。所以这条
-    不是风格检查：它挡住的是这个站点唯一一条提权路径。
+    `innerHTML` 把"数据"当"标记"读，是这一层唯一能把外部内容变成代码的路。站点已无账号无会话
+    （ADR-0019 连口令都撤销了），但票名与报错原话照旧来自外部——这条不是风格检查：它挡住的是
+    把外部文字变成可执行标记的那条路。
     """
     script = (api.STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert "innerHTML" not in script
@@ -231,28 +230,28 @@ def test_every_id_the_script_reaches_for_exists_in_the_page() -> None:
     ENDPOINTS,
     ids=[entry[0] for entry in ENDPOINTS],
 )
-def test_every_data_endpoint_demands_the_token(
+def test_every_data_endpoint_needs_no_token(
     trace: Path,
     label: str,
     route: str,
     call: Callable[[TestClient], httpx.Response],
 ) -> None:
-    """五个端点、三种口令状态：没带与带错都是 401，带对才不是 401。
+    """六个端点、两种头状态：匿名与带错口令头，都不许被 401 挡回来（ADR-0019）。
 
-    忘了鉴权的表现是"一切正常"，所以这条的价值全在"每个都试一遍"上；`label` 与 `route` 只是
-    让失败信息说得出是哪个端点的哪一格。
+    撤销鉴权最容易漏的不是主路径，是某个新端点又长回了鉴权——所以这条的价值全在"每个都试
+    一遍"上；`label` 与 `route` 只是让失败信息说得出是哪个端点的哪一格。
     """
-    for headers in ({}, {"X-Token": "sesame-open-1"}):
-        assert call(make_client(trace, headers=headers)).status_code == 401, f"{label} {route}"
+    for headers in (None, {"X-Token": "sesame-open-1"}):
+        response = call(make_client(trace, headers=headers))
+        assert response.status_code != 401, f"{label} {route}"
     assert call(make_client(trace)).status_code != 401, f"{label} {route}"
 
 
 def test_the_endpoint_table_is_the_real_routing(trace: Path) -> None:
     """拿路由表核对那张端点表：新加一个 `/api/...` 而没进表，这里就红。
 
-    运行时由前缀中间件兜住，这条兜的是评审时——两者不是一件事，因为漏掉的那个端点在运行时完全
-    正常（那正是决定 3 挑中间件而不是挑 `Depends` 的理由）。相等而不是包含：表里留一条已经
-    删掉的端点，同样是漂移。
+    鉴权中间件已随 ADR-0019 撤销，于是这张表从"评审时的第二道"变成唯一一道。相等而不是
+    包含：表里留一条已经删掉的端点，同样是漂移。
     """
     declared = {route for _, route, _ in ENDPOINTS}
     actual = {
@@ -264,50 +263,61 @@ def test_the_endpoint_table_is_the_real_routing(trace: Path) -> None:
     assert actual == declared
 
 
-def test_the_token_is_compared_byte_for_byte(trace: Path) -> None:
-    """长出来的、短一截的、大小写不同的都不算对：口令只有一个，比较没有"差不多"。
+def test_stale_token_headers_from_old_clients_are_ignored(trace: Path) -> None:
+    """旧口令头带长了、短了、大小写变了，一律无视——与不带头拿到的响应一字不差。
 
-    前缀那条尤其要说：`X-Token` 的取值是请求里唯一的秘密，一个 `startswith` 写法的鉴权在公网
-    上撑不过一次试探。
+    部署窗口期里旧缓存的 JS 还会继续发 `X-Token`：服务端的正确反应是**当它不存在**，而不是
+    401（旧壳还在线上并存着，ADR-0018 后果二）。响应逐字节相等是比"不是 401"更强的断言——
+    它挡住"读了这个头但读错了"这种半吊子实现。
     """
+    baseline = make_client(trace).get("/api/recent")
+    assert baseline.status_code == 200
     for given in (f"{TOKEN}-x", TOKEN[:-1], TOKEN.upper()):
         response = make_client(trace, headers={"X-Token": given}).get("/api/recent")
-        assert response.status_code == 401, given
-    assert make_client(trace, headers=AUTH).get("/api/recent").status_code == 200
+        assert response.status_code == 200, given
+        assert response.content == baseline.content, given
 
 
-def test_the_token_travels_in_a_header_only(trace: Path) -> None:
-    """同一串口令放进查询串不算数（决定 3）：查询串会进访问日志，也会留在浏览器历史里。
+def test_a_token_in_the_query_is_equally_ignored(trace: Path) -> None:
+    """查询串里的 `?token=` 同样无视（ADR-0019）：撤销之后一条鉴权路径都不许有。
 
-    这条不是在保护日志——日志归运维。它判的是"壳只认一个地方"：认两个地方就会有两个可以写错
-    的实现，而其中较松的那一个迟早被"临时"用上一次。
+    "认两个地方"的写法无从谈起——一个地方都不认。这条同时钉住 POST：写端点也一样开门。
     """
-    anonymous = make_client(trace, headers={})
-    assert anonymous.get("/api/recent", params={"token": TOKEN}).status_code == 401
-    written = anonymous.post("/api/recent", json={"code": "600519"}, params={"token": TOKEN})
-    assert written.status_code == 401
+    client = make_client(trace)
+    plain = client.get("/api/recent")
+    with_param = client.get("/api/recent", params={"token": TOKEN})
+    assert with_param.status_code == plain.status_code == 200
+    assert with_param.content == plain.content
+    written = client.post("/api/recent", json={"code": "600519"}, params={"token": TOKEN})
+    assert written.status_code == 200
 
 
-def test_a_refused_request_says_so_in_plain_words(trace: Path) -> None:
-    """401 的正文是给人看的一句话，不是一份 JSON 错误体：这一格不需要被前端解析。"""
-    response = make_client(trace, headers={}).get("/api/search", params={"q": "600"})
-    assert response.status_code == 401
-    assert response.text == "口令不对"
+def test_no_route_can_answer_401_or_403(trace: Path) -> None:
+    """整站任何路由、匿名访问，都不许回 401/403：鉴权撤销的总闸判定。
 
-
-def test_no_token_configured_means_the_site_does_not_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    """没配口令是起不来，不是"跳过鉴权"（决定 3）。
-
-    "忘了配"实现成"没鉴权"是最坏的一种能跑：它的日志与"部署成功"完全同形，而它已经在公网上
-    裸奔。空白串同样不算配了——`ZX_SITE_TOKEN=` 在 shell 里就是写"我没设"的写法。
+    逐端点那条判的是 `/api/*` 六个已知点；这条扫的是**全部路由**——新端点、新挂载点、壳本身
+    都在内。某天有人把鉴权加回来（或加了个带 Depends 的新端点），两条里必红一条。
     """
-    for env in ({}, {api.TOKEN_ENV: ""}, {api.TOKEN_ENV: "   "}):
-        with pytest.raises(RuntimeError) as caught:
-            api.site_token(env)
-        assert api.TOKEN_ENV in str(caught.value)
-    monkeypatch.setenv(api.TOKEN_ENV, TOKEN)
-    assert api.site_token() == TOKEN
-    assert api.site_token({api.TOKEN_ENV: "  padded  "}) == "padded"
+    client = make_client(trace)
+    paths = [route.path for route in make_app(trace).routes if isinstance(route, APIRoute)]
+    assert "/api/search" in paths, f"路由表空转：{paths}"
+    for path in paths:
+        response = client.get(path)
+        assert response.status_code not in (401, 403), path
+
+
+def test_no_token_env_is_a_runtime_condition_any_more(
+    trace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ZX_SITE_TOKEN` 配不配都不影响起进程；`site_token`/`TOKEN_ENV` 这两个名字不复存在。
+
+    撤销前的契约是"没配口令就起不来"（ADR-0013 决定 3，fail-closed）；撤销后连这个概念都不该
+    留在模块里——留着就有人往回接。`hasattr` 那两行钉的正是"概念已整体移除"。
+    """
+    monkeypatch.delenv("ZX_SITE_TOKEN", raising=False)
+    assert make_client(trace).get("/api/templates").status_code == 200
+    assert not hasattr(api, "site_token"), "site_token 又长回来了：ADR-0019 明令撤销"
+    assert not hasattr(api, "TOKEN_ENV"), "TOKEN_ENV 又长回来了：ADR-0019 明令撤销"
 
 
 # ── 决定 1/2：搜索与模板两个读端点 ───────────────────────────────────────────
@@ -670,7 +680,7 @@ def test_the_entry_point_assembles_from_the_published_data(
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
     monkeypatch.setattr(api, "load_calendar", fake_load_calendar)
-    monkeypatch.setenv(api.TOKEN_ENV, TOKEN)
+    monkeypatch.delenv("ZX_SITE_TOKEN", raising=False)  # ADR-0019：这个变量已无人读取
     for name, value in (("ZX_SITE_HOST", host), ("ZX_SITE_PORT", port)):
         if value is None:
             monkeypatch.delenv(name, raising=False)
@@ -683,7 +693,7 @@ def test_the_entry_point_assembles_from_the_published_data(
     assert untils == [date.today()]
     app = served["app"]
     assert isinstance(app, FastAPI)
-    served_client = TestClient(app, headers=AUTH)
+    served_client = TestClient(app)
     assert served_client.get("/api/search", params={"q": "600"}).json()["hits"]
     assert len(served_client.get("/api/templates").json()["templates"]) == 5
     served_client.post("/api/recent", json={"code": "600519"})
@@ -747,12 +757,11 @@ def test_a_new_yaml_row_reaches_the_prompt_with_no_code_change(
     monkeypatch.setattr(uvicorn, "run", fake_run)
     monkeypatch.setattr(api, "load_calendar", lambda **_kwargs: CALENDAR)
     monkeypatch.setattr(config, "prompt_templates_file", lambda **_kwargs: edited)
-    monkeypatch.setenv(api.TOKEN_ENV, TOKEN)
 
     api.main([])
     app = served["app"]
     assert isinstance(app, FastAPI)
-    shell = TestClient(app, headers=AUTH)
+    shell = TestClient(app)
 
     names = [t["name"] for t in shell.get("/api/templates").json()["templates"]]
     want = [t.name for t in templates.load(shipped).templates]
@@ -903,8 +912,8 @@ def test_an_unknown_shell_name_is_refused(tmp_path: Path) -> None:
 def test_the_assembly_serves_whichever_frontend_it_is_given(trace: Path, tmp_path: Path) -> None:
     """发哪个前端是装配决定（`static_dir` 参数），不是模块常量。
 
-    这条同时钉住两件：① `/` 与 `/assets/*` 确实从注入的目录发；② 静态件是公用明文可取的，
-    口令的值一个字符都不许漏进去。测试里造一份假 dist，于是不依赖 npm build。
+    这条同时钉住两件：① `/` 与 `/assets/*` 确实从注入的目录发；② 发出去的页里没有口令框
+    （ADR-0019）。测试里造一份假 dist，于是不依赖 npm build。
     """
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
@@ -915,15 +924,13 @@ def test_the_assembly_serves_whichever_frontend_it_is_given(trace: Path, tmp_pat
         cfg=CFG,
         calendar=CALENDAR,
         recent=api.Recent(trace),
-        token=TOKEN,
         static_dir=dist,
     )
     anonymous = TestClient(app, headers={})
     page = anonymous.get("/")
     assert page.status_code == 200
     assert 'id="app"' in page.text
-    assert TOKEN not in page.text
+    assert 'id="token"' not in page.text, "注入的壳里长出了口令框：ADR-0019 撤销得不彻底"
     served = anonymous.get("/assets/app.js")
     assert served.status_code == 200
-    assert TOKEN not in served.text, "静态件是公用的、明文可取的，口令的值一个字符都不许写进去"
     assert "console.log(1)" in served.text, "发出来的不是注入目录里的那份，说明 static_dir 没被用上"

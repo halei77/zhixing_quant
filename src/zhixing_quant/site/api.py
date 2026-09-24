@@ -1,10 +1,10 @@
-"""站点壳：一张页 + 四个端点（ADR-0013 决定 1、3、4）。
+"""站点壳：一张页 + 四个端点（ADR-0013 决定 1、4；口令鉴权已按 ADR-0019 撤销）。
 
 `/` 发 `site/static/` 里那三件静态件，`/api/*` 回数据。壳里没有口径（ADR-0013 决定 5）：token
 数、价格口径行、"盘上 N 天而模板要 M 天"那句缺口，全部由 `prompt.build` 的返回值原样搬进响应，
-页面只是把它们摆出来。这里只判三件事——口令（决定 3）、留痕（决定 4）、请求里的字段到调用的
-对应。写在这里的东西一旦被允许变多，站点就会长出第二套口径，而 ADR-0011 决定 3 那句"口径行由
-代码跟着配置生成，模板作者删不掉"就白立了。
+页面只是把它们摆出来。这里只判两件事——留痕（决定 4）、请求里的字段到调用的对应。写在这里的
+东西一旦被允许变多，站点就会长出第二套口径，而 ADR-0011 决定 3 那句"口径行由代码跟着配置生成，
+模板作者删不掉"就白立了。
 
 数据根与采集端同一个根（ADR-0012 决定 1）：站点读的是**发布过来**的干净区（ADR-0006 决定 1/2），
 不是另抓一份。所以这个进程不需要采集能力，也不许在生成之路上联网（ADR-0012 决定 2）。
@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import secrets
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict
@@ -44,8 +43,6 @@ RECENT_CAP = 10
 #: 搜索一次回几条（下拉框容量），以及它的天花板——字典只有四千多只，而这是公网。
 SEARCH_LIMIT = 20
 SEARCH_MAX = 50
-#: 06 §二 那句"固定口令"的环境变量名（ADR-0013 决定 3）。
-TOKEN_ENV = "ZX_SITE_TOKEN"
 #: 旧前端那三件静态件的位置：包内目录，路径由本文件反推（与 `config.repo_root()` 同一手法——
 #: 写死绝对路径换机即废，也过不了 02 §六 的路径扫描）。ADR-0018 后果二：新前端通过功能
 #: 验收前它仍是线上，验收通过后退役（文件保留到 05 Q1-② 批准删除）。
@@ -81,8 +78,8 @@ def served_dir(
 ) -> Path:
     """该发哪个前端目录（ADR-0018 决定 2）：构建产物在就发它，不在就退回旧的 `site/static`。
 
-    退回**是契约内的情形**：后果二明写并存期里 `site/static` 仍是线上（它还带着旧的口令存储
-    偏离——localStorage 关页不清），所以退回不是谎报，是并存期的规定状态。两个都没有才起不来。
+    退回**是契约内的情形**：后果二明写并存期里 `site/static` 仍是线上，所以退回不是谎报，是
+    并存期的规定状态。两个都没有才起不来。
 
     那为什么不默默挑一个？因为代价二另外半句是「哪个是真前端要写清楚」——目录不能由构建时序
     悄悄决定，`main()` 会把它打进 stderr（写在服务自己的日志里，不是藏在代码里）。
@@ -109,7 +106,7 @@ def served_dir(
     )
 
 
-#: 鉴权中间件的下一个处理器。这一版 FastAPI 没导出这个别名，所以自己写。
+#: http 中间件的下一个处理器。这一版 FastAPI 没导出这个别名，所以自己写。
 _Dispatch = Callable[[Request], Awaitable[Response]]
 
 
@@ -177,25 +174,12 @@ class Recent:
         self._path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def site_token(env: Mapping[str, str] | None = None) -> str:
-    """口令从环境读；没配就**起不来**，不是"跳过鉴权"（ADR-0013 决定 3）。
-
-    "忘了配"实现成"没鉴权"是最坏的一种能跑：它的日志与"部署成功"完全同形，而它已经在公网上裸奔。
-    """
-    source = os.environ if env is None else env
-    token = source.get(TOKEN_ENV, "").strip()
-    if not token:
-        raise RuntimeError(f"{TOKEN_ENV} 没有设置：站点不许裸奔（ADR-0013 决定 3）")
-    return token
-
-
 def create_app(
     *,
     listings: Sequence[Listing],
     cfg: templates.Config,
     calendar: TradingCalendar,
     recent: Recent,
-    token: str,
     static_dir: Path = STATIC_DIR,
 ) -> FastAPI:
     """装配应用。依赖全部从参数进来（与 ADR-0010 决定 1 同一手法），只有 `main` 从盘上取。
@@ -208,17 +192,6 @@ def create_app(
     book = search.Index(listings)
     names = {listing.code: listing.name for listing in listings}
     app = FastAPI(title="知行 · 提示词站点", docs_url=None, redoc_url=None)
-
-    @app.middleware("http")
-    async def guard(request: Request, call_next: _Dispatch) -> Response:
-        """回数据的一律要口令，回壳本身的不必（ADR-0013 决定 3）。
-
-        比"逐个端点记得加 Depends"可靠：新加一个 `/api/...` 而忘了鉴权，是这种写法唯一会犯的错，
-        而它的表现是"一切正常"。前缀这条规则做不到忘。
-        """
-        if not request.url.path.startswith("/api") or _authorized(request, token):
-            return await call_next(request)
-        return Response(status_code=401, content="口令不对")
 
     app.mount("/assets", StaticFiles(directory=_assets_dir(static_dir)), name="assets")
 
@@ -235,9 +208,7 @@ def create_app(
     def index() -> FileResponse:
         """站点那张页（06 §八-1 的全流程在这里走）。
 
-        它不在 `/api` 前缀下，于是中间件天然放行（决定 3 那句"回壳本身的不必"）：口令框就画在页
-        上，被拒的人得先看见这张页，才知道要往里面填什么。服务端不注口令——它不认人，无会话无
-        账号，代价记在 ADR-0013 代价六。
+        站点已无口令也无会话（ADR-0019）：这张页与它的静态件、数据端点一样，谁来都给。
         """
         return FileResponse(static_dir / "index.html")
 
@@ -362,14 +333,6 @@ def _known(text: str, names: Mapping[str, str]) -> str:
     return code
 
 
-def _authorized(request: Request, token: str) -> bool:
-    """`X-Token` 逐字节比。用 `compare_digest` 不是玄学：口令只有一个、服务在公网上，而返回真假
-    的时间差是这台机器上唯一一条能问出"第几个字符对了"的通道。字节化是因为它只吃 ASCII。
-    """
-    given = request.headers.get("x-token", "")
-    return secrets.compare_digest(given.encode(), token.encode())
-
-
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -377,7 +340,7 @@ def _now() -> str:
 def build_parser() -> argparse.ArgumentParser:
     """`zx-site` 的参数表，一张空表——**空表不等于不判**。
 
-    这个进程的可调项全在环境变量里（`ZX_SITE_TOKEN`/`ZX_SITE_HOST`/`ZX_SITE_PORT`），所以没有
+    这个进程的可调项全在环境变量里（`ZX_SITE_HOST`/`ZX_SITE_PORT`），所以没有
     flag 可选；而 `parse_args` 对多出来的参数直接退 2，于是 `zx-site --port 8765` 的结局是"这条
     命令写错了"，不是"起了一个监听 8000 的服务"（独立审计 M1）。忽略参数的那条路在 systemd 里
     一定会走一遍：写单位文件的人照别的服务的习惯加 `--port`，然后端口就对不上反代，而日志上说服务
@@ -385,8 +348,8 @@ def build_parser() -> argparse.ArgumentParser:
     """
     return argparse.ArgumentParser(
         prog="zx-site",
-        description="提示词站点：一张页 + 四个端点。可调项只有 ZX_SITE_TOKEN / "
-        "ZX_SITE_HOST / ZX_SITE_PORT 这三个环境变量，没有任何命令行参数",
+        description="提示词站点：一张页 + 四个端点。可调项只有 ZX_SITE_HOST / "
+        "ZX_SITE_PORT 这两个环境变量，没有任何命令行参数",
     )
 
 
@@ -401,7 +364,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         cfg=cfg,
         calendar=load_calendar(until=date.today()),
         recent=Recent(config.site_recent_file()),
-        token=site_token(),
         static_dir=served,
     )
     host = os.environ.get("ZX_SITE_HOST", "127.0.0.1")

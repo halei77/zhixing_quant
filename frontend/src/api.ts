@@ -1,11 +1,6 @@
 // 站点 API 客户端。页面不产生任何口径：token 数、口径句、缺口句全来自服务器（ADR-0013 决定 5）。
 // 这里只做「输入 → 请求 → 响应」，与旧 app.js 的调用一一对应。
-
-const TOKEN_KEY = 'zx.site.token'
-
-// ADR-0013 补充决定一：口令由用户填进页面、存在 sessionStorage（关页即清），逐个请求带上。
-export const getToken = (): string => sessionStorage.getItem(TOKEN_KEY) || ''
-export const setToken = (value: string): void => sessionStorage.setItem(TOKEN_KEY, value.trim())
+// 无口令、无会话（ADR-0019）：不发 X-Token，服务端也不认。
 
 export interface Hit {
   code: string
@@ -65,7 +60,7 @@ export class ApiError extends Error {
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { 'X-Token': getToken() }
+  const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   const response = await fetch(path, {
     method,

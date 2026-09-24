@@ -1,8 +1,7 @@
 // 知行 · 提示词站点前端（2026-09-22 重设计：typeahead / K线 canvas / 玻璃层）。
 // 零依赖、无构建。页面上不算任何东西：token 数、口径句全来自服务器（ADR-0013 决定 5）。
-// 这里只做：把输入变成请求、把响应变成 DOM、画K线、记口令、按复制。
+// 这里只做：把输入变成请求、把响应变成 DOM、画K线、按复制（口令已按 ADR-0019 撤销）。
 
-const TOKEN_KEY = "zx.site.token";
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -15,23 +14,14 @@ const state = {
   templates: [],
 };
 
-function token() {
-  return localStorage.getItem(TOKEN_KEY) || "";
-}
-
 async function call(method, path, body) {
-  const headers = { "X-Token": token() };
+  const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {
     method,
     headers,
     body: body === undefined ? null : JSON.stringify(body),
   });
-  if (response.status === 401) {
-    setAuth("off");
-    say("口令不对，填好口令再操作");
-    throw new Error("401");
-  }
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ detail: response.statusText }));
     throw new Error(problem.detail || String(response.status));
@@ -61,7 +51,7 @@ async function search() {
       const hits = (await call("GET", `/api/search?q=${encodeURIComponent(query)}`)).hits;
       renderSuggest(hits.slice(0, 12));
     } catch (error) {
-      if (error.message !== "401") say(`搜索失败：${error.message}`);
+      say(`搜索失败：${error.message}`);
     }
   }, 160);
 }
@@ -128,7 +118,7 @@ async function loadQuote() {
     drawKline(state.bars);
     say("");
   } catch (error) {
-    if (error.message !== "401") say(`行情加载失败：${error.message}`);
+    say(`行情加载失败：${error.message}`);
   }
 }
 
@@ -337,14 +327,8 @@ $("templates").addEventListener("change", () => {
 });
 $("generate").addEventListener("click", generate);
 $("copy").addEventListener("click", copy);
-$("token").addEventListener("input", () => {
-  localStorage.setItem(TOKEN_KEY, $("token").value.trim());
-  clearTimeout(typing);
-  typing = setTimeout(boot, 500); // 停手半秒自动连接，不用点别处
-});
 
 async function boot() {
-  if (!token()) return;
   try {
     await Promise.all([loadTemplates(), call("GET", "/api/recent")]);
     say("已连接");
@@ -353,5 +337,4 @@ async function boot() {
   }
 }
 
-$("token").value = token();
-if (token()) boot();
+boot();

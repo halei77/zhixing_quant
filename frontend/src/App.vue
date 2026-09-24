@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
-import { ApiError, api, getToken, setToken, type Bar, type Entry, type Hit, type Quote, type Template } from '@/api'
+import { api, type Bar, type Entry, type Hit, type Quote, type Template } from '@/api'
 import KLineChart from '@/components/KLineChart.vue'
 
 const THEME_KEY = 'zx.site.theme'
@@ -31,7 +31,7 @@ const DATASETS: { key: string; label: string; days: number }[] = [
   { key: 'minute_5', label: '5 分K', days: 10 },
 ]
 
-const token = ref(getToken())
+// ── 连接状态（ADR-0019：无口令，点只反映“最近一次请求成功”）────
 const connected = ref(false)
 const status = ref('')
 
@@ -39,7 +39,6 @@ const query = ref('')
 const hits = ref<Hit[]>([])
 const recent = ref<Entry[]>([])
 let searchTimer: number | undefined
-let tokenTimer: number | undefined
 
 const selected = ref<{ code: string; name: string; kind: 'stock' | 'index' } | null>(null)
 const bars = ref<Bar[]>([])
@@ -74,11 +73,6 @@ function say(message: string) {
 }
 
 function handleError(error: unknown) {
-  if (error instanceof ApiError && error.status === 401) {
-    connected.value = false
-    say('口令不对，填好口令再操作')
-    return
-  }
   say(error instanceof Error ? error.message : String(error))
 }
 
@@ -257,7 +251,6 @@ function onTemplateChange() {
 
 // ── 连接 ──────────────────────────────────────────────
 async function boot() {
-  if (!token.value.trim()) return
   try {
     await Promise.all([loadTemplates(), loadRecent()])
     connected.value = true
@@ -267,27 +260,14 @@ async function boot() {
   }
 }
 
-function onTokenInput() {
-  setToken(token.value)
-  window.clearTimeout(tokenTimer)
-  if (!token.value.trim()) {
-    // 口令清空 = 没口令：绿点不许继续亮着说「已连接」
-    connected.value = false
-    say('')
-    return
-  }
-  tokenTimer = window.setTimeout(boot, 500)
-}
-
 onMounted(() => {
   applyTheme()
   window.addEventListener('storage', onStorage)
-  if (token.value.trim()) boot()
+  boot()
 })
 onUnmounted(() => {
   window.removeEventListener('storage', onStorage)
   window.clearTimeout(searchTimer)
-  window.clearTimeout(tokenTimer)
   window.clearTimeout(regenerateTimer)
 })
 </script>
@@ -297,16 +277,6 @@ onUnmounted(() => {
     <div class="mx-auto flex max-w-[640px] items-center gap-3 px-4 py-2.5">
       <div class="seal" aria-hidden="true">知行</div>
       <div class="relative flex flex-1 items-center gap-2">
-        <input
-          v-model="token"
-          data-testid="token"
-          type="password"
-          class="field !h-11"
-          placeholder="输入口令连接"
-          autocomplete="off"
-          aria-label="站点口令"
-          @input="onTokenInput"
-        />
         <span
           class="dot"
           :class="connected ? 'dot-on' : 'dot-off'"
