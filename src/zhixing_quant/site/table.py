@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Sequence
 from datetime import date
-from typing import Any
+from typing import Any, NamedTuple
 
 from zhixing_quant.domain.bar import Bar, stamp_of
 from zhixing_quant.site.templates import FUNDAMENTAL_HEAD, Adjust, Format
@@ -106,6 +107,9 @@ VALUATION_HEADERS: dict[str, str] = {
     "turnover_rate": "换手率(%)",
     "up_limit": "涨停价(元)",
     "down_limit": "跌停价(元)",
+    "fwd_pe": "远期PE",
+    "est_period": "预测报告期",
+    "est_asof": "预测发布日",
 }
 
 VALUATION_LABEL = (
@@ -132,6 +136,13 @@ REFERENCE_LABELS: dict[str, str] = {
     "daily_basic": VALUATION_LABEL,
     "stk_limit": STK_LIMIT_LABEL,
     "index_daily": INDEX_DAILY_LABEL,
+    "forward_pe": (
+        "远期PE口径：不复权收盘 ÷ 当日点时可见的预测EPS——取发布日不晚于当日的当时最新研报、"
+        "面向最早未到期财年（quarter 年份 ≥ 当日年份的最前一个）、年内最全报告期（Q4 优先，"
+        "Q1–Q3 是年内累计口径不当分母）；est_period=预测报告期、est_asof=该预测的发布日"
+        "（必不晚于当日，点时可见性印在表里）；'—' 表示当日无可见预测，不回落PE(TTM)；"
+        "来源转接源 rds report_rc"
+    ),
 }
 
 
@@ -255,6 +266,145 @@ def render_forecast(rows: Sequence[Any], *, format: Format = "markdown") -> str:
     lines = [f"> {FORECAST_LABEL}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
     lines += [f"| {' | '.join(row)} |" for row in body_rows]
     return "\n".join(lines)
+
+
+class ForwardRow(NamedTuple):
+    """`forward_pe` 表的一行：某交易日的远期 PE 及其所用预测的身份证（ADR-0022 决定 2）。
+
+    `est_asof ≤ trade_date` 是这四列一起存在的理由——把点时可见性印在表里，模型看得到
+    "22.4 倍是对哪天发布的哪个报告期的盈利说的"；缺测时三列全 None，渲染成「—」。
+    """
+
+    trade_date: date
+    close: float
+    fwd_pe: float | None
+    est_period: str | None
+    est_asof: date | None
+
+
+def _quarter_parts(quarter: str) -> tuple[int, int]:
+    """`2026Q4` → (2026, 4)。存储层已按此形状拒过行，这里再解不出就是接线 bug，当场响。"""
+    shape_ok = (
+        len(quarter) == 6 and quarter[4] == "Q" and quarter[:4].isdigit() and quarter[5] in "1234"
+    )
+    if not shape_ok:
+        raise ValueError(f"quarter {quarter!r} 不是 YYYYQn：远期 PE 的财年选择解不出这个报告期")
+    return int(quarter[:4]), int(quarter[5])
+
+
+def align_forward_pe(bars: Sequence[Bar], forecasts: Sequence[Any]) -> list[ForwardRow]:
+    """逐日点时对齐：窗口内每个交易日 t 各自取「report_date ≤ t 的当时最新预测」的 FY1
+    分母，现算 fwd_pe（ADR-0022 决定 2 的完整规则，服务端现算、不落派生表）。
+
+    `bars` 是窗口内的**不复权**日线（close 即行情软件上的价，与 daily_basic 口径行一致）；
+    `forecasts` 是 `report_rc` 行（duck 类型：`.report_date/.org_name/.quarter/.eps`，
+    来自干净区全史读出）。规则逐步：
+
+    1. **可见集** = `report_date ≤ t` 的行。窗口前的老研报也算——窗口起点那天的"当时最新"
+       可能发布于三个月前，只读窗口内会把那段历史读成"无预测"。
+    2. **取当时最新**：可见集里 `report_date` 最大的那一天（"最新一份"，ADR 原文）。该日
+       没有面向未来财年的行 → 当日「—」（不回落更早的旧报——那会把旧预期冒充成当前最新）。
+    3. **FY1 = 财年 ≥ t.year 的最前一个**（"面向 t 时点的未来年度"）。等价于"财年末 ≥ t"：
+       当年的全年盈利要到次年 3–4 月才披露完，当年就是面向未来的年度；跨年后自动换挡到下一年。
+    4. **年内取最全报告期**：同财年多 quarter 行取 Qn 最大者（Q4=全年；实测 Q1–Q3 标签是
+       **年内累计** EPS——国泰君安 20240403 一报四行 18.9/33.4/49.2/69.58 逐级累计——拿累计
+       当分母会把 PE 放大数倍）。
+    5. **同日多研报**（实测 41% 的 (date, quarter) 是同日多券商）：字典序取首个 org——
+       发布日只有日期粒度、日内先后无从分辨，确定性即可，不发明一致预期口径（那要新 ADR）。
+    6. **eps ≤ 0 的行不作分母**（负/零盈利的 PE 无意义）：同档还有正 EPS 的行就用它，全负
+       则当日「—」。eps 为 null 的行在解析器就已拒行，不会出现在这里。
+    7. **fwd_pe = close(t) ÷ eps**；任何一步取不到 → 三个伴随格全 None，渲染「—」。
+
+    **未来函数禁令（03-L4）的落点**：本函数只依赖 `(t, 截至 t 的可见集)`，没有任何"as_of"
+    参数——想用"as_of 那天的预测回填全窗"必须绕开本函数另写，而 tests/test_site_forward_pe
+    的对值断言会把那种实现测红。
+    """
+    by_date: dict[date, list[Any]] = {}
+    for row in forecasts:
+        by_date.setdefault(row.report_date, []).append(row)
+    publish_days = sorted(by_date)
+    rows: list[ForwardRow] = []
+    for bar in sorted(bars, key=lambda item: item.trade_date):
+        t = bar.trade_date
+        # 可见集的"最新发布日"：bisect 定位 ≤ t 的最后一个（O(log n)，全市场回填后每票几千行）
+        cut = bisect.bisect_right(publish_days, t)
+        if cut == 0:
+            rows.append(ForwardRow(t, bar.close, None, None, None))
+            continue
+        latest = publish_days[cut - 1]
+        picked = _fy1_of(by_date[latest], t)
+        if picked is None or picked.eps <= 0:
+            rows.append(ForwardRow(t, bar.close, None, None, None))
+            continue
+        rows.append(
+            ForwardRow(
+                t,
+                bar.close,
+                bar.close / picked.eps,
+                picked.quarter,
+                picked.report_date,
+            )
+        )
+    return rows
+
+
+def _fy1_of(day_rows: Sequence[Any], t: date) -> Any | None:
+    """某发布日的行里挑 t 视角的 FY1 分母（规则 2–6），没有可用行给 None。"""
+    future_years = sorted(
+        {year for row in day_rows if (year := _quarter_parts(row.quarter)[0]) >= t.year}
+    )
+    if not future_years:
+        return None
+    fy1 = future_years[0]
+    same_year = [row for row in day_rows if _quarter_parts(row.quarter)[0] == fy1]
+    best_quarter = max(_quarter_parts(row.quarter)[1] for row in same_year)
+    fullest = [row for row in same_year if _quarter_parts(row.quarter)[1] == best_quarter]
+    usable = [row for row in fullest if row.eps > 0]
+    if not usable:
+        return None
+    return min(usable, key=lambda row: row.org_name)
+
+
+def render_forward_pe(
+    rows: Sequence[ForwardRow],
+    *,
+    fields: Sequence[str],
+    format: Format = "markdown",
+) -> str:
+    """`forward_pe` 序列 → 表（估值表家族的序列形态，ADR-0022 决定 2 的 fields 四列）。
+
+    口径行由代码给（`reference_label`），模板删不掉；空行集拒——空表会被大模型读成
+    "那段时间远期 PE 一直是 0"（`IncompleteComponent` 原顾虑，ADR-0020 说的空表不出在这里，
+    空段由取数侧出 `NO_DATA_NOTE`）。`est_period`/`est_asof` 是字符串/日期列，走自己的
+    格子函数——`_metric_cell` 对非数值一律「—」，会把预测期也吃掉。
+    """
+    if not rows:
+        raise IncompleteComponent("一张都没有的远期PE表不进提示词：那是组件没取到数，不是没有变化")
+    label = reference_label("forward_pe")
+    headers = ["时间", *(VALUATION_HEADERS.get(name, name) for name in fields)]
+    body_rows = [
+        [row.trade_date.isoformat(), *(_forward_cell(name, row) for name in fields)] for row in rows
+    ]
+    if format == "csv":
+        lines = [f"# {label}", ",".join(headers)]
+        lines += [",".join(cells) for cells in body_rows]
+        return "\n".join(lines)
+    lines = [f"> {label}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
+    lines += [f"| {' | '.join(cells)} |" for cells in body_rows]
+    return "\n".join(lines)
+
+
+def _forward_cell(name: str, row: ForwardRow) -> str:
+    """远期 PE 表的一个格子。缺测一律「—」——不是 0、更不是 pe_ttm（两条不同定义的线）。"""
+    if name == "close":
+        return f"{row.close:.2f}"
+    if name == "fwd_pe":
+        return "—" if row.fwd_pe is None else f"{row.fwd_pe:.2f}"
+    if name == "est_period":
+        return row.est_period or "—"
+    if name == "est_asof":
+        return row.est_asof.isoformat() if row.est_asof else "—"
+    return "—"  # 字段清单装载时已校验，走到这里是绕过装载的直构调用——不假装它是数
 
 
 def _denominator(columns: Sequence[str], float_shares: float | None) -> float:

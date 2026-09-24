@@ -46,9 +46,15 @@ FUNDAMENTAL_HEAD_FIELDS: tuple[str, ...] = (
     "turnover_rate",
 )
 
+#: `forward_pe` 的字段四列（ADR-0022 决定 2 定死）：close=不复权收盘、fwd_pe=现算远期 PE、
+#: est_period=分母的预测报告期（模型要知道 22.4 倍是对哪个盈利说的）、est_asof=该预测的
+#: 发布日（把点时可见性印在表里）。清单同时是模板装载的可选字段——四列都是规格的一部分。
+FORWARD_PE_FIELDS: tuple[str, ...] = ("close", "fwd_pe", "est_period", "est_asof")
+
 #: 参考表类 dataset（ADR-0016）：字段清单按表各自声明，装载时按 dataset 类别校验。
 TABLE_DATASETS: dict[str, tuple[str, ...]] = {
     "fundamental_head": FUNDAMENTAL_HEAD_FIELDS,
+    "forward_pe": FORWARD_PE_FIELDS,
     "daily_basic": (
         "close",
         "pe",

@@ -21,9 +21,11 @@ templates:
     task: 判断未来 1–4 周的机会与风险，给出趋势、量价关系、支撑与压力位
     data:
       - {dataset: daily, days: 120}
-      # 同窗对齐：三张参考表与日K同一个 days（设计合成 §2.2 同一手法），换窗只改日K那行
-      # 再把三行跟着改——不同窗的估值与涨跌停会把"那天"对错位。
+      # 同窗对齐：四张参考表与日K同一个 days（设计合成 §2.2 同一手法），换窗只改日K那行
+      # 再把四行跟着改——不同窗的估值与涨跌停会把"那天"对错位。
       - {dataset: daily_basic, days: 120, fields: [close, pe_ttm, pb, turnover_rate]}
+      # 远期 PE（ADR-0022 决定 2）：与日K同 days 同窗逐日点时；四列是规格不是可选项。
+      - {dataset: forward_pe, days: 120, fields: [close, fwd_pe, est_period, est_asof]}
       - {dataset: stk_limit, days: 120, fields: [up_limit, down_limit]}
       - {dataset: index_daily, days: 120, fields: [open, high, low, close, volume, amount]}
       - {dataset: minute_60, days: 60}
@@ -44,6 +46,7 @@ templates:
     data:
       - {dataset: daily, days: 250}
       - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
+      - {dataset: forward_pe, days: 250, fields: [close, fwd_pe, est_period, est_asof]}
       - {dataset: stk_limit, days: 250, fields: [up_limit, down_limit]}
       - {dataset: index_daily, days: 250, fields: [open, high, low, close, volume, amount]}
       - {dataset: minute_60, days: 90}
@@ -62,6 +65,9 @@ templates:
     data:
       - {dataset: daily, days: 750}
       - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
+      # 远期 PE 与同模板的估值序列同窗（250，ADR-0016 的长期投资估值窗），不跟日K的 750：
+      # 估值族内部同窗对齐，250 也正是一年交易日——点名规格「长期投资 250」。
+      - {dataset: forward_pe, days: 250, fields: [close, fwd_pe, est_period, est_asof]}
       - {dataset: forecast, days: 500, fields: [type, net_profit_min, net_profit_max]}
       - {dataset: stk_limit, days: 750, fields: [up_limit, down_limit]}
     format: markdown

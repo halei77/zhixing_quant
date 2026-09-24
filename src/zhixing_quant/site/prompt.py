@@ -39,6 +39,10 @@ _MINUTE = f"{layout.MINUTE_5.rsplit('_', 1)[0]}_"
 BENCHMARK = "000001.SH"
 BENCHMARK_NAME = "上证指数"
 
+#: `forward_pe` 读 report_rc 全史的左界：实测最早研报 2019-03-29 起（2026-09-25 窗口探测），
+#: 1990 是"早于任何 A 股研报史"的兜底——读到的都是盘上真有的分区，空年份直接跳过。
+_REPORT_RC_HISTORY_START = date(1990, 1, 1)
+
 
 class TemplateNotReady(ValueError):
     """`status: pending` 的模板：它要的数据组件还没落地（决定 5）。
@@ -163,6 +167,7 @@ def title_of(dataset: str) -> str:
             "forecast": "业绩预告",
             "stk_limit": "涨跌停价",
             "index_daily": f"大盘（{BENCHMARK_NAME} {BENCHMARK}）",
+            "forward_pe": "远期PE（逐日点时）",
         }.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
 
@@ -286,6 +291,35 @@ def build(
                 Section(
                     title=heading(selection, len(rows)),
                     body=table.render_forecast(rows, format=template.format),
+                )
+            )
+            continue
+        if selection.dataset == "forward_pe":
+            # 远期 PE（ADR-0022 决定 2）：服务端现算、不落派生表——落盘会把 as_of 钉死在回填
+            # 那晚。日线读**不复权**（close 与 daily_basic 口径行一致，不与后复权K混口径）；
+            # report_rc 读**全史**：窗口起点那天的"当时最新"预测可能发布在窗口之前，只读窗内
+            # 会把那段读成"无预测"。逐日点时对齐（report_date ≤ t）在纯层 `table.align_forward_pe`。
+            bars_raw = read_bars(
+                code, start, end, adjust="raw", dataset=layout.DAILY, root=config.parquet_dir()
+            )
+            forecasts = read_table(
+                "report_rc", code, _REPORT_RC_HISTORY_START, end, root=config.parquet_dir()
+            )
+            aligned = table.align_forward_pe(bars_raw, forecasts)
+            if not aligned or all(row.fwd_pe is None for row in aligned):
+                # 窗口里一天都算不出远期 PE（没研报 / 都取不到未来财年分母）→ 整节交代
+                # （ADR-0020），不给一张全「—」的表冒充"那段时间没有波动"。
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            with_data += 1
+            sections.append(
+                Section(
+                    title=heading(selection, len(aligned)),
+                    body=table.render_forward_pe(
+                        aligned,
+                        fields=selection.fields or (),
+                        format=template.format,
+                    ),
                 )
             )
             continue

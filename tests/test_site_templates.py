@@ -56,17 +56,28 @@ def test_the_shipped_table_loads() -> None:
     ready = [t.name for t in cfg.templates if t.status == "ready"]
     # 长期投资 2026-09-22 翻 ready（ADR-0016 估值组件）；建仓价分析等 earnings 序列仍 pending
     assert ready == ["短期投资", "波段", "长期投资"]
-    # 固定头在最前（ADR-0022 决定 1：always_data 装载时合并），三张参考表与日K同窗。
+    # 固定头在最前（ADR-0022 决定 1：always_data 装载时合并），参考表与日K同窗；
+    # forward_pe（ADR-0022 决定 2）四列随行、与日K同 days（点名规格：短期 120/波段 250/长期 250）。
     assert [(s.dataset, s.days) for s in cfg.by_name("短期投资").data] == [
         ("fundamental_head", 1),
         ("daily", 120),
         ("daily_basic", 120),
+        ("forward_pe", 120),
         ("stk_limit", 120),
         ("index_daily", 120),
         ("minute_60", 60),
         ("minute_30", 30),
         ("minute_5", 10),
     ]
+    for name, days in (("波段", 250), ("长期投资", 250)):
+        entry = [s for s in cfg.by_name(name).data if s.dataset == "forward_pe"]
+        assert [(s.dataset, s.days, s.fields) for s in entry] == [
+            (
+                "forward_pe",
+                days,
+                ("close", "fwd_pe", "est_period", "est_asof"),
+            )
+        ], f"{name} 的远期 PE 要 {days} 天且 fields 四列齐（ADR-0022 决定 2）"
 
 
 def test_a_missing_file_is_not_an_empty_table(tmp_path: Path) -> None:

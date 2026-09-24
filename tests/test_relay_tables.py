@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -444,3 +444,307 @@ def test_main_maps_network_failure_to_exit_two(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(client_mod, "fetch", boom)
     code = relay_cli.main(["pull", "--table", "stk_limit", "--day", "2026-09-18"])
     assert code == 2, "双源全灭是没开始，不是数据坏"
+
+
+# ── report_rc：第二种分页形状（页 < limit 即到底）与它的发前拒 ─────────────────
+
+RC_FIELDS = ["ts_code", "report_date", "org_name", "quarter", "eps", "pe"]
+#: 分页守卫的满页单元：这族的顶就是 5000（2026-09-25 实测 limit=5001 静默回 5000）。
+RC_CAP = 5000
+
+
+def _rc_item(
+    day: str = "20260115",
+    org: str = "中泰证券",
+    quarter: str = "2026Q4",
+    eps: str = "70.97",
+    pe: str = "18.11",
+) -> list[str]:
+    return ["600519.SH", day, org, quarter, eps, pe]
+
+
+def _rc_body(items: list[list[str]], fields: list[str] | None = None) -> dict[str, Any]:
+    return {"code": 0, "data": {"fields": fields or RC_FIELDS, "items": items}}
+
+
+def test_forecast_oversize_page_size_is_refused_before_any_request() -> None:
+    """高基数接口 max_limit=1000（2026-09-25 实测 400）：超上限的 page_size 发前就拒。
+
+    transport 零调用与 ngw 的 count≥1500 同款——超上限的请求必 400，重发一万次也是 400。
+    """
+    from zhixing_quant.sources.relay.pages import fetch_pages
+
+    calls: list[object] = []
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(_params)
+        raise AssertionError("不该发请求")
+
+    with pytest.raises(ValueError, match="max_limit=1000"):
+        fetch_pages("forecast", {"ts_code": "600519.SH"}, fetch=fetch, page_size=5000)
+    assert calls == [], "超上限参数必须在发请求前拒——fail-closed 不是 fail-slow"
+
+
+def test_report_rc_page_above_the_silent_5000_cap_is_refused_before_any_request() -> None:
+    """`limit=5001` 静默顶成 5000 行（2026-09-25 实测）：超顶参数发前拒，硬响。
+
+    不拒的后果是"页 < limit"恒真——5000 < 5001，截断被读成拉完，丢的行不会出现在任何报告里。
+    """
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    calls: list[object] = []
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(_params)
+        raise AssertionError("不该发请求")
+
+    with pytest.raises(ValueError, match="limit=5001 实测被静默顶成 5000"):
+        fetch_pages_short("report_rc", {"ts_code": "600519.SH"}, fetch=fetch, page_size=RC_CAP + 1)
+    assert calls == []
+
+
+def test_report_rc_page_below_the_cap_is_refused_too() -> None:
+    """比顶小的页同样拒：翻到第 5000 行会撞源顶（跨顶 offset 实测回空页），把截断读成拉完。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    with pytest.raises(ValueError, match="只认 page_size=5000"):
+        fetch_pages_short("report_rc", {}, fetch=lambda _a, _p: ("rds", {}), page_size=1000)
+
+
+def test_report_rc_short_page_means_bottom() -> None:
+    """页 < limit 即到底：这一族 has_more 恒 False（count 只是 limit 回显），短页是唯一信号。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    calls: list[dict[str, Any]] = []
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(dict(params))
+        return "rds", _rc_body([_rc_item(), _rc_item(day="20260116")])
+
+    source, items, fields, total = fetch_pages_short(
+        "report_rc", {"ts_code": "600519.SH"}, fetch=fetch, today=date(2026, 9, 25)
+    )
+    assert source == "rds" and len(items) == 2 and fields == RC_FIELDS
+    assert total is None, "count 是 limit 回显不是总数，拿它当总数就是把回显读成拉完"
+    assert len(calls) == 1 and calls[0]["offset"] == 0 and calls[0]["limit"] == RC_CAP
+
+
+def test_report_rc_full_page_splits_the_date_window_until_each_half_fits() -> None:
+    """满页 ≠ 到底：单查询静默只留最新 5000 行（实测全史首行 20210826、窗内却有 20190329）。
+    撞顶按 start_date/end_date 对半切窗重查，两半单调不重叠，丢的更早行靠切窗捞回来。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    today = date(2026, 9, 25)
+    calls: list[dict[str, Any]] = []
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(dict(params))
+        if "start_date" not in params:
+            return "rds", _rc_body([_rc_item()] * RC_CAP)  # 首查顶满
+        start = date(int(str(params["start_date"])[:4]), 1, 1)
+        if start.year <= 2000:
+            return "rds", _rc_body([])  # 左半空窗（1990–2008 没有研报）
+        return "rds", _rc_body([_rc_item(), _rc_item(day="20190401", org="国泰君安")])
+
+    _source, items, _fields, total = fetch_pages_short(
+        "report_rc", {"ts_code": "600519.SH"}, fetch=fetch, today=today
+    )
+    assert total is None
+    assert len(calls) == 3, "首查满 → 左右两半各一次；左半空窗短页即底，不再下切"
+    midpoint = date(1990, 1, 1) + (today - date(1990, 1, 1)) / 2
+    assert calls[1]["start_date"] == "19900101"
+    assert calls[1]["end_date"] == midpoint.strftime("%Y%m%d")
+    assert calls[2]["start_date"] == (midpoint + timedelta(days=1)).strftime("%Y%m%d")
+    assert calls[2]["end_date"] == "20260925"
+    assert len(items) == 2, "满页那份 5000 行不入库本——重查的两半才是完整集，不许与它叠加出重复"
+
+
+def test_report_rc_single_day_window_still_full_hard_fails() -> None:
+    """切到单日仍满页：一天 5000 行研报不是数据是事故——硬响，不冒充拉完。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        return "rds", _rc_body([_rc_item()] * RC_CAP)
+
+    with pytest.raises(ValueError, match="硬响"):
+        fetch_pages_short(
+            "report_rc",
+            {"start_date": "20260115", "end_date": "20260115"},
+            fetch=fetch,
+            today=date(2026, 9, 25),
+        )
+
+
+def test_report_rc_fields_drift_across_split_windows_is_refused() -> None:
+    """缩窗前后各页 fields 漂了 = 源改了列序/列集，半份 A 半份 B 的拼接不可信。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    seen = {"n": 0}
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        if "start_date" not in params:
+            return "rds", _rc_body([_rc_item()] * RC_CAP)
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return "rds", _rc_body([_rc_item()])
+        return "rds", _rc_body([_rc_item()], fields=["ts_code", "report_date"])
+
+    with pytest.raises(ValueError, match="fields 变了"):
+        fetch_pages_short("report_rc", {}, fetch=fetch, today=date(2026, 9, 25))
+
+
+def test_report_rc_over_returned_page_is_taken_as_the_whole_harvest() -> None:
+    """源忽略 limit 一次全吐（promax 形）：行比问的还多就是它能给的全部，就地返回。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        return "rds", _rc_body([_rc_item()] * (RC_CAP + 7))
+
+    _source, items, _fields, _total = fetch_pages_short(
+        "report_rc", {}, fetch=fetch, today=date(2026, 9, 25)
+    )
+    assert len(items) == RC_CAP + 7
+
+
+# ── report_rc 解析与值域（ADR-0015 决定 3） ────────────────────────────────────
+
+
+def test_report_rc_parse_keeps_valid_rows_and_rejects_dirty_values_by_row() -> None:
+    """脏值拒收（任务点名）：quarter 的 null/'Q'、空 eps、空券商——**拒行不拒批**。
+
+    整批拒会让这张表永远进不了库：真实 5000 行里就带 7 个脏 quarter、23 个空 eps
+    （2026-09-25 实测 600519）。跳行既拒了脏值又收得下真数据（daily_basic close-null 同款）。
+    """
+    from zhixing_quant.sources.relay.tables import parse_report_rc
+
+    items = [
+        _rc_item(),
+        _rc_item(quarter="None"),  # JSON null 被 str() 成 "None"
+        _rc_item(quarter="Q"),  # 字面脏值 'Q'
+        _rc_item(eps="None"),  # 没有分母的行
+        _rc_item(org="None"),  # 没有行身份的行
+    ]
+    rows = parse_report_rc("rds", RC_FIELDS, items)
+    assert len(rows) == 1, f"四行脏值必须全部拒行，留下的是 {rows}"
+    row = rows[0]
+    assert row.quarter == "2026Q4" and row.eps == 70.97 and row.pe == 18.11
+    assert row.symbol == "600519" and row.report_date == date(2026, 1, 15)
+
+
+def test_report_rc_parse_survives_field_order_drift_and_missing_column() -> None:
+    from zhixing_quant.sources.relay.tables import parse_report_rc
+
+    shuffled = ["pe", "quarter", "ts_code", "eps", "org_name", "report_date"]
+    raw = ["18.11", "2026Q4", "600519.SH", "70.97", "中泰证券", "20260115"]
+    rows = parse_report_rc("rds", shuffled, [raw])
+    assert rows[0].org_name == "中泰证券" and rows[0].eps == 70.97
+    # 缺列（fields 里没有 eps）：整批拒——字段完备是表级校验的第一条，缺哪列都少一维
+    with pytest.raises(ValueError, match="缺字段"):
+        parse_report_rc(
+            "rds",
+            ["ts_code", "report_date", "org_name", "quarter", "pe"],
+            [["600519.SH", "20260115", "中泰证券", "2026Q4", "18.11"]],
+        )
+
+
+def test_report_rc_parse_rejects_duplicate_keys_and_garbage_numbers() -> None:
+    from zhixing_quant.sources.relay.tables import parse_report_rc
+
+    with pytest.raises(ValueError, match="两次"):
+        parse_report_rc("rds", RC_FIELDS, [_rc_item(), _rc_item()])  # 同键同值也不许叠页
+    with pytest.raises(ValueError, match="YYYYMMDD"):
+        parse_report_rc("rds", RC_FIELDS, [_rc_item(day="2026-01-15")])
+    with pytest.raises(ValueError, match="暴涨"):  # 不可解析的 eps 是形状级错误，整批拒
+        parse_report_rc("rds", RC_FIELDS, [_rc_item(eps="暴涨")])
+
+
+def test_report_rc_parse_keeps_negative_eps_for_the_record() -> None:
+    """eps≤0 的亏损预测如实入库（源的真话），作不作分母由现算层判——存储不改写源的数。"""
+    from zhixing_quant.sources.relay.tables import parse_report_rc
+
+    rows = parse_report_rc("rds", RC_FIELDS, [_rc_item(eps="-1.5", pe="None")])
+    assert rows[0].eps == -1.5 and rows[0].pe is None
+
+
+# ── report_rc 表级与锚点 ────────────────────────────────────────────────────────
+
+
+def test_report_rc_storage_roundtrip_idempotent_and_conflict_throws(tmp_path: Any) -> None:
+    from zhixing_quant.sources.relay.tables import ReportRcRow
+    from zhixing_quant.storage.write import BarConflict
+
+    row = ReportRcRow("rds", "600519", date(2026, 1, 15), "中泰证券", "2026Q4", 70.97, 18.11)
+    first = tables.write_table([row], table="report_rc", root=tmp_path)
+    assert (first.added, first.rewritten) == (1, 1)
+    again = tables.write_table([row], table="report_rc", root=tmp_path)
+    assert again.rewritten == 0, "同键同值重跑不重写"
+    twin = ReportRcRow("rds", "600519", date(2026, 1, 15), "中泰证券", "2026Q4", 71.0, 18.11)
+    with pytest.raises(BarConflict, match="两条不同的行"):
+        tables.write_table([row, twin], table="report_rc", root=tmp_path)
+    back = tables.read_table(
+        "report_rc", "600519", date(2026, 1, 1), date(2026, 2, 1), root=tmp_path
+    )
+    assert [r.quarter for r in back] == ["2026Q4"] and back[0].eps == 70.97
+
+
+def test_report_rc_anchor_refuses_future_publications_and_bad_quarters() -> None:
+    """行级可验（与 forecast 同族）：发布日在未来、quarter 不成形 → 整批拒，一行不写。"""
+    from zhixing_quant.sources.relay.tables import ReportRcRow
+
+    good = ReportRcRow("rds", "600519", date(2026, 1, 15), "中泰证券", "2026Q4", 70.97, None)
+    future = ReportRcRow("rds", "600519", date(2099, 1, 1), "中泰证券", "2026Q4", 1.0, None)
+    bad_quarter = ReportRcRow("rds", "600519", date(2026, 1, 15), "中泰证券", "Q", 70.97, None)
+    anchor = relay_cli.ANCHORS["report_rc"]
+    problems, unanchored, kept = anchor([good, future, bad_quarter], None, None, None)
+    assert len(problems) == 2 and unanchored == 0 and kept == [good]
+
+
+def test_pull_report_rc_is_a_short_page_table_end_to_end(tmp_path: Any) -> None:
+    """pull 逐票路径整条接通：date_param 不带 trade_date（研报表没有按日窗口）、
+    走短页守卫、过行级锚、落盘。"""
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        assert "trade_date" not in params, "report_rc 按 ts_code 拉全史，没有按日窗口"
+        assert params["limit"] == RC_CAP
+        return "rds", _rc_body([_rc_item()])
+
+    report, code, ledger = relay_cli._pull(
+        _args(table="report_rc", symbols="600519"),
+        fetch=fetch,
+        prev_ref_of=lambda _symbol, _day: 10.0,
+        same_ref_of=lambda _symbol, _day: 10.0,
+        limit_of=lambda _symbol: 10.0,
+        root=tmp_path,
+    )
+    assert code == 0 and ledger is not None and ledger.added == 1
+    back = tables.read_table(
+        "report_rc", "600519", date(2026, 1, 1), date(2026, 2, 1), root=tmp_path
+    )
+    assert back and back[0].org_name == "中泰证券"
+    assert "report_rc" in report
+
+
+def test_pull_page_size_defaults_to_the_table_cap(tmp_path: Any) -> None:
+    """--page-size 缺省 = 按表上限：forecast 显式 5000 会被发前拒，缺省路径给 1000。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages
+
+    args = _args(table="forecast", symbols="600519")
+    args.page_size = None  # CLI 缺省
+
+    seen: list[dict[str, Any]] = []
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        seen.append(dict(params))
+        return "rds", {"code": 0, "data": {"fields": [], "items": []}}
+
+    report, code, _ledger = relay_cli._pull(
+        args,
+        fetch=fetch,
+        prev_ref_of=lambda _s, _d: None,
+        same_ref_of=lambda _s, _d: None,
+        root=tmp_path,
+    )
+    assert code == 0 and seen and seen[0]["limit"] == 1000, "forecast 缺省必须落到 max_limit=1000"
+    assert "没有行" in report
+    with pytest.raises(ValueError, match="上限 1000"):
+        fetch_pages("forecast", {}, fetch=fetch, page_size=5000)  # 显式超上限：发前拒

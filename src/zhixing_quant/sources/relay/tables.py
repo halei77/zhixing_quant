@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from typing import Any, NamedTuple
@@ -360,6 +361,78 @@ def parse_index_daily(
     return rows
 
 
+class ReportRcRow(NamedTuple):
+    """`report_rc` 一行：一家券商某个发布日对某个报告期的盈利预测（远期 PE 的正源原料）。
+
+    主键是 **(report_date, org_name, quarter)**——Qoute 的 `fina_report_rc` 同款。
+    不是任务建议的 (report_date, quarter)：2026-09-25 实测 600519.SH 首 5000 行里，
+    1684 个 (report_date, quarter) 组合有 **691 个（41%）** 同日多券商（20260818 的 2026Q4
+    一行有 6 家），按两列做主键会把四成真数据判成"批内冲突"。三列键在同页实测 0 重复、
+    (date,org,quarter) 内 eps 多值 0——冲突抛不裁决的语义原样保留在三列键上。
+
+    `eps` 必填（缺它的行不进表——见 parse 注释）；`pe` 是源自带的远期 PE，大量为 null
+    （5000 行里 879 个），只当对账旁证不进提示词。
+    """
+
+    source: str
+    symbol: str
+    report_date: date
+    org_name: str
+    quarter: str
+    eps: float
+    pe: float | None
+
+
+#: quarter 的形状：YYYYQn（2026Q4）。实测脏值有 JSON null（6 个）与字面 'Q'（1 个）——
+#: 都在这里被拒行，不进表（ADR-0015 决定 3 的值域项；行级拒而非整批拒，理由见 parse）。
+_QUARTER_PATTERN = re.compile(r"\d{4}Q[1-4]")
+
+
+def parse_report_rc(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[ReportRcRow]:
+    """一页 report_rc → 校验过的行。
+
+    两种"拒"分得很清（照 daily_basic 的先例）：
+    - **缺列 / 主键重复 / 日期不是 YYYYMMDD / eps 是不可解析的脏串 → 整批 ValueError**：
+      形状级错误说明源给错了东西，一页都不可信。
+    - **行级跳行**：quarter 不是 YYYYQn（脏值 null/'Q' 实测存在）、eps 为空（对远期 PE 零
+      信息量）、org_name 空（行身份缺一半，同日多券商的 tie-break 无从谈起）——这三种行在
+      600519 的真实 5000 行里就带着（7 行脏 quarter、23 行空 eps），整批拒会让这张表永远
+      进不了库，跳行才既拒了脏值又收得下真数据。
+    """
+    rows: list[ReportRcRow] = []
+    seen: set[tuple[date, str, str]] = set()
+    for raw in items:
+        symbol = normalize_code(_field(raw, fields, "ts_code"))
+        report_date = _as_date(_field(raw, fields, "report_date"))
+        org_name = _field(raw, fields, "org_name").strip()
+        quarter = _field(raw, fields, "quarter").strip()
+        if not _QUARTER_PATTERN.fullmatch(quarter):
+            continue  # 脏 quarter（null 解出的 ''、字面 'Q'）：拒行不拒批
+        if not org_name or org_name in ("None", "nan", "NULL", "null"):
+            continue  # 无券商名（含 JSON null 被 str() 成 "None"）的行没有行身份
+        eps_text = _field(raw, fields, "eps")
+        if eps_text in ("", "None", "nan", "NULL", "null"):
+            continue  # 没有分母的预测对远期 PE 零信息量——跳行不崩（daily_basic close-null 同款）
+        eps = float(eps_text)  # 不可解析的脏串在这里炸整批
+        pe_text = _field(raw, fields, "pe")
+        pe: float | None
+        if pe_text in ("", "None", "nan", "NULL", "null"):
+            pe = None
+        else:
+            pe_value = float(pe_text)
+            pe = None if pe_value != pe_value else pe_value  # NaN → None
+        key = (report_date, org_name, quarter)
+        if key in seen:
+            raise ValueError(
+                f"{symbol}@{report_date} {org_name} {quarter} 在同一页里出现两次（分页重叠）"
+            )
+        seen.add(key)
+        rows.append(ReportRcRow(source, symbol, report_date, org_name, quarter, eps, pe))
+    return rows
+
+
 PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], list[Any]]] = {
     "stk_limit": parse_stk_limit,
     "daily_basic": parse_daily_basic,
@@ -367,4 +440,5 @@ PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], li
     "fina_audit": parse_fina_audit,
     "stk_holdernumber": parse_holder_number,
     "index_daily": parse_index_daily,
+    "report_rc": parse_report_rc,
 }

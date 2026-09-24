@@ -51,14 +51,21 @@ from zhixing_quant.domain.symbol import normalize_code
 from zhixing_quant.sources.akshare.fetch import market_of
 from zhixing_quant.sources.jobs.daily import REASON_BREAKER
 from zhixing_quant.sources.relay.client import RelayUnavailable
-from zhixing_quant.sources.relay.pages import FetchFn, fetch_pages
+from zhixing_quant.sources.relay.pages import (
+    SHORT_PAGE_TABLES,
+    FetchFn,
+    fetch_pages,
+    fetch_pages_short,
+    page_limit_of,
+)
 from zhixing_quant.sources.relay.tables import PARSERS
 from zhixing_quant.storage import layout, tables
 from zhixing_quant.storage.query import read_bars
 
-#: 回填只认这三张表（任务 #53 圈定）。别的参考表要先配锚、实测过窗口参数才许进来——
-#: 表名打错或没实测就开跑，在这里是退出码 2 的 ValueError，不是"先跑了再说"。
-BACKFILL_TABLES = ("daily_basic", "forecast", "stk_limit")
+#: 回填认这几张表（#53 圈定三张 + #59 C 刀的 report_rc）。别的参考表要先配锚、实测过
+#: 窗口参数才许进来——表名打错或没实测就开跑，在这里是退出码 2 的 ValueError，不是
+#: "先跑了再说"。
+BACKFILL_TABLES = ("daily_basic", "forecast", "stk_limit", "report_rc")
 
 #: 按日序列表：续跑判据 = 日线有量交易日 − 盘上已有。公告类（forecast）没有应有集，
 #: 走"拉全史 + 主键幂等跳过"，见模块说明第 2 条。
@@ -247,13 +254,19 @@ def fetch_range(
     20240102..20240110 精确回 7 行、has_more=False。逐票 + 窗口把单查询压到几百行，rds 的
     5000 行静默截断碰不到；真撞上了 `pages.fetch_pages` 会硬响（ADR-0015 决定 3）。
 
-    `start`/`end` 给 None = 公告类全史拉取（forecast 没有按日窗口，主键去重交给
+    `start`/`end` 给 None = 公告类全史拉取（forecast/report_rc 没有按日窗口，主键去重交给
     `write_table` 的幂等）。promax 即便不认这两个参数，本地还有窗口过滤兜底（见 run）。
+
+    **两种分页形状各走各的守卫**（2026-09-25 实测）：has_more 族（daily_basic/forecast/
+    stk_limit）进 `fetch_pages`；`report_rc` 族（has_more 恒 False、单查询静默顶 5000 行、
+    offset≥5000 空页）进 `fetch_pages_short`——页 < limit 即到底，满页按日期二分缩窗。
     """
     params: dict[str, object] = {"ts_code": ts_code_of(symbol)}
     if start is not None and end is not None:
         params["start_date"] = start.strftime("%Y%m%d")
         params["end_date"] = end.strftime("%Y%m%d")
+    if table in SHORT_PAGE_TABLES:
+        return fetch_pages_short(table, params, fetch=fetch, page_size=page_size)
     return fetch_pages(table, params, fetch=fetch, page_size=page_size)
 
 
@@ -301,7 +314,7 @@ def run(
     now: datetime | None = None,
     attempts: int = 3,
     breaker: int = 5,
-    page_size: int = 5000,
+    page_size: int | None = None,
     backoff: float = 5.0,
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[str], None] | None = None,
@@ -312,6 +325,11 @@ def run(
     静默读空、判据全绿），报告目录默认了就会覆盖别人的文件——两者都由 CLI 用
     `config.parquet_dir()` / `config.reports_dir()` 说清楚。
 
+    `page_size` 缺省 = **按表取上限**（`pages.page_limit_of`）：forecast 这类高基数接口实测
+    `max_limit=1000`，全局 5000 会整池 HTTP 400（2026-09-25 实测 5568 连败）。显式传超上限
+    的值不在这里兜底——`pages.fetch_pages` 发前拒（fail-closed，transport 零调用），错参数
+    要响在调用方眼前，不许静默改成另一个尺寸继续跑。
+
     `end` 缺省 = 今天（本地钟，与 pull 的 `date.today()` 同一个"今天"，不走 UTC——坑 #32
     的 UTC/本地差一天在这里同样会咬人）；`now` 是给测试的注入点。
     """
@@ -320,7 +338,7 @@ def run(
             f"表 {table!r} 不在回填支持清单 {list(BACKFILL_TABLES)} 里："
             "每张表要先配锚、实测窗口参数才许回填（ADR-0015 决定 3，没有批量豁免）"
         )
-    if table not in PARSERS:  # 防 BACKFILL_TABLES 与 PARSERS 漂移；上面已限死三张，理论不达
+    if table not in PARSERS:  # 防 BACKFILL_TABLES 与 PARSERS 漂移；上面已限死，理论不达
         raise ValueError(f"表 {table!r} 没有登记解析器")
     if attempts < 1 or breaker < 1:
         raise ValueError(
@@ -329,6 +347,7 @@ def run(
         )
     if not symbols:
         raise ValueError("票池是空的：--symbols 没解析出代码，或主数据在册名单为空")
+    resolved_page_size = page_size if page_size is not None else page_limit_of(table)
     moment = now if now is not None else datetime.now()
     resolved_end = end if end is not None else moment.date()
     if resolved_end < start:
@@ -357,7 +376,7 @@ def run(
             anchor=anchor,
             root=root,
             attempts=attempts,
-            page_size=page_size,
+            page_size=resolved_page_size,
             backoff=backoff,
             sleep=sleep,
         )
@@ -388,7 +407,7 @@ def run(
         scope=scope,
         attempts=attempts,
         breaker=breaker,
-        page_size=page_size,
+        page_size=resolved_page_size,
         outcomes=tuple(outcomes),
         sources=tuple(sorted(source_counts.items())),
         coverage_symbols=cov_symbols,

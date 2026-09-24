@@ -127,6 +127,22 @@ class IndexDailyRow(NamedTuple):
     amount: float | None
 
 
+class ReportRcRow(NamedTuple):
+    """与 `sources.relay.tables.ReportRcRow` 同形同序（结构互认见模块说明）。
+
+    主键三列 (report_date, org_name, quarter)：同发布日同券商同报告期一行，冲突抛不裁决
+    （2026-09-25 实测 41% 的 (date, quarter) 是同日多券商，两列键装不下真数据）。
+    """
+
+    source: str
+    symbol: str
+    report_date: date
+    org_name: str
+    quarter: str
+    eps: float
+    pe: float | None
+
+
 SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="stk_limit",
@@ -234,6 +250,22 @@ SPECS: tuple[TableSpec, ...] = (
         key=("trade_date",),
         order=("trade_date",),
         row=DailyBasicRow,
+    ),
+    TableSpec(
+        name="report_rc",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("report_date", "DATE"),
+            ("org_name", "VARCHAR"),
+            ("quarter", "VARCHAR"),
+            ("eps", "DOUBLE"),
+            ("pe", "DOUBLE"),
+        ),
+        key=("report_date", "org_name", "quarter"),
+        order=("report_date", "org_name", "quarter"),
+        row=ReportRcRow,
+        date_field="report_date",
     ),
 )
 _BY_NAME = {spec.name: spec for spec in SPECS}

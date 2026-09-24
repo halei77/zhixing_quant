@@ -31,7 +31,14 @@ from typing import Any
 from zhixing_quant import config
 from zhixing_quant.backtest.cli import check_range
 from zhixing_quant.sources.jobs import backfill
-from zhixing_quant.sources.relay.pages import FetchFn, fetch_pages
+from zhixing_quant.sources.relay.pages import (
+    SHORT_PAGE_TABLES,
+    FetchFn,
+    fetch_pages,
+    fetch_pages_short,
+    page_limit_of,
+)
+from zhixing_quant.sources.relay.tables import _QUARTER_PATTERN
 from zhixing_quant.storage import tables
 from zhixing_quant.storage.tables import TableWriteReport
 
@@ -64,7 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     pull.add_argument("--table", default="stk_limit", help="参考表名，默认 stk_limit")
     pull.add_argument("--day", required=True, metavar="YYYY-MM-DD", help="要哪个交易日")
     pull.add_argument("--symbols", default=None, help="逗号分隔的票池过滤；缺省全市场入库")
-    pull.add_argument("--page-size", type=int, default=5000, help="分页大小，缺省 5000")
+    pull.add_argument(
+        "--page-size",
+        type=int,
+        default=None,
+        help="分页大小，缺省按表取上限（5000；forecast 这类高基数接口实测 1000）。"
+        "超上限发前拒，不发必 400 的那一发",
+    )
     pull.add_argument(
         "--out", type=Path, default=None, help="报告目录，默认 <数据根>/reports/relay/<今天>"
     )
@@ -120,15 +133,20 @@ def fetch_all_pages(
     """分页拉完整天。返回 (供数源, 原始 items, fields, 源声称的总行数或 None)。
 
     守卫（**截断必须硬响**，2026-09-22 实测：rds offset≥5000 空页却 has_more=True）住在
-    `relay.pages.fetch_pages` 一处——pull 的按日拉取与 backfill 的逐票区间撞的是同一个
-    5000 行上限，两份守卫迟早漂成"一边响一边静默丢"。这里只负责把"哪天、哪票"拼成参数：
-    逐票模式绕开单次查询的 5000 行截断，一票一天一两行，永远碰不到上限。
+    `relay.pages` 一处——pull 的按日拉取与 backfill 的逐票区间撞的是同一个 5000 行上限，
+    两份守卫迟早漂成"一边响一边静默丢"。**两种分页形状各走各的守卫**（2026-09-25 实测）：
+    has_more 族进 `fetch_pages`；`report_rc` 族（has_more 恒 False、单查询静默顶 5000）进
+    `fetch_pages_short`（页 < limit 即到底 + 满页按日期二分缩窗）。表名是唯一分流依据。
+    这里只负责把"哪天、哪票"拼成参数：逐票模式绕开单次查询的 5000 行截断，一票一天一两行，
+    永远碰不到上限。
     """
     params: dict[str, object] = {}
     if date_param is not None:
         params[date_param] = day.strftime("%Y%m%d")
     if symbol is not None:
         params["ts_code"] = backfill.ts_code_of(symbol)
+    if table in SHORT_PAGE_TABLES:
+        return fetch_pages_short(table, params, fetch=fetch, page_size=page_size)
     return fetch_pages(table, params, fetch=fetch, page_size=page_size)
 
 
@@ -264,6 +282,35 @@ def _anchor_forecast(
     return problems, unanchored, anchored
 
 
+def _anchor_report_rc(
+    rows: list[Any],
+    _prev_ref_of: RefFn,
+    _same_ref_of: RefFn,
+    _limit_of: LimitPctFn,
+) -> tuple[list[str], int, list[Any]]:
+    """report_rc 的锚：行级可验（与 forecast 同族——研报发布没有逐行可比的干净区同口径行）。
+
+    `report_date` 不许在未来（发布日 ≤ 今天），quarter 形状再验一遍（解析器已拒，这里防
+    绕过解析器的调用）。**为什么不拿 pe×eps 对昨收当逐行闸门**：2026-09-25 对 600519 的
+    1376 组实测里 pe×eps≈前一交易日收盘的中位偏差 0.18%、≤5% 占 98.7%，但源自身带着陈旧 pe
+    （最大一组隐含价偏 93%）——逐行硬闸会把整批真数据永远挡在门外。抽样互核（≥20 组、
+    与干净区日线对账）按 04 §五 转接专项在接表验收里做，数字进报告，不冒充逐行闸门。
+    """
+    problems: list[str] = []
+    unanchored = 0
+    anchored: list[Any] = []
+    today = date.today()
+    for row in rows:
+        if row.report_date > today:
+            problems.append(f"{row.symbol}@{row.report_date} report_date 在未来（研报发布日）")
+            continue
+        if not _QUARTER_PATTERN.fullmatch(row.quarter):
+            problems.append(f"{row.symbol}@{row.report_date} quarter {row.quarter!r} 不是 YYYYQn")
+            continue
+        anchored.append(row)
+    return problems, unanchored, anchored
+
+
 #: 表名 → 锚点。没登记锚的表不许拉（ADR-0015 决定 3：每张表配锚点对账，没有豁免）。
 ANCHORS: dict[str, AnchorFn] = {
     "stk_limit": _anchor_stk_limit,
@@ -274,6 +321,7 @@ ANCHORS: dict[str, AnchorFn] = {
     "fina_audit": _anchor_forecast,
     "stk_holdernumber": _anchor_forecast,
     "index_daily": _anchor_forecast,  # OHLC 不变量在解析器；行情日没有"报告期"概念，行级可验即全部
+    "report_rc": _anchor_report_rc,  # 研报发布日：行级可验 + 未来发布日拒；抽样互核见 _docstring
 }
 
 #: 档位查询注入点：真跑用 `_limit_pct_of`（主数据 + gate.toml），测试注入常数表。
@@ -377,11 +425,14 @@ def _pull(
         raise ValueError(
             f"表 {args.table!r} 没有登记解析器或锚点对账：ADR-0015 决定 3 不允许无锚入干净区"
         )
+    # page_size 缺省 = 按表上限（forecast 这类高基数接口实测 max_limit=1000，5000 直接 400；
+    # 显式给超上限的值由 pages 层发前拒，不发必错的那一发）。
+    page_size = args.page_size if args.page_size is not None else page_limit_of(args.table)
     source = ""
     scope = "全市场"
     if args.symbols is None:
         source, items, fields, total = fetch_all_pages(
-            args.table, args.day_parsed, fetch=fetch, page_size=args.page_size
+            args.table, args.day_parsed, fetch=fetch, page_size=page_size
         )
         rows = PARSERS[args.table](source, fields, items)
     else:
@@ -395,15 +446,15 @@ def _pull(
         # 后者撞 5000 行截断，前者绕开它。
         rows = []
         source = ""
-        # 公告类表（forecast）按 ts_code 拉全史，没有 trade_date 参数——day 对它们是
-        # "锚点与归档日期"，不是源端筛选。
-        date_param = None if args.table == "forecast" else "trade_date"
+        # 公告类表（forecast / report_rc）按 ts_code 拉全史，没有 trade_date 参数——day 对
+        # 它们是"锚点与归档日期"，不是源端筛选。
+        date_param = None if args.table in ("forecast", "report_rc") else "trade_date"
         for symbol in wanted:
             src, page_items, page_fields, _ = fetch_all_pages(
                 args.table,
                 args.day_parsed,
                 fetch=fetch,
-                page_size=args.page_size,
+                page_size=page_size,
                 symbol=symbol,
                 date_param=date_param,
             )

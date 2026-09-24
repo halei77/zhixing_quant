@@ -681,3 +681,79 @@ def test_bad_parameters_raise_before_touching_anything(tmp_path: Path) -> None:
             now=NOW,
         )
     assert dead_fetch.calls == []
+
+
+# ── report_rc（短页族）与 page_size 按表封顶（2026-09-25 实测 400 的回归） ──────
+
+RC_FIELDS = ["ts_code", "report_date", "org_name", "quarter", "eps", "pe"]
+RC_ITEM = ["600519.SH", "20240425", "高盛集团（GoldmanSachs）", "2024Q4", "67.07", "21.7"]
+
+
+def test_forecast_default_page_size_is_the_interface_cap(tmp_path: Path) -> None:
+    """page_size 缺省 = 按表上限：forecast 实测 max_limit=1000，全局 5000 会整池 400
+    （2026-09-25 全市场回填 5568 连败的根因）。缺省路径必须落到 1000。"""
+    fetch = FakeRelay({"600519": [FORECAST_ITEM]}, fields=FORECAST_FIELDS)
+
+    result = _run("forecast", ["600519"], fetch, root=tmp_path)
+
+    assert result.added == 1
+    _api, params, _kwargs = fetch.calls[0]
+    assert params["limit"] == 1000, (
+        f"forecast 缺省 limit 必须是 max_limit=1000，实际 {params['limit']}"
+    )
+    assert result.page_size == 1000, "报告里的 page_size 要点名真实发出的那个尺寸"
+
+
+def test_forecast_explicit_oversize_page_size_fails_before_any_request(tmp_path: Path) -> None:
+    """显式超上限 = 发前拒（fail-closed，transport 零调用）：错参数要响，不许静默降级继续跑。"""
+    fetch = FakeRelay({"600519": [FORECAST_ITEM]}, fields=FORECAST_FIELDS)
+
+    result = _run("forecast", ["600519"], fetch, root=tmp_path, page_size=5000)
+
+    (outcome,) = result.outcomes
+    assert outcome.status == "failed" and "上限 1000" in outcome.reason
+    assert fetch.calls == [], "超上限参数一个请求都不许发"
+    assert result.exit_code() == 1
+
+
+def test_report_rc_pulls_full_history_through_the_short_page_guard(tmp_path: Path) -> None:
+    """report_rc 进回填清单：公告类全史（无窗口参数）、短页守卫（limit=5000、offset=0）、
+    行级锚放行、主键幂等——重跑一行不多。"""
+    fetch = FakeRelay({"600519": [RC_ITEM]}, fields=RC_FIELDS)
+
+    first = _run("report_rc", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    assert first.added == 1 and first.exit_code() == 0
+    _api, params, _kwargs = fetch.calls[0]
+    assert params["ts_code"] == "600519.SH"
+    assert "start_date" not in params and "end_date" not in params, "全史拉取不带窗口"
+    assert params["limit"] == 5000 and params["offset"] == 0, "短页族固定 5000 对齐整页"
+    written = tables.read_table(
+        "report_rc", "600519", date(2024, 1, 1), date(2024, 12, 31), root=tmp_path
+    )
+    assert [row.quarter for row in written] == ["2024Q4"]
+    partition = tmp_path / "report_rc" / "year=2024" / "symbol=600519.parquet"
+    mtime = partition.stat().st_mtime_ns
+
+    second = _run("report_rc", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    assert len(fetch.calls) == 2, "公告类表判不出'齐'（#53 口径）：每跑重拉全史"
+    assert second.added == 0 and second.repaired == 0 and second.rewritten == 0
+    assert second.existing_skipped == 1, "主键幂等：同键同值一行不动"
+    assert partition.stat().st_mtime_ns == mtime, "重跑动了盘 = 不幂等"
+
+
+def test_report_rc_future_publication_fails_the_symbol_without_writing(tmp_path: Path) -> None:
+    """行级锚（发布日 ≤ 今天）拦在未来日期上：整票拒、一行不写。"""
+    future = ["600519.SH", "20990101", "中泰证券", "2026Q4", "70.97", "18.11"]
+    fetch = FakeRelay({"600519": [future]}, fields=RC_FIELDS)
+
+    result = _run("report_rc", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    (outcome,) = result.outcomes
+    assert outcome.status == "failed" and "锚点对账整批拒" in outcome.reason
+    assert "report_date 在未来" in outcome.reason
+    assert (
+        tables.read_table("report_rc", "600519", date(2090, 1, 1), date(2100, 1, 1), root=tmp_path)
+        == []
+    )
