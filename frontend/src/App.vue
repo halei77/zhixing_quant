@@ -30,6 +30,9 @@ const DATASETS: { key: string; label: string; days: number }[] = [
   { key: 'minute_30', label: '30 分K', days: 30 },
   { key: 'minute_5', label: '5 分K', days: 10 },
 ]
+function datasetLabel(key: string): string {
+  return DATASETS.find((d) => d.key === key)?.label ?? key
+}
 
 // ── 连接状态（ADR-0019：无口令，点只反映“最近一次请求成功”）────
 const connected = ref(false)
@@ -39,6 +42,8 @@ const query = ref('')
 const hits = ref<Hit[]>([])
 const recent = ref<Entry[]>([])
 let searchTimer: number | undefined
+// 键盘流的高亮位：随新结果归 0（第一条即默认候选），鼠标悬停跟随。
+const activeHit = ref(-1)
 
 const selected = ref<{ code: string; name: string; kind: 'stock' | 'index' } | null>(null)
 const bars = ref<Bar[]>([])
@@ -52,6 +57,15 @@ const customDays = reactive<Record<string, number>>(
   Object.fromEntries(DATASETS.map((d) => [d.key, d.days])),
 )
 const dayError = ref('')
+// as_of 回溯（ADR-0012 决定 2 的契约参数，服务端本就一直认）：空串 = 今天。
+const asOf = ref('')
+function localToday(): string {
+  const now = new Date()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  return `${now.getFullYear()}-${mm}-${dd}`
+}
+const todayStr = localToday()
 
 const text = ref('')
 const tokens = ref<number | null>(null)
@@ -63,6 +77,12 @@ let regenerateTimer: number | undefined
 const isCustom = computed(() => templateName.value === CUSTOM)
 const showPrompt = computed(() => selected.value?.kind === 'stock')
 const currentTemplate = computed(() => templates.value.find((t) => t.name === templateName.value))
+// 模板吃哪些数据，是模板配置里的事实（/api/templates 原样给），壳只做中文标注、不做推导。
+const composition = computed(() => {
+  const t = currentTemplate.value
+  if (!t || isCustom.value) return ''
+  return t.data.map((d) => `${datasetLabel(d.dataset)} × ${d.days}`).join(' · ')
+})
 const hint = computed(() => {
   if (hits.value.length) return ''
   return query.value.trim() ? '没找到——试试代码、名称或拼音首字母' : '输入至少一个字开始搜索，指数直接搜名字'
@@ -86,10 +106,12 @@ async function runSearch() {
   const q = query.value.trim()
   if (!q) {
     hits.value = []
+    activeHit.value = -1
     return
   }
   try {
     hits.value = (await api.search(q)).hits.slice(0, 12)
+    activeHit.value = hits.value.length ? 0 : -1
     connected.value = true
     if (hits.value.length === 0) say('')
   } catch (error) {
@@ -97,8 +119,27 @@ async function runSearch() {
   }
 }
 
+function onSearchKeydown(event: KeyboardEvent) {
+  if (!hits.value.length) return
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    activeHit.value = (activeHit.value + 1) % hits.value.length
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    activeHit.value = (activeHit.value - 1 + hits.value.length) % hits.value.length
+  } else if (event.key === 'Enter') {
+    event.preventDefault()
+    const hit = hits.value[activeHit.value] ?? hits.value[0]
+    if (hit) void pick(hit)
+  } else if (event.key === 'Escape') {
+    hits.value = []
+    activeHit.value = -1
+  }
+}
+
 async function pick(hit: Hit) {
   hits.value = []
+  activeHit.value = -1
   query.value = `${hit.code} ${hit.name}`
   selected.value = { code: hit.code, name: hit.name, kind: hit.kind }
   bars.value = []
@@ -194,6 +235,7 @@ async function generate() {
     return
   }
   const body: Record<string, unknown> = { code: selected.value.code, template: templateName.value }
+  if (asOf.value) body.as_of = asOf.value
   if (isCustom.value) {
     const picked = collectCustom()
     if (!picked) return
@@ -249,6 +291,10 @@ function onTemplateChange() {
   scheduleRegenerate()
 }
 
+function onAsOfChange() {
+  scheduleRegenerate()
+}
+
 // ── 连接 ──────────────────────────────────────────────
 async function boot() {
   try {
@@ -274,8 +320,9 @@ onUnmounted(() => {
 
 <template>
   <header class="glass-chrome sticky top-0 z-20">
-    <div class="mx-auto flex max-w-[640px] items-center gap-3 px-4 py-2.5">
+    <div class="mx-auto flex max-w-[640px] items-center gap-3 px-4 py-2.5 lg:max-w-6xl">
       <div class="seal" aria-hidden="true">知行</div>
+      <h1 class="text-[17px] font-semibold" style="color: var(--zx-text)">提示词站点</h1>
       <div class="relative flex flex-1 items-center gap-2">
         <span
           class="dot"
@@ -302,169 +349,226 @@ onUnmounted(() => {
     </div>
   </header>
 
-  <main class="mx-auto grid max-w-[640px] gap-3.5 px-4 pt-4 pb-12">
-    <!-- 搜索 -->
-    <section class="glass-float relative p-2.5">
-      <input
-        v-model="query"
-        data-testid="search"
-        type="search"
-        class="field"
-        placeholder="搜代码 / 名称 / 拼音，如 600519、茅台、gzmt"
-        autocomplete="off"
-        enterkeyhint="search"
-        aria-label="搜索股票或指数"
-        @input="onSearchInput"
-        @focus="onSearchInput"
-        @keydown.escape="hits = []"
-      />
-      <Transition name="pop">
-        <ul
-          v-if="hits.length"
-          data-testid="suggest"
-          class="surface-solid absolute inset-x-0 top-[calc(100%+6px)] z-30 max-h-[44vh] overflow-auto p-1.5"
-        >
-          <li v-for="hit in hits" :key="hit.code">
-            <button
-              type="button"
-              class="hit flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-[var(--zx-glass-inset)]"
-              @click="pick(hit)"
-            >
-              <span>{{ hit.code }} {{ hit.name }}</span>
-              <span class="text-xs" :style="{ color: hit.kind === 'index' ? 'var(--zx-seal)' : 'var(--zx-text-2)' }">
-                {{ hit.kind === 'index' ? '指数' : '个股' }}
-              </span>
-            </button>
-          </li>
-        </ul>
-      </Transition>
+  <main class="mx-auto grid max-w-[640px] gap-3.5 px-4 pt-4 pb-12 lg:max-w-6xl lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:items-start lg:gap-6">
+    <!-- 左栏：搜索 + 行情/K线（桌面端）；移动端仍是自上而下的单列流 -->
+    <div class="grid gap-3.5 lg:content-start">
+      <!-- 搜索 -->
+      <section class="glass-float relative p-2.5">
+        <input
+          v-model="query"
+          data-testid="search"
+          type="search"
+          class="field"
+          placeholder="搜代码 / 名称 / 拼音，如 600519、茅台、gzmt"
+          autocomplete="off"
+          enterkeyhint="search"
+          aria-label="搜索股票或指数"
+          role="combobox"
+          :aria-expanded="hits.length > 0"
+          :aria-activedescendant="activeHit >= 0 ? `hit-${activeHit}` : undefined"
+          @input="onSearchInput"
+          @focus="onSearchInput"
+          @keydown="onSearchKeydown"
+        />
+        <Transition name="pop">
+          <ul
+            v-if="hits.length"
+            data-testid="suggest"
+            class="surface-solid absolute inset-x-0 top-[calc(100%+6px)] z-30 max-h-[44vh] overflow-auto p-1.5"
+            role="listbox"
+          >
+            <li v-for="(hit, i) in hits" :key="hit.code" :id="`hit-${i}`" role="option" :aria-selected="i === activeHit">
+              <button
+                type="button"
+                class="hit flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left transition-colors"
+                :class="{ 'bg-[var(--zx-glass-inset)]': i === activeHit }"
+                @mouseenter="activeHit = i"
+                @click="pick(hit)"
+              >
+                <span>{{ hit.code }} {{ hit.name }}</span>
+                <span class="text-xs" :style="{ color: hit.kind === 'index' ? 'var(--zx-seal)' : 'var(--zx-text-2)' }">
+                  {{ hit.kind === 'index' ? '指数' : '个股' }}
+                </span>
+              </button>
+            </li>
+          </ul>
+        </Transition>
 
-      <div v-if="!hits.length && recent.length" class="pt-2">
-        <p class="px-1 text-[13px]" style="color: var(--zx-text-3)">最近搜过</p>
-        <ul class="flex flex-wrap gap-1.5 px-1 pt-1.5">
-          <li v-for="entry in recent" :key="entry.code">
-            <button
-              type="button"
-              class="hit pill"
-              :title="`${entry.name} · ${entry.at}`"
-              @click="pickRecent(entry)"
-            >
-              {{ entry.name }}
-            </button>
-          </li>
-        </ul>
-      </div>
-
-      <p v-if="hint" class="px-1 pt-2 text-[13px]" style="color: var(--zx-text-2)">{{ hint }}</p>
-    </section>
-
-    <!-- 行情：整块是内容层（docs/11 §二「正文与数字一律实底」），不是玻璃 -->
-    <section v-if="selected" class="surface-solid p-4">
-      <div class="p-1">
-        <div class="flex items-start justify-between">
-          <div>
-            <p class="text-[22px] font-semibold">{{ selected.name }}</p>
-            <p class="num text-[13px]" style="color: var(--zx-text-2)">{{ selected.code }}</p>
-          </div>
-          <div v-if="quote" data-testid="quote" class="text-right">
-            <p
-              class="num text-[30px] font-bold"
-              :style="{ color: quote.up ? 'var(--zx-up)' : 'var(--zx-down)' }"
-            >
-              {{ quote.close }}
-            </p>
-            <p
-              class="num text-[15px]"
-              :style="{ color: quote.up ? 'var(--zx-up)' : 'var(--zx-down)' }"
-            >
-              {{ quote.change_pct }}
-            </p>
-          </div>
+        <div v-if="!hits.length && recent.length" class="pt-2">
+          <p class="px-1 text-[13px]" style="color: var(--zx-text-3)">最近搜过</p>
+          <ul class="flex flex-wrap gap-1.5 px-1 pt-1.5">
+            <li v-for="entry in recent" :key="entry.code">
+              <button
+                type="button"
+                class="hit pill"
+                :title="`${entry.name} · ${entry.at}`"
+                @click="pickRecent(entry)"
+              >
+                {{ entry.name }}
+              </button>
+            </li>
+          </ul>
         </div>
 
-        <div v-if="bars.length" class="mt-3">
-          <KLineChart :bars="bars" />
+        <p v-if="hint" class="px-1 pt-2 text-[13px]" style="color: var(--zx-text-2)">{{ hint }}</p>
+      </section>
+
+      <!-- 行情：整块是内容层（docs/11 §二「正文与数字一律实底」），不是玻璃 -->
+      <section v-if="selected" class="surface-solid p-4">
+        <div class="p-1">
+          <div class="flex items-start justify-between">
+            <div>
+              <p class="text-[22px] font-semibold">{{ selected.name }}</p>
+              <p class="num text-[13px]" style="color: var(--zx-text-2)">{{ selected.code }}</p>
+            </div>
+            <div v-if="quote" data-testid="quote" class="text-right">
+              <p
+                class="num text-[30px] font-bold"
+                :style="{ color: quote.up ? 'var(--zx-up)' : 'var(--zx-down)' }"
+              >
+                {{ quote.close }}
+              </p>
+              <p
+                class="num text-[15px]"
+                :style="{ color: quote.up ? 'var(--zx-up)' : 'var(--zx-down)' }"
+              >
+                {{ quote.change_pct }}
+              </p>
+              <p v-if="quote.date" class="num text-xs" style="color: var(--zx-text-3)">截至 {{ quote.date }}</p>
+            </div>
+          </div>
+
+          <div v-if="bars.length" class="mt-3">
+            <KLineChart :bars="bars" />
+          </div>
+
+          <dl v-if="quote" class="num mt-2.5 grid grid-cols-4 gap-2 text-center">
+            <div>
+              <dt class="text-xs" style="color: var(--zx-text-2)">开</dt>
+              <dd class="text-[15px]">{{ quote.open }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs" style="color: var(--zx-text-2)">高</dt>
+              <dd class="text-[15px]">{{ quote.high }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs" style="color: var(--zx-text-2)">低</dt>
+              <dd class="text-[15px]">{{ quote.low }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs" style="color: var(--zx-text-2)">量</dt>
+              <dd class="text-[15px]">{{ quote.volume }}</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+    </div>
+
+    <!-- 右栏：提示词（主交付物）。操作条吸底，生成/复制不再跟着长文跑 -->
+    <div class="grid gap-3.5 lg:content-start">
+      <section v-if="showPrompt" class="surface-solid flex flex-col p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <select
+            v-model="templateName"
+            data-testid="templates"
+            class="field !h-11 min-w-0 flex-1"
+            aria-label="模板"
+            @change="onTemplateChange"
+          >
+            <option v-for="t in templates" :key="t.name" :value="t.name">
+              {{ t.status === 'ready' ? t.name : `${t.name}（未上线）` }}
+            </option>
+            <option :value="CUSTOM">{{ CUSTOM }}</option>
+          </select>
+          <label class="flex items-center gap-1.5">
+            <span class="text-[13px]" style="color: var(--zx-text-2)">截至</span>
+            <input
+              v-model="asOf"
+              data-testid="asof"
+              type="date"
+              :max="todayStr"
+              :aria-label="'生成截至日期，默认今天'"
+              class="field num !h-11 !w-[152px] !px-2 text-[13px]"
+              @change="onAsOfChange"
+            />
+            <button
+              v-if="asOf"
+              type="button"
+              class="icon-btn !h-11 !w-11"
+              title="回到今天"
+              aria-label="回到今天"
+              @click="asOf = ''; onAsOfChange()"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+            </button>
+          </label>
         </div>
 
-        <dl v-if="quote" class="num mt-2.5 grid grid-cols-4 gap-2 text-center">
-          <div>
-            <dt class="text-xs" style="color: var(--zx-text-2)">开</dt>
-            <dd class="text-[15px]">{{ quote.open }}</dd>
+        <p class="pt-2.5 text-sm">
+          {{ isCustom ? '自己勾K线类型与天数，生成一条一次性组合' : (currentTemplate?.task ?? '') }}
+        </p>
+        <p v-if="composition" class="num pt-1 text-[13px]" style="color: var(--zx-text-2)">
+          数据组合：{{ composition }}
+        </p>
+        <p v-if="!isCustom && currentTemplate && currentTemplate.status !== 'ready'" class="text-[13px]" style="color: var(--zx-text-2)">
+          还没上线：{{ currentTemplate.waiting_on }}
+        </p>
+
+        <div v-if="isCustom" class="glass-inset mt-2.5 grid gap-2 p-3">
+          <p class="text-[13px]" style="color: var(--zx-text-2)">勾选要进的K线类型，各自填天数（1–750 个交易日）</p>
+          <label
+            v-for="d in DATASETS"
+            :key="d.key"
+            class="flex items-center justify-between gap-2.5"
+          >
+            <span class="flex items-center gap-2 text-[15px]">
+              <input v-model="custom[d.key]" type="checkbox" class="h-[18px] w-[18px]" style="accent-color: var(--zx-ink)" />
+              {{ d.label }}
+            </span>
+            <input
+              v-model.number="customDays[d.key]"
+              type="number"
+              min="1"
+              max="750"
+              :aria-label="`${d.label} 天数`"
+              class="field num !h-11 !w-[90px] text-right"
+            />
+          </label>
+          <p v-if="dayError" class="text-[13px]" style="color: var(--zx-warn)">{{ dayError }}</p>
+        </div>
+
+        <pre
+          class="surface-solid mt-2.5 min-h-[120px] flex-1 overflow-auto p-3.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words"
+          :class="{ 'opacity-60': busy }"
+          style="font-family: ui-monospace, 'SF Mono', Menlo, monospace; max-height: 46vh"
+          aria-live="polite"
+        >{{ text || '选一只票，点生成。' }}</pre>
+
+        <!-- 吸底操作条：token 数、警告、生成、复制一条线，不再滚过整段正文去找 -->
+        <div class="sticky bottom-3 z-10 -mx-1 mt-2.5 px-1 pb-1" data-testid="actions">
+          <div class="glass-float flex items-center gap-2 p-2">
+            <p class="num min-w-0 flex-1 truncate pl-1 text-[13px]" style="color: var(--zx-text-2)">
+              <span data-testid="tokens">{{ tokens == null ? '—' : tokens.toLocaleString('zh-CN') }}</span> token
+              <span v-if="warn" data-testid="warn" class="pl-1" style="color: var(--zx-warn)">⚠ {{ warn }}</span>
+            </p>
+            <button type="button" data-testid="generate" class="btn !h-11 shrink-0" :disabled="busy" @click="generate">
+              {{ busy ? '生成中…' : '生成' }}
+            </button>
+            <button type="button" data-testid="copy" class="btn btn-ghost !h-11 shrink-0" :disabled="busy || !text" @click="copy">
+              复制
+            </button>
           </div>
-          <div>
-            <dt class="text-xs" style="color: var(--zx-text-2)">高</dt>
-            <dd class="text-[15px]">{{ quote.high }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs" style="color: var(--zx-text-2)">低</dt>
-            <dd class="text-[15px]">{{ quote.low }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs" style="color: var(--zx-text-2)">量</dt>
-            <dd class="text-[15px]">{{ quote.volume }}</dd>
-          </div>
-        </dl>
-      </div>
-    </section>
+        </div>
+      </section>
 
-    <!-- 提示词 -->
-    <section v-if="showPrompt" class="surface-solid p-4">
-      <div class="flex gap-2">
-        <select
-          v-model="templateName"
-          data-testid="templates"
-          class="field !h-11 flex-1"
-          aria-label="模板"
-          @change="onTemplateChange"
-        >
-          <option v-for="t in templates" :key="t.name" :value="t.name">
-            {{ t.status === 'ready' ? t.name : `${t.name}（未上线）` }}
-          </option>
-          <option :value="CUSTOM">{{ CUSTOM }}</option>
-        </select>
-        <button type="button" class="btn !h-11" :disabled="busy" @click="generate">生成</button>
-      </div>
-
-      <p class="pt-2.5 text-sm">
-        {{ isCustom ? '自己勾K线类型与天数，生成一条一次性组合' : (currentTemplate?.task ?? '') }}
-      </p>
-      <p v-if="!isCustom && currentTemplate && currentTemplate.status !== 'ready'" class="text-[13px]" style="color: var(--zx-text-2)">
-        还没上线：{{ currentTemplate.waiting_on }}
-      </p>
-
-      <div v-if="isCustom" class="glass-inset mt-2.5 grid gap-2 p-3">
-        <p class="text-[13px]" style="color: var(--zx-text-2)">勾选要进的K线类型，各自填天数（1–750 个交易日）</p>
-        <label
-          v-for="d in DATASETS"
-          :key="d.key"
-          class="flex items-center justify-between gap-2.5"
-        >
-          <span class="flex items-center gap-2 text-[15px]">
-            <input v-model="custom[d.key]" type="checkbox" class="h-[18px] w-[18px]" style="accent-color: var(--zx-ink)" />
-            {{ d.label }}
-          </span>
-          <input
-            v-model.number="customDays[d.key]"
-            type="number"
-            min="1"
-            max="750"
-            :aria-label="`${d.label} 天数`"
-            class="field num !h-11 !w-[90px] text-right"
-          />
-        </label>
-        <p v-if="dayError" class="text-[13px]" style="color: var(--zx-warn)">{{ dayError }}</p>
-      </div>
-
-      <p class="num pt-2 text-[13px]" style="color: var(--zx-text-2)">
-        <span>{{ tokens == null ? '—' : tokens.toLocaleString('zh-CN') }}</span> token<span :style="{ color: 'var(--zx-warn)' }">{{ warn ? `　⚠ ${warn}` : '' }}</span>
-      </p>
-
-      <pre
-        class="surface-solid mt-2.5 max-h-[46vh] overflow-auto p-3.5 text-[13px] leading-relaxed whitespace-pre-wrap break-words"
-        style="font-family: ui-monospace, 'SF Mono', Menlo, monospace"
-      >{{ text || '选一只票，点生成。' }}</pre>
-      <button type="button" class="btn mt-2.5 w-full" @click="copy">复制提示词</button>
-    </section>
+      <!-- 未选票时的右栏占位：让双栏在桌面端不塌，也提示下一步 -->
+      <section v-else class="surface-solid grid place-items-center p-6 text-center lg:min-h-[320px]">
+        <p class="text-[15px]" style="color: var(--zx-text-2)">搜一只个股，这里生成它的提示词</p>
+      </section>
+    </div>
   </main>
 
   <p class="toast" :class="{ 'toast-on': status }" role="status">{{ status }}</p>
@@ -502,6 +606,14 @@ onUnmounted(() => {
   border-radius: var(--zx-r-pill);
   border: 1px solid var(--zx-stroke);
   background: var(--zx-glass-inset);
+  cursor: pointer;
+}
+.hit {
+  min-height: 44px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
 }
 </style>
