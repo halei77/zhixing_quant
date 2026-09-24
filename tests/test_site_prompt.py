@@ -147,6 +147,50 @@ def test_a_request_nothing_can_answer_is_refused_not_emptied() -> None:
         build_it(minute)
 
 
+def test_one_empty_component_speaks_up_without_dragging_the_whole_prompt_down() -> None:
+    """日K在盘上、分钟一段没有：出一节「本节无数据」交代，日K那节照常给。
+
+    为什么要放行：全市场 5565 只票里只有分钟采集池那几只有 `minute_*`（ADR-0009 决定 8
+    未裁决，只跑小样）。"任一组件空 → 整条拒"等于把默认模板「短期投资」按死在 5 只票上
+    ——2026-09-24 实测 300308 有 701 天日线，点生成却被一句不点名的"一张都没有"挡回来。
+
+    两条边界都钉住：**不给空表**（空表会被读成"那天没涨跌"，`table.render` 那条原顾虑），
+    也**不许数字悄悄变少**（标题必须自己承认盘上 0 天）。
+    """
+    text = build_it(
+        tmpl(data=(Selection(dataset=layout.DAILY, days=3), Selection(layout.MINUTE_5, 2)))
+    )
+    # 有的那节照常出数字
+    assert "### 日K（3 个交易日）" in text
+    assert "2024-01-02" in text
+    # 空的那节：一节交代，零行数据，标题自己承认盘上 0 天
+    assert "### 5 分K（盘上 0 个交易日，模板要 2）" in text
+    assert "本节无数据" in text
+    assert "数据未提供" in text
+    note = text.split("### 5 分K", 1)[1].split("【输出要求】", 1)[0]
+    assert "|" not in note, f"空组件不许带表格骨架，模型会读成'那天没涨跌'：{note!r}"
+    # 反幻觉头照旧只有一份，空节不许再补一份
+    assert text.count("【数据纪律】") == 1
+
+
+def test_a_note_speaks_up_for_empty_reference_tables_too() -> None:
+    """估值/预告参考表一行都没有时同样出交代，不交一张只有表头的空表（与K线同一条线）。"""
+    text = build_it(
+        tmpl(
+            data=(
+                Selection(dataset=layout.DAILY, days=3),
+                Selection(dataset="daily_basic", days=3, fields=("close", "pe_ttm")),
+            )
+        )
+    )
+    assert "### 日K（3 个交易日）" in text
+    # 参考表的小标题是表自己的中文名（title_of），不是 dataset 名
+    assert "### 估值（每日指标）（盘上 0 个交易日，模板要 3）" in text
+    note = text.split("### 估值（每日指标）", 1)[1].split("【输出要求】", 1)[0]
+    assert "本节无数据" in note
+    assert "|" not in note, f"空参考表同样不许带表头骨架：{note!r}"
+
+
 def test_sections_come_in_the_order_the_template_declares(data: Path) -> None:
     """日K在前、60 分在后是模板里写的顺序，接上盘之后不许倒过来。"""
     store_bars(

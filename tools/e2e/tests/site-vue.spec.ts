@@ -150,3 +150,76 @@ test("模板的数据组合展示给读者（选模板不靠盲猜）", async ({
   await expect(panel).toContainText("数据组合：");
   await expect(panel).toContainText("日K × 120");
 });
+
+// ── 2026-09-24 测试发现的三处，各钉一条 ──
+
+test("选中票之后搜索区不许误报「没找到」", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  await page.locator('[data-testid="search"]').fill("600519");
+  await page.locator('[data-testid="suggest"] button').first().click();
+  await expect(page.locator('[data-testid="quote"]')).toBeVisible({ timeout: 10_000 });
+  // pick() 把 query 写成「代码 名称」当选择标签——那不是一次没搜到的搜索。
+  // 不钉这条，选完票的搜索区会一直挂着「没找到」，而右边正在生成它的提示词。
+  const panel = page.locator("section", { has: page.locator('[data-testid="search"]') });
+  await expect(panel).not.toContainText("没找到");
+});
+
+test("超阈值警告不许把整页撑出横向滚动条", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  await page.locator('[data-testid="search"]').fill("600519");
+  await page.locator('[data-testid="suggest"] button').first().click();
+  await expect(page.locator("pre")).toContainText("你是资深", { timeout: 15_000 });
+
+  // 拉满自定义组合把 token 顶过 10 万，让 warn 出现（06 §八-5 的那条警告）
+  await page.locator('[data-testid="templates"]').selectOption({ label: "自定义" });
+  for (const label of ["日K", "60 分K", "30 分K", "5 分K"]) {
+    await page.locator(`input[aria-label="${label} 天数"]`).fill("750");
+    const box = page.locator("label", { hasText: label }).locator('input[type="checkbox"]');
+    if (!(await box.isChecked())) await box.check();
+  }
+  await page.locator('[data-testid="generate"]').click();
+  await expect(page.locator('[data-testid="warn"]')).toBeVisible({ timeout: 30_000 });
+
+  // 判据是几何不是观感：warn 那行用过 truncate（= nowrap），长中文句按整行宽度进最小内容
+  // 尺寸，撑破 minmax(0,6fr) 网格列——2026-09-24 实测 scrollWidth 1650 vs 1280（溢出 370px）。
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+  // 顺带钉住自定义面板的天数框没被推出屏幕（溢出时它在 x≈1633）
+  const days = page.locator('input[aria-label="日K 天数"]');
+  await expect(days).toBeVisible();
+  const box = await days.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x + box!.width).toBeLessThanOrEqual(1280);
+});
+
+test("只采到日K的票：空组件出交代、不整条拒（300308 实测）", async ({ page }) => {
+  // 中际旭创有 701 天日线、分钟一段没有（ADR-0009 决定 8 未裁决，分钟只跑小样）。
+  // 此前任一组件空就整条拒，默认模板在全市场只有池内五票能用。
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  await page.locator('[data-testid="search"]').fill("中际旭创");
+  await page.locator('[data-testid="suggest"] button').first().click();
+  const body = page.locator('[data-testid="prompt-body"]');
+  await expect(body).toContainText("你是资深", { timeout: 20_000 });
+  await expect(body).toContainText("### 日K");
+  await expect(body).toContainText("本节无数据");
+  // 空节不许带表格骨架（会被读成"那天没涨跌"）
+  await expect(page.locator('[data-testid="warn"]')).toHaveCount(0);
+});
+
+test("生成失败时正文区给出原因，不是空白", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  // 建仓价分析是 pending 模板：服务端拒，理由写在 waiting_on
+  await page.locator('[data-testid="search"]').fill("600519");
+  await page.locator('[data-testid="suggest"] button').first().click();
+  await expect(page.locator("pre")).toContainText("你是资深", { timeout: 15_000 });
+  await page.locator('[data-testid="templates"]').selectOption("建仓价分析（未上线）");
+  const body = page.locator('[data-testid="prompt-body"]');
+  await expect(body).toContainText("还没落地", { timeout: 15_000 });
+  await expect(body).not.toContainText("选一只票，点生成");
+});

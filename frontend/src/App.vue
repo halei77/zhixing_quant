@@ -70,6 +70,8 @@ const todayStr = localToday()
 const text = ref('')
 const tokens = ref<number | null>(null)
 const warn = ref('')
+// 生成失败的原因摆在正文区，而不是只在 toast 上闪一下就没了——用户要能看到"为什么没出提示词"。
+const failure = ref('')
 const busy = ref(false)
 const dirty = ref(false)
 let regenerateTimer: number | undefined
@@ -85,7 +87,12 @@ const composition = computed(() => {
 })
 const hint = computed(() => {
   if (hits.value.length) return ''
-  return query.value.trim() ? '没找到——试试代码、名称或拼音首字母' : '输入至少一个字开始搜索，指数直接搜名字'
+  const q = query.value.trim()
+  if (!q) return '输入至少一个字开始搜索，指数直接搜名字'
+  // 已选中的那只票：pick() 把 query 写成「代码 名称」当选择标签，这时不是"没找到"。
+  // 不挡住它，选完票的搜索区会一直挂着「没找到——…」，而右边明明正在生成它的提示词。
+  if (selected.value && q === `${selected.value.code} ${selected.value.name}`) return ''
+  return '没找到——试试代码、名称或拼音首字母'
 })
 
 function say(message: string) {
@@ -147,6 +154,7 @@ async function pick(hit: Hit) {
   text.value = ''
   tokens.value = null
   warn.value = ''
+  failure.value = ''
   dirty.value = false
   window.clearTimeout(regenerateTimer)
   if (hit.kind === 'stock') await generate()
@@ -248,13 +256,16 @@ async function generate() {
     text.value = built.text
     tokens.value = built.tokens
     warn.value = built.warn ?? ''
+    failure.value = ''
     connected.value = true
     say('')
   } catch (error) {
-    // 失败就把正文清掉：留着上一个模板的提示词，而选择器已经是新的，是自相矛盾的页面
+    // 失败就把正文清掉：留着上一个模板的提示词，而选择器已经是新的，是自相矛盾的页面。
+    // 但原因要留在正文区——只在 toast 上闪一下，用户看到的是空白，读不到"为什么没出提示词"。
     text.value = ''
     tokens.value = null
     warn.value = ''
+    failure.value = error instanceof Error ? error.message : String(error)
     handleError(error)
   } finally {
     busy.value = false
@@ -285,6 +296,7 @@ function onTemplateChange() {
     text.value = ''
     tokens.value = null
     warn.value = ''
+    failure.value = ''
     dirty.value = false
     return
   }
@@ -545,14 +557,19 @@ onUnmounted(() => {
           :class="{ 'opacity-60': busy }"
           style="font-family: ui-monospace, 'SF Mono', Menlo, monospace; max-height: 46vh"
           aria-live="polite"
-        >{{ text || '选一只票，点生成。' }}</pre>
+          data-testid="prompt-body"
+        >{{ text || failure || '选一只票，点生成。' }}</pre>
 
-        <!-- 吸底操作条：token 数、警告、生成、复制一条线，不再滚过整段正文去找 -->
+        <!-- 吸底操作条：token 数、警告、生成、复制一条线，不再滚过整段正文去找。
+             这一行不许 `truncate`（= nowrap）：warn 是服务端给的长中文句，nowrap 会让它按
+             整行宽度算进最小内容尺寸，撑破 `minmax(0,6fr)` 网格列。2026-09-24 实测：超阈值
+             警告一出现，整页横向溢出 370px、自定义面板的天数框被推出屏幕；去掉 truncate
+             后溢出归 0。让它换行。 -->
         <div class="sticky bottom-3 z-10 -mx-1 mt-2.5 px-1 pb-1" data-testid="actions">
           <div class="glass-float flex items-center gap-2 p-2">
-            <p class="num min-w-0 flex-1 truncate pl-1 text-[13px]" style="color: var(--zx-text-2)">
+            <p class="num min-w-0 flex-1 pl-1 text-[13px]" style="color: var(--zx-text-2)">
               <span data-testid="tokens">{{ tokens == null ? '—' : tokens.toLocaleString('zh-CN') }}</span> token
-              <span v-if="warn" data-testid="warn" class="pl-1" style="color: var(--zx-warn)">⚠ {{ warn }}</span>
+              <span v-if="warn" data-testid="warn" class="pl-1 break-words" style="color: var(--zx-warn)">⚠ {{ warn }}</span>
             </p>
             <button type="button" data-testid="generate" class="btn !h-11 shrink-0" :disabled="busy" @click="generate">
               {{ busy ? '生成中…' : '生成' }}

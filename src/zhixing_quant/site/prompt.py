@@ -177,6 +177,15 @@ def heading(selection: Selection, delivered: int) -> str:
     return f"{label}（盘上 {delivered} 个交易日，模板要 {selection.days}）"
 
 
+#: 一个组件在区间里一行都没有时的正文。**不给空表**——空表会被大模型读成"那天没涨跌"——
+#: 只给一句"这里没有数"，让它按反幻觉第 3 条写「数据未提供」（table.IncompleteComponent
+#: 那条原顾虑原样保留，只是从"拒掉整条"改成"出一节交代"）。
+NO_DATA_NOTE = (
+    "本节无数据：该区间在盘上一行都没有——是组件没取到数，不是没有变化。\n"
+    "下面不提供任何数字；判断若需要这部分数据，明确写「数据未提供」。"
+)
+
+
 def build(
     template: Template,
     code: str,
@@ -190,10 +199,16 @@ def build(
 
     `float_shares` 只有模板请求 `turnover` 时才用得上，缺它由 `table.render` 拒（ADR-0011
     决定 5）。日历由调用方给（决定 2）：这一层不联网抓日历，"生成提示词"的路上不该藏着 HTTP。
+
+    **一个组件一行都没有** → 那一节出 `NO_DATA_NOTE` 交代，不给空表、也不拖垮整条：5565 只
+    票里只有分钟采集池那几只有 minute_*，`短期投资` 四段里三段空就整条拒的话，全市场只剩池内
+    五票能用默认模板（2026-09-24 实测 300308 就是这么变成"没数据"的）。**每个组件都空** →
+    照旧拒（`table.IncompleteComponent`）：一份数字都没有的提示词正是 06 §一 要防的那种东西。
     """
     if template.status != "ready":
         raise TemplateNotReady(f"「{template.name}」要的数据组件还没落地：{template.waiting_on}")
     sections: list[Section] = []
+    with_data = 0
     for selection in template.data:
         start, end = window(calendar, as_of, selection.days)
         if selection.dataset == "forecast":
@@ -203,6 +218,10 @@ def build(
                 for row in read_table("forecast", code, start, end, root=config.parquet_dir())
                 if row.ann_date <= as_of
             ]
+            if not rows:
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            with_data += 1
             sections.append(
                 Section(
                     title=heading(selection, len(rows)),
@@ -213,6 +232,10 @@ def build(
         if selection.dataset in templates.TABLE_DATASETS:
             # 参考表条目（ADR-0016）：不走 Bar 查询，也没有复权口径。
             rows = read_table(selection.dataset, code, start, end, root=config.parquet_dir())
+            if not rows:
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            with_data += 1
             sections.append(
                 Section(
                     title=heading(selection, len(rows)),
@@ -232,6 +255,10 @@ def build(
             dataset=selection.dataset,
             root=config.parquet_dir(),
         )
+        if not bars:
+            sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+            continue
+        with_data += 1
         sections.append(
             Section(
                 title=heading(selection, len({bar.trade_date for bar in bars})),
@@ -243,6 +270,13 @@ def build(
                     float_shares=float_shares,
                 ),
             )
+        )
+    if with_data == 0:
+        # 每一段都空：交出去就是"指令齐全、数字全靠编"，拒。消息沿用原句，两个既有测试
+        # （test_a_request_nothing_can_answer_is_refused_not_emptied / api 的 300750 那条）
+        # 判的就是这个形状。
+        raise table.IncompleteComponent(
+            "一张都没有的K线表不进提示词：那是组件没取到数，不是没有涨跌"
         )
     text = assemble(template, sections)
     count = tokens.estimate(text)
