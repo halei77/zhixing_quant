@@ -11,7 +11,7 @@ import pytest
 
 from tests.fakes import daily_span, minute_span
 from zhixing_quant.domain.bar import Bar
-from zhixing_quant.site import table
+from zhixing_quant.site import table, templates
 from zhixing_quant.site.table import IncompleteComponent, render
 from zhixing_quant.site.templates import FIELDS, Adjust, Format
 
@@ -247,13 +247,18 @@ def test_render_valuation_nulls_units_and_csv() -> None:
         # float_share, free_share, total_mv, circ_mv
     ]
     text = render_valuation(
-        rows, fields=["close", "pe_ttm", "pb", "dv_ttm", "total_mv"], format="markdown"
+        rows,
+        fields=["close", "pe_ttm", "pb", "dv_ttm", "total_mv"],
+        dataset="daily_basic",
+        format="markdown",
     )
     assert "—" in text and "0.0" not in text.split("口径")[1].split("\n")[0]
     assert "156,735,231" in text, "市值万元取整千分位，不许科学计数法"
     assert "6.24" in text and "4.10" in text
     assert "| — |" in text, "pe_ttm 是 null：渲染成 '—'，不是 0"
-    csv_text = render_valuation(rows, fields=["close", "pe_ttm"], format="csv")
+    csv_text = render_valuation(
+        rows, fields=["close", "pe_ttm"], dataset="daily_basic", format="csv"
+    )
     assert csv_text.startswith("# 估值口径"), "csv 模式口径行走注释（ADR-0011 决定 4 同款）"
 
 
@@ -296,3 +301,168 @@ def test_render_forecast_units_and_point_in_time() -> None:
     assert "2025-01-03" in text and "2024-12-31" in text
     csv_text = render_forecast(rows[:1], format="csv")
     assert csv_text.startswith("# 业绩预告口径")
+
+
+def test_each_reference_table_renders_its_own_caliber_line() -> None:
+    """口径行跟着 dataset 走（ADR-0016 决定 2 的按表落地）：涨跌停表不许印估值那句。
+
+    三句互不相同是硬判据——共用一句就等于有两张表在替对方的单位作保。
+    """
+    from zhixing_quant.sources.relay.tables import IndexDailyRow, StkLimitRow
+
+    assert table.VALUATION_LABEL != table.STK_LIMIT_LABEL != table.INDEX_DAILY_LABEL
+    assert table.VALUATION_LABEL != table.INDEX_DAILY_LABEL
+    limit = [StkLimitRow("rds", "600519", DAY1, 11.22, 9.18)]
+    text = table.render_valuation(
+        limit, fields=["up_limit", "down_limit"], dataset="stk_limit", format="markdown"
+    )
+    assert text.splitlines()[0].endswith(table.STK_LIMIT_LABEL)
+    assert "估值口径" not in text
+    assert _grid(text)[1] == ["2026-09-17", "11.22", "9.18"], "涨跌停是价格，两位小数"
+    index = [
+        IndexDailyRow("rds", "000001.SH", DAY1, 3000.0, 3010.5, 2990.25, 3005.75, 12345.0, 67890.0)
+    ]
+    text = table.render_valuation(
+        index,
+        fields=["close", "volume", "amount"],
+        dataset="index_daily",
+        format="csv",
+    )
+    assert text.startswith(f"# {table.INDEX_DAILY_LABEL}"), "csv 口径行走注释"
+    assert "3005.75,12,345,67,890" in text, "点位两位；量额取整带千分位（手/千元源单位）"
+
+
+def test_reference_headers_cover_every_selectable_field() -> None:
+    """表头字典与模板可选字段不许漂（与 `FIELDS ↔ HEADERS` 那条同一手法）。
+
+    漂开的安静形态：往 TABLE_DATASETS 加一列，装载能过，渲染时 `VALUATION_HEADERS.get(c, c)`
+    兜底把英文列名印进提示词——不响、不红，只是模型面前多了一个它没被告知含义的词。
+    forecast 例外：事件型表走 render_forecast 自己的固定表头（公告日/报告期/…）。
+    """
+    covered = set(table.VALUATION_HEADERS) - {"time"}
+    for dataset, fields in templates.TABLE_DATASETS.items():
+        if dataset == "forecast":
+            continue
+        missing = set(fields) - covered
+        assert not missing, f"{dataset} 的字段没有中文表头：{sorted(missing)}"
+
+
+def test_a_dataset_without_a_caliber_line_is_refused_not_guessed() -> None:
+    """没登记口径行的 dataset 响，不猜一句：`fina_audit` 在盘上但没进提示词词表。"""
+    with pytest.raises(ValueError, match="没定过口径行"):
+        table.reference_label("fina_audit")
+
+
+def test_render_fundamental_head_is_a_two_column_snapshot_with_the_shared_caliber() -> None:
+    """ADR-0022 决定 1 的渲染形态：口径行 + 两列表（项目|数值）+ null →「—」。
+
+    收盘取调用方给的 `close`（日线末行），**不**取行里的 `close`——两者不一致时印日线那个数，
+    这条来源差异就是本测试存在的全部理由：估值行的 close 与日线末行在缺口期会对不上。
+    """
+    from datetime import date as date_type
+
+    from zhixing_quant.sources.relay.tables import DailyBasicRow
+
+    row = DailyBasicRow(
+        "rds",
+        "600519",
+        date_type(2026, 9, 18),
+        999.0,  # 行自带的 close：不该出现在头里
+        0.25,
+        None,
+        None,
+        None,
+        None,  # pe_ttm 缺 → 「—」，禁 0 填充
+        6.24,
+        None,
+        9.15,
+        None,
+        4.13,
+        None,
+        None,
+        None,
+        156735231.0,
+        156735231.0,
+    )
+    text = table.render_fundamental_head(
+        name="贵州茅台",
+        code="600519",
+        close_date=date_type(2026, 9, 18),
+        close=1257.12,
+        row=row,
+        fields=list(templates.FUNDAMENTAL_HEAD_FIELDS),
+        format="markdown",
+    )
+    assert text.splitlines()[0].endswith(table.VALUATION_LABEL)
+    assert _grid(text)[0] == ["项目", "数值"]
+    cells = {cells[0]: cells[1] for cells in _grid(text)[1:]}
+    assert cells["名称"] == "贵州茅台"
+    assert cells["代码"] == "600519"
+    assert cells["收盘日期"] == "2026-09-18"
+    assert cells["收盘"] == "1257.12", "头里的收盘是日线末行，不是估值行自带的 999"
+    assert cells["PE(TTM)"] == "—", "null 渲染成「—」，不是 0"
+    assert cells["总市值(万元)"] == "156,735,231"
+    assert cells["换手率(%)"] == "0.25"
+    assert "0.00" not in text
+
+
+def test_the_heads_identity_rows_survive_even_with_no_selected_fields() -> None:
+    """名称/代码/收盘日期是身份行，选不掉（与K线表的 time 列同理）；缺数据的格子是「—」。"""
+    from datetime import date as date_type
+
+    from zhixing_quant.sources.relay.tables import DailyBasicRow
+
+    row = DailyBasicRow(
+        "rds",
+        "600519",
+        date_type(2026, 9, 18),
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    )
+    text = table.render_fundamental_head(
+        name=None,
+        code="600519",
+        close_date=None,
+        close=None,
+        row=row,
+        fields=(),
+        format="markdown",
+    )
+    body = _grid(text)[1:]
+    assert [r[0] for r in body] == ["名称", "代码", "收盘日期"]
+    assert [r[1] for r in body] == ["—", "600519", "—"], "查无此码/缺日线都是「—」，不编值"
+    csv_text = table.render_fundamental_head(
+        name="贵州茅台",
+        code="600519",
+        close_date=date_type(2026, 9, 18),
+        close=1.0,
+        row=row,
+        fields=["close"],
+        format="csv",
+    )
+    assert csv_text.startswith(f"# {table.VALUATION_LABEL}")
+    assert "收盘日期,2026-09-18" in csv_text
+
+
+def test_a_non_numeric_metric_renders_as_a_dash_not_a_stringified_value() -> None:
+    """装载按 dataset 校验过字段名，但渲染层不假设类型：非数值来了也出「—」，不把
+    `'oops'` 原样推进表——字符串混进数字列，模型会拿它做算术。"""
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(trade_date=DAY1, close="oops")
+    text = table.render_valuation([row], fields=["close"], dataset="daily_basic")
+    assert "| 2026-09-17 | — |" in text

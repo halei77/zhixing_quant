@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from zhixing_quant import config
 from zhixing_quant.site import templates
@@ -49,14 +50,19 @@ def bad(data: dict[str, Any]) -> str:
 
 
 def test_the_shipped_table_loads() -> None:
-    """真实那张表装得起来，且一期两条是 ready（06 §五 的默认组合照抄在配置里）。"""
+    """真实那张表装得起来，且一期三条是 ready（06 §五 的默认组合照抄在配置里）。"""
     cfg = templates.load(config.prompt_templates_file())
     assert cfg.token_warn_above == 100000
     ready = [t.name for t in cfg.templates if t.status == "ready"]
     # 长期投资 2026-09-22 翻 ready（ADR-0016 估值组件）；建仓价分析等 earnings 序列仍 pending
     assert ready == ["短期投资", "波段", "长期投资"]
+    # 固定头在最前（ADR-0022 决定 1：always_data 装载时合并），三张参考表与日K同窗。
     assert [(s.dataset, s.days) for s in cfg.by_name("短期投资").data] == [
+        ("fundamental_head", 1),
         ("daily", 120),
+        ("daily_basic", 120),
+        ("stk_limit", 120),
+        ("index_daily", 120),
         ("minute_60", 60),
         ("minute_30", 30),
         ("minute_5", 10),
@@ -276,3 +282,193 @@ templates:
     path.write_text(body, encoding="utf-8")
     with pytest.raises(TemplateConfigError, match="可选"):
         templates.load(path)
+
+
+# ── 固定头：always_data 装载合并 + CI 断言（ADR-0022 决定 1、06 §八-4 手法）────────
+
+
+def with_always(*rows: object) -> dict[str, Any]:
+    """一份带 `always_data` 的根配置：合并行为的测试都从这里出发。"""
+    return {
+        "token_warn_above": 100000,
+        "always_data": [
+            {
+                "dataset": templates.FUNDAMENTAL_HEAD,
+                "days": 1,
+                "fields": list(templates.FUNDAMENTAL_HEAD_FIELDS),
+            }
+        ],
+        "templates": [*(rows or (row(),))],
+    }
+
+
+def test_always_data_is_merged_into_every_loaded_template() -> None:
+    """装载时合并（设计合成 §2.1）：模板自己一个字没写，生效后的 data 第一段就是固定头。"""
+    cfg = parse(with_always(row(), row(name="波段", task="换个任务")))
+    for template in cfg.templates:
+        head = template.data[0]
+        assert head.dataset == templates.FUNDAMENTAL_HEAD
+        assert head.days == 1
+        assert head.fields == templates.FUNDAMENTAL_HEAD_FIELDS
+        # 自己声明的选择原样排在头后面，一条不丢、一条不重复
+        assert [s.dataset for s in template.data[1:]] == ["daily"]
+
+
+def test_always_data_cannot_be_cancelled_by_a_template() -> None:
+    """「不可取消」的两条路径：没写 → 强制补；写了 → 以在场者为准且只出现一次。
+
+    模板侧不存在"排除固定头"的语法，所以取消不了的机器形态就是这两条：补进去的那份
+    与模板自己那份撞了也不许叠成两张同名表。
+    """
+    cfg = parse(
+        with_always(
+            row(),
+            row(
+                name="手写过头的",
+                task="换个任务",
+                data=[
+                    {"dataset": "daily", "days": 10},
+                    {
+                        "dataset": templates.FUNDAMENTAL_HEAD,
+                        "days": 3,
+                        "fields": ["close"],
+                    },
+                ],
+            ),
+        )
+    )
+    silent, spoken = cfg.templates
+    assert [s.dataset for s in silent.data].count(templates.FUNDAMENTAL_HEAD) == 1
+    own = [s for s in spoken.data if s.dataset == templates.FUNDAMENTAL_HEAD]
+    assert len(own) == 1
+    assert own[0].days == 3 and own[0].fields == ("close",), "模板自己声明的那份要留住"
+
+
+def test_every_ready_template_of_the_shipped_table_carries_the_fundamental_head() -> None:
+    """06 §八-4 机器判定同款（ADR-0022 决定 1）：每条 ready 模板**生效后**的 data 都含固定头。
+
+    「生效后」= 经 `parse` 合并 `always_data` 的结果。合并逻辑失效、或 YAML 里那个键被删，
+    这条立刻红——单条模板删不掉它（上一条钉了没有语法），能弄丢它的只有这两处。
+    """
+    cfg = templates.load(config.prompt_templates_file())
+    ready = [t for t in cfg.templates if t.status == "ready"]
+    assert ready, "一条 ready 都没有，这条验收无从判起"
+    missing = [
+        t.name for t in ready if not any(s.dataset == templates.FUNDAMENTAL_HEAD for s in t.data)
+    ]
+    assert not missing, f"这些 ready 模板没带上最新基本面固定头：{missing}"
+
+
+def test_the_shipped_head_assertion_goes_red_without_always_data(tmp_path: Path) -> None:
+    """上一条的红路：把 `always_data` 从真表里删掉，断言必须判它红，不许空转。
+
+    模板没法逐条去掉固定头（没有那个键），能去掉它的最小改动就是删掉这段声明——这条就是
+    在机器上重放那次删除，证明 CI 断言真的判得出，而不是"永远为真"。
+    """
+    data = yaml.safe_load(config.prompt_templates_file().read_text(encoding="utf-8"))
+    assert "always_data" in data, "真表里没有 always_data：先补声明再谈红路"
+    del data["always_data"]
+    path = tmp_path / "prompt_templates.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    cfg = templates.load(path)
+    ready = [t for t in cfg.templates if t.status == "ready"]
+    assert ready
+    assert not all(any(s.dataset == templates.FUNDAMENTAL_HEAD for s in t.data) for t in ready), (
+        "删掉 always_data 后每条 ready 模板仍『带头』：CI 断言判不出真问题"
+    )
+
+
+def test_the_shipped_always_data_matches_the_code_registry() -> None:
+    """YAML 声明与代码兜底（`ALWAYS_DATA`）不许漂：两处分头合并会造出两种固定头。
+
+    YAML 供装载（真站），代码那份供直构模板（自定义组合，`with_always_data`）；谁改了
+    一边忘了另一边，装载出的头与自定义组合的头就会 days/fields 不同——同一次会话里
+    两种「最新基本面」。判声明本身，不经合并。
+    """
+    data = yaml.safe_load(config.prompt_templates_file().read_text(encoding="utf-8"))
+    assert data.get("always_data"), "真表里没有 always_data：先补声明再谈漂移"
+    assert data["always_data"] == [
+        {
+            "dataset": item.dataset,
+            "days": item.days,
+            "fields": list(item.fields or ()),
+        }
+        for item in templates.ALWAYS_DATA
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "needle"),
+    [(["eps"], "可选"), (None, "要自带 fields"), (["up_limit", "down_limit"], None)],
+    ids=["选了别表的字段", "整份没写 fields", "合法清单"],
+)
+def test_always_data_entries_validate_like_data_entries(field: object, needle: str | None) -> None:
+    """`always_data` 的行与模板 data 同一套校验（ADR-0016 决定 1）：写歪了装载即拒。"""
+    entry: dict[str, Any] = {"dataset": "stk_limit", "days": 5}
+    if field is not None:
+        entry["fields"] = field
+    root: dict[str, Any] = {
+        "token_warn_above": 100000,
+        "always_data": [entry],
+        "templates": [row()],
+    }
+    if needle is None:
+        cfg = parse(root)
+        assert cfg.templates[0].data[0].dataset == "stk_limit"
+        return
+    with pytest.raises(TemplateConfigError) as caught:
+        parse(root)
+    assert needle in str(caught.value)
+
+
+def test_always_data_days_must_be_positive() -> None:
+    root: dict[str, Any] = {
+        "token_warn_above": 100000,
+        "always_data": [
+            {
+                "dataset": templates.FUNDAMENTAL_HEAD,
+                "days": 0,
+                "fields": list(templates.FUNDAMENTAL_HEAD_FIELDS),
+            }
+        ],
+        "templates": [row()],
+    }
+    with pytest.raises(TemplateConfigError, match="天数"):
+        parse(root)
+
+
+def test_the_new_reference_tables_validate_fields_by_their_own_lists() -> None:
+    """stk_limit / index_daily 进了 `TABLE_DATASETS`：字段清单各归各，选错当场拒
+    （ADR-0016 决定 1 的"按 dataset 类别校验"随表扩展）。"""
+    for dataset, foreign in (("stk_limit", "pe_ttm"), ("index_daily", "up_limit")):
+        root(
+            row(
+                data=[
+                    {"dataset": "daily", "days": 10},
+                    {"dataset": dataset, "days": 10, "fields": [foreign]},
+                ]
+            )
+        )
+        with pytest.raises(TemplateConfigError, match="可选"):
+            parse(
+                root(
+                    row(
+                        data=[
+                            {"dataset": "daily", "days": 10},
+                            {"dataset": dataset, "days": 10, "fields": [foreign]},
+                        ]
+                    )
+                )
+            )
+    ok = parse(
+        root(
+            row(
+                data=[
+                    {"dataset": "daily", "days": 10},
+                    {"dataset": "stk_limit", "days": 10, "fields": ["up_limit", "down_limit"]},
+                    {"dataset": "index_daily", "days": 10, "fields": ["close"]},
+                ]
+            )
+        )
+    )
+    assert [s.dataset for s in ok.templates[0].data][-2:] == ["stk_limit", "index_daily"]

@@ -8,6 +8,12 @@
 
 token_warn_above: 100000
 
+# 固定头（ADR-0022 决定 1）：装载时合并进**每条**模板的 data，模板取消不掉；CI 断言
+# 「每条 ready 模板生效后都含 fundamental_head」钉这份声明在场（06 §八-4 手法）。
+# 形态 = 快照两列键值表：名称/代码/收盘日期 + daily_basic 末行的估值与换手，days 1。
+always_data:
+  - {dataset: fundamental_head, days: 1, fields: [close, total_mv, circ_mv, pe_ttm, pb, ps_ttm, dv_ttm, turnover_rate]}
+
 templates:
   - name: 短期投资
     status: ready
@@ -15,6 +21,11 @@ templates:
     task: 判断未来 1–4 周的机会与风险，给出趋势、量价关系、支撑与压力位
     data:
       - {dataset: daily, days: 120}
+      # 同窗对齐：三张参考表与日K同一个 days（设计合成 §2.2 同一手法），换窗只改日K那行
+      # 再把三行跟着改——不同窗的估值与涨跌停会把"那天"对错位。
+      - {dataset: daily_basic, days: 120, fields: [close, pe_ttm, pb, turnover_rate]}
+      - {dataset: stk_limit, days: 120, fields: [up_limit, down_limit]}
+      - {dataset: index_daily, days: 120, fields: [open, high, low, close, volume, amount]}
       - {dataset: minute_60, days: 60}
       - {dataset: minute_30, days: 30}
       - {dataset: minute_5, days: 10}
@@ -32,6 +43,9 @@ templates:
     task: 给出数周至数月的波段结构，标出可操作的买卖区域
     data:
       - {dataset: daily, days: 250}
+      - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
+      - {dataset: stk_limit, days: 250, fields: [up_limit, down_limit]}
+      - {dataset: index_daily, days: 250, fields: [open, high, low, close, volume, amount]}
       - {dataset: minute_60, days: 90}
     format: markdown
     fields: [open, high, low, close, volume, amount]
@@ -49,6 +63,7 @@ templates:
       - {dataset: daily, days: 750}
       - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
       - {dataset: forecast, days: 500, fields: [type, net_profit_min, net_profit_max]}
+      - {dataset: stk_limit, days: 750, fields: [up_limit, down_limit]}
     format: markdown
     fields: [open, high, low, close, volume, amount]
     adjust: backward
@@ -62,6 +77,10 @@ templates:
     task: 测算合理建仓区间，并给出区间对应的假设
     data:
       - {dataset: daily, days: 250}
+      # 转正时不再补：盘上已有的三张先挂上（设计合成 §一"便宜的先做"）。
+      - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
+      - {dataset: stk_limit, days: 250, fields: [up_limit, down_limit]}
+      - {dataset: index_daily, days: 250, fields: [open, high, low, close, volume, amount]}
     format: markdown
     fields: [open, high, low, close, volume, amount]
     adjust: backward
@@ -75,6 +94,10 @@ templates:
     task: 判断消息面对走势的影响与持续时间
     data:
       - {dataset: daily, days: 30}
+      # 同上：参考表先挂好，消息组件落地转正时只差它自己那一段。
+      - {dataset: daily_basic, days: 30, fields: [close, pe_ttm, pb, turnover_rate]}
+      - {dataset: stk_limit, days: 30, fields: [up_limit, down_limit]}
+      - {dataset: index_daily, days: 30, fields: [open, high, low, close, volume, amount]}
     format: markdown
     fields: [open, high, low, close, volume, amount]
     adjust: backward

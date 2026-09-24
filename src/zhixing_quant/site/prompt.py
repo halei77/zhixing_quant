@@ -23,6 +23,7 @@ from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.site import table, templates, tokens
 from zhixing_quant.site.compose import Section, assemble
 from zhixing_quant.site.templates import Selection, Template
+from zhixing_quant.sources.akshare.master import read_master
 from zhixing_quant.storage import layout
 from zhixing_quant.storage.query import read_bars
 from zhixing_quant.storage.tables import read_table
@@ -30,6 +31,13 @@ from zhixing_quant.storage.tables import read_table
 #: `minute_` 这个前缀从 `layout.MINUTE_5` 反推，不再抄一遍字符串：分钟线加一个周期（ADR-0009
 #: 决定 7 那个目录）时，这一层不需要第二处改动。
 _MINUTE = f"{layout.MINUTE_5.rsplit('_', 1)[0]}_"
+
+#: 大盘基准：模板里的 `index_daily` 段读**这只**指数，不是当前个股。个股代码与指数代码的
+#: 六位空间重叠（000001 既是平安银行也是上证指数），不换 symbol 就会把个股名字下不存在的
+#: 指数行全读成空。钉死上证指数——民间"大盘"的默认所指，`search.INDEXES` 名册首行同一口径；
+#: 小标题把名字与代码一起印出来，模型看得到基准是哪条（ADR-0012 决定 4：标题不编）。
+BENCHMARK = "000001.SH"
+BENCHMARK_NAME = "上证指数"
 
 
 class TemplateNotReady(ValueError):
@@ -147,8 +155,15 @@ def title_of(dataset: str) -> str:
     if dataset.startswith(_MINUTE):
         return f"{dataset[len(_MINUTE) :]} 分K"
     if dataset in templates.TABLE_DATASETS:
-        # 参考表（ADR-0016）：小标题由表自己的中文名给，不编。
-        return {"daily_basic": "估值（每日指标）", "forecast": "业绩预告"}.get(dataset, dataset)
+        # 参考表（ADR-0016）：小标题由表自己的中文名给，不编。大盘那条把指数名与代码一起
+        # 印出来——不写清是哪只指数，模型会拿它当任意大盘（BENCHMARK 的注释是同一条理由）。
+        return {
+            templates.FUNDAMENTAL_HEAD: "最新基本面",
+            "daily_basic": "估值（每日指标）",
+            "forecast": "业绩预告",
+            "stk_limit": "涨跌停价",
+            "index_daily": f"大盘（{BENCHMARK_NAME} {BENCHMARK}）",
+        }.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
 
 
@@ -186,6 +201,18 @@ NO_DATA_NOTE = (
 )
 
 
+def _name_of(code: str) -> str | None:
+    """证券简称：主数据快照的 listings（06 §四"基本信息"）。查无此码给 None，渲染成「—」。
+
+    与壳（`api.py`）那份名单同源——都出自 `read_master()`，不另立第二份答案；这里是
+    固定头取数的落点，读盘收在组合根（ADR-0012 决定 1）。
+    """
+    for listing in read_master().listings:
+        if listing.code == code:
+            return listing.name
+    return None
+
+
 def build(
     template: Template,
     code: str,
@@ -204,13 +231,46 @@ def build(
     票里只有分钟采集池那几只有 minute_*，`短期投资` 四段里三段空就整条拒的话，全市场只剩池内
     五票能用默认模板（2026-09-24 实测 300308 就是这么变成"没数据"的）。**每个组件都空** →
     照旧拒（`table.IncompleteComponent`）：一份数字都没有的提示词正是 06 §一 要防的那种东西。
+
+    **固定头**（ADR-0022 决定 1）：数据选择先过 `templates.with_always_data`——经 YAML 装载
+    的模板已在 `parse` 里合过（这里原样跳过），直构的 `Template`（自定义组合，ADR-0017）在
+    这里补上，两条路殊途同归到"每条 ready 模板都带最新基本面"。补的是选择不是正文，取数照旧
+    走下面的逐段循环、空了照旧出交代。
     """
     if template.status != "ready":
         raise TemplateNotReady(f"「{template.name}」要的数据组件还没落地：{template.waiting_on}")
     sections: list[Section] = []
     with_data = 0
-    for selection in template.data:
+    for selection in templates.with_always_data(template.data):
         start, end = window(calendar, as_of, selection.days)
+        if selection.dataset == templates.FUNDAMENTAL_HEAD:
+            # 固定头（ADR-0022 决定 1）：快照 = 各序列在窗口内的最新可见行，生成时现拼，
+            # 不落派生表——落盘会造第二个「最新」事实源。daily_basic 那天没行 → 整节交代
+            # （ADR-0020），不给一张只有表头的空表；日线缺行只让收盘/日期两格变「—」。
+            basic = read_table("daily_basic", code, start, end, root=config.parquet_dir())
+            if not basic:
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            bars = read_bars(
+                code, start, end, adjust="raw", dataset=layout.DAILY, root=config.parquet_dir()
+            )
+            latest = bars[-1] if bars else None
+            with_data += 1
+            sections.append(
+                Section(
+                    title=heading(selection, 1),
+                    body=table.render_fundamental_head(
+                        name=_name_of(code),
+                        code=code,
+                        close_date=None if latest is None else latest.trade_date,
+                        close=None if latest is None else latest.close,
+                        row=basic[-1],
+                        fields=selection.fields or (),
+                        format=template.format,
+                    ),
+                )
+            )
+            continue
         if selection.dataset == "forecast":
             # 事件型表（ADR-0016）：渲染列固定，行按 ann_date 点时筛——未来函数禁令的落点。
             rows = [
@@ -230,8 +290,10 @@ def build(
             )
             continue
         if selection.dataset in templates.TABLE_DATASETS:
-            # 参考表条目（ADR-0016）：不走 Bar 查询，也没有复权口径。
-            rows = read_table(selection.dataset, code, start, end, root=config.parquet_dir())
+            # 参考表条目（ADR-0016）：不走 Bar 查询，也没有复权口径。大盘那只指数在这换
+            # symbol——index_daily 的行按指数代码分区，拿个股代码去读必空（BENCHMARK 注释）。
+            symbol = BENCHMARK if selection.dataset == "index_daily" else code
+            rows = read_table(selection.dataset, symbol, start, end, root=config.parquet_dir())
             if not rows:
                 sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
                 continue
@@ -242,6 +304,7 @@ def build(
                     body=table.render_valuation(
                         rows,
                         fields=selection.fields or (),
+                        dataset=selection.dataset,
                         format=template.format,
                     ),
                 )
