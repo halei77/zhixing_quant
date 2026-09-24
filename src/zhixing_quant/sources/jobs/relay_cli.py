@@ -5,11 +5,16 @@ rds 单次查询在 5000 行处静默截断（响应声称 count=5644、has_more
 一律空页），**全市场拉取在本源不可用**——截断由 `has_more` 硬响，不会无声丢行。日常用
 `--symbols` 逐票拉取；`--symbols` 缺省 = 不过滤（受上述截断约束，报告会印缺口）。
 
+三个子命令：`pull` 拉某个交易日、`capture` 抓黄金样本、`backfill` 逐票区间回填（任务 #53，
+可续跑判据读盘、--relay 钉源、--attempts/--breaker 对齐 zx-minute——任务件在
+`jobs.backfill`，这个文件只做装配）。
+
 锚点对账（决定 3）：涨跌幅 = 涨停价 ÷ 干净区日线昨收（不复权对不复权），越过 R004 档位
 +1pp 的行即整批拒——整页不可信，一行都不写。锚不上（主数据没这票、日线缺昨收）的行
 **剔除并计数**：那不是"对不上"的证据，是"没得对"，与超阈是两回事，报告里分开说。
 
-退出码：0 跑完（含"那天无行"）；1 锚点对账整批拒；2 没开始（参数/网络/key）。
+`pull` 退出码：0 跑完（含"那天无行"）；1 锚点对账整批拒；2 没开始（参数/网络/key）。
+`backfill` 退出码：0 跑完无失败；1 跑完但有失败票；2 没跑完（熔断）或没开始。
 """
 
 from __future__ import annotations
@@ -19,15 +24,17 @@ import json
 import sys
 from collections.abc import Callable, Mapping
 from datetime import date, timedelta
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any
 
 from zhixing_quant import config
 from zhixing_quant.backtest.cli import check_range
+from zhixing_quant.sources.jobs import backfill
+from zhixing_quant.sources.relay.pages import FetchFn, fetch_pages
 from zhixing_quant.storage import tables
 from zhixing_quant.storage.tables import TableWriteReport
 
-FetchFn = Callable[..., tuple[str, dict[str, Any]]]
 RefFn = Callable[[str, date], float | None]
 LimitPctFn = Callable[[str], float]
 
@@ -61,6 +68,43 @@ def build_parser() -> argparse.ArgumentParser:
     pull.add_argument(
         "--out", type=Path, default=None, help="报告目录，默认 <数据根>/reports/relay/<今天>"
     )
+    backfill_cmd = sub.add_parser(
+        "backfill",
+        help="逐票区间回填（#53）：续跑判据读盘、--relay 钉源、--attempts/--breaker 对齐 zx-minute",
+    )
+    backfill_cmd.add_argument(
+        "--table",
+        default="daily_basic",
+        choices=backfill.BACKFILL_TABLES,
+        help="参考表名（仅回填支持的三张），默认 daily_basic",
+    )
+    backfill_cmd.add_argument(
+        "--symbols", default=None, help="逗号分隔票池；缺省=主数据全市场（--limit 可截断）"
+    )
+    backfill_cmd.add_argument(
+        "--limit", type=int, default=None, help="全市场模式只取前 N 只（给了 --symbols 时忽略）"
+    )
+    backfill_cmd.add_argument(
+        "--relay",
+        choices=("rds", "promax"),
+        default=None,
+        help="钉住单一源；缺省按 ADR-0014 顺序 rds→promax 自动退避、阶梯走完切源",
+    )
+    backfill_cmd.add_argument(
+        "--attempts",
+        type=int,
+        default=3,
+        help="单票抓取次数上限（client 内已含 1→5→30 分钟阶梯，调大是乘法不是加法）",
+    )
+    backfill_cmd.add_argument(
+        "--breaker",
+        type=int,
+        default=5,
+        help="连败这么多**只票**就熔断收工（zx-minute 同款语义；转接一票=一条请求链）",
+    )
+    backfill_cmd.add_argument(
+        "--out", type=Path, default=None, help="报告目录，默认 <数据根>/reports/relay/<今天>"
+    )
     return parser
 
 
@@ -75,52 +119,17 @@ def fetch_all_pages(
 ) -> tuple[str, list[list[str]], list[str], int | None]:
     """分页拉完整天。返回 (供数源, 原始 items, fields, 源声称的总行数或 None)。
 
-    **截断必须硬响**（2026-09-22 实测）：rds 在 offset≥5000 处一律返回空，而响应里
-    `count=5644, has_more=True` 照给——"下一页空"在该源有两种含义（拉完了 / 源截断了），
-    只有 `has_more` 能分辨。把它当"拉完了"就是无声丢 11% 的行，那种丢失在任何报告里
-    都不会自己出现。
+    守卫（**截断必须硬响**，2026-09-22 实测：rds offset≥5000 空页却 has_more=True）住在
+    `relay.pages.fetch_pages` 一处——pull 的按日拉取与 backfill 的逐票区间撞的是同一个
+    5000 行上限，两份守卫迟早漂成"一边响一边静默丢"。这里只负责把"哪天、哪票"拼成参数：
+    逐票模式绕开单次查询的 5000 行截断，一票一天一两行，永远碰不到上限。
     """
-    items: list[list[str]] = []
-    fields: list[str] = []
-    source = ""
-    offset = 0
-    total: int | None = None
-    params: dict[str, str] = {}
+    params: dict[str, object] = {}
     if date_param is not None:
         params[date_param] = day.strftime("%Y%m%d")
     if symbol is not None:
-        # 逐票模式绕开单次查询的 5000 行截断：一票一天一两行，永远碰不到上限。
-        from zhixing_quant.domain.symbol import normalize_code
-        from zhixing_quant.sources.akshare.fetch import market_of
-
-        params["ts_code"] = f"{normalize_code(symbol)}.{market_of(symbol).upper()}"
-    while True:
-        source, body = fetch(table, {**params, "limit": page_size, "offset": offset})
-        data = body.get("data") or {}
-        page_fields = [str(f) for f in data.get("fields") or []]
-        page_items = [[str(v) for v in row] for row in data.get("items") or []]
-        if not fields:
-            fields = page_fields
-        elif page_fields and page_fields != fields:
-            raise ValueError(f"offset={offset} 页的 fields 变了：{page_fields} != {fields}")
-        raw_count = data.get("count")
-        if isinstance(raw_count, int):
-            total = raw_count
-        items.extend(page_items)
-        # 分页元数据按源分两派（2026-09-22 实测）：rds 给 has_more/count、单次查询 5000 行
-        # 静默截断；promax **不认 limit/offset**，一次全吐（5644 行照回，has_more/count 均无）。
-        # 没有元数据的响应没有"下一页"可言——继续翻页只会把同一批行拉两遍撞"页内重复"。
-        if data.get("has_more") is None:
-            return source, items, fields, total
-        if len(page_items) < page_size:
-            if data.get("has_more") and total is not None and len(items) < total:
-                raise ValueError(
-                    f"{source} {table}@{day} 在 offset={offset} 处截断：已取 {len(items)} 行、"
-                    f"源声称共 {total} 行、下一页为空——本源单次查询有行数上限，"
-                    "全市场拉取不可用，改用 --symbols 逐票拉取"
-                )
-            return source, items, fields, total
-        offset += page_size
+        params["ts_code"] = backfill.ts_code_of(symbol)
+    return fetch_pages(table, params, fetch=fetch, page_size=page_size)
 
 
 FactorFn = Callable[[str, date], float | None]
@@ -187,6 +196,17 @@ def _anchor_stk_limit(
 #: 除权待核话术的回传通道。函数返回值已经四元了，再塞一元签名很难看；模块级列表在
 #: 单线程的 CLI 里是安全的，测试里每次用例前清空。
 _exdiv_notes: list[str] = []
+
+
+def take_exdiv_notes() -> list[str]:
+    """取走并清空除权待核话术。
+
+    pull 一个进程只锚一批，攒着没关系；backfill 按票循环几百次，不清会把 A 票的话术
+    重复记到 B、C、… 票的报告头上——话术必须随产话的那一批走（`make_anchor` 每票先清后取）。
+    """
+    notes = list(_exdiv_notes)
+    _exdiv_notes.clear()
+    return notes
 
 
 #: 收盘价的取整容差。双方都到分（0.01 元），逐位相等理应成立；一分钱的余量只吸收
@@ -304,6 +324,42 @@ def _limit_pct_of(symbol: str) -> float:
         return limits["main"]
 
 
+#: 档位查询的进程级缓存：`_limit_pct_of` 每次都重读主数据快照，stk_limit 回填一票几百行
+#: 会把快照读几百遍。缓存按票一份——一池票几千个键，几个 float 的事。
+_limit_pct_cached = lru_cache(maxsize=None)(_limit_pct_of)
+
+
+def make_anchor(table: str, *, limit_of: LimitOfFn | None = None) -> backfill.AnchorFn:
+    """表 → 回填用的锚点调用器：整票的行 + 预载日线索引 → (超阈, 锚不上, 放行, 话术)。
+
+    与 `_pull` 里那套逐行读盘的参考（`_prev_ref_of`/`_same_ref_of`）是同一个锚函数、两种
+    取参考的姿势：回填一票几百行，逐行开 DuckDB 不可接受，所以参考由 `backfill.BarRefs`
+    一次预载后注入。stk_limit 的除权待核话术经 `take_exdiv_notes` 每票清取，随 outcome 进报告。
+    """
+    from zhixing_quant.sources.relay.tables import PARSERS
+
+    if table not in ANCHORS or table not in PARSERS:
+        raise ValueError(
+            f"表 {table!r} 没有登记解析器或锚点对账：ADR-0015 决定 3 不允许无锚入干净区"
+        )
+    anchor = ANCHORS[table]
+    picker = limit_of if limit_of is not None else _limit_pct_cached
+
+    def call(
+        rows: list[Any], refs: backfill.BarRefs
+    ) -> tuple[list[str], int, list[Any], list[str]]:
+        take_exdiv_notes()  # 上一票的残留先清：话术只许归产它的那一批
+        if table == "stk_limit":
+            problems, unanchored, kept = anchor(
+                rows, refs.prev, refs.same, picker, factor_of=refs.factor
+            )
+        else:
+            problems, unanchored, kept = anchor(rows, refs.prev, refs.same, picker)
+        return problems, unanchored, kept, take_exdiv_notes()
+
+    return call
+
+
 def _pull(
     args: argparse.Namespace,
     *,
@@ -410,6 +466,44 @@ def _pull(
     return "\n".join([*head, *tail]), 0, ledger
 
 
+def _backfill(
+    args: argparse.Namespace,
+    *,
+    fetch: FetchFn,
+) -> tuple[str, int, Path]:
+    """装配一次回填：票池（--symbols 或主数据全市场[:limit]）→ 钉源 fetch → `backfill.run`。
+
+    这里没有业务规则：续跑判据、重试熔断、锚点落盘、日报渲染全在 `jobs.backfill`（与
+    zx-minute"CLI 只装配"同一条分工）。`root`/`directory` 必须由这里说死（坑 #24）。
+    """
+    if args.symbols is not None:
+        pool = [code.strip() for code in args.symbols.split(",") if code.strip()]
+        scope = f"--symbols {len(pool)} 票"
+    else:
+        from zhixing_quant.sources.akshare.master import read_master
+
+        pool = list(read_master().to_master().universe_on(date.today()))
+        if args.limit is not None:
+            pool = pool[: args.limit]
+        scope = "主数据全市场" + (f"[:{args.limit}]" if args.limit is not None else "")
+    if not pool:
+        raise ValueError("票池是空的：--symbols 没解析出代码，或主数据在册名单为空")
+    relays: tuple[str, ...] = (args.relay,) if args.relay else ("rds", "promax")
+    result = backfill.run(
+        args.table,
+        symbols=pool,
+        fetch=partial(fetch, relays=relays),  # 钉源只动这里：run 层拿到的 fetch 已带 relays
+        anchor=make_anchor(args.table),
+        root=config.parquet_dir(),
+        directory=args.out or config.reports_dir() / "relay",
+        scope=scope,
+        attempts=args.attempts,
+        breaker=args.breaker,
+        progress=lambda line: print(line, flush=True),
+    )
+    return result.markdown, result.exit_code(), result.report
+
+
 def _capture(args: argparse.Namespace) -> str:
     """抓一份原始响应快照进 golden/relay/（ADR-0015 决定 4 的"抓下来的"那一半；
     "认过的"要用户批准后才进 tests/golden/，两处隔开）。"""
@@ -452,6 +546,13 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "backfill":
+            # parse_args 在 try 外先跑：多余参数/非法取值由 argparse 以退出码 2 拒掉，
+            # 一步网络都不发（独立审计 M1 / 任务 #30 的 fail-closed 口径，测试同款钉住）。
+            report, code, path = _backfill(args, fetch=relay_fetch)
+            print(report)
+            print(f"报告落 {path}")
+            return code
         args.day_parsed = date.fromisoformat(args.day)
         if args.command == "capture":
             print(_capture(args))
