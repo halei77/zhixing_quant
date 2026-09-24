@@ -223,3 +223,87 @@ test("生成失败时正文区给出原因，不是空白", async ({ page }) => 
   await expect(body).toContainText("还没落地", { timeout: 15_000 });
   await expect(body).not.toContainText("选一只票，点生成");
 });
+
+// ── 任务 #59 数据面扩三块的自测（用户要求「从接口，页面都要进行实际调用的测试」）──
+// 断言只钉「上去了就不该消失」的形状：基本面头、三张盘上参考表段、1 分K 自定义入口。
+// Forward PE 段（C 刀）上线后这里不该翻——它加段不减段。
+
+test("每条 ready 模板都带最新基本面头 + 三张盘上参考表段（接口实调）", async ({ page }) => {
+  // 走 /api/prompt 真调，不走页面点击：这一条验的是组装层契约，页面只是搬运
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  const r = await page.evaluate(async () => {
+    const out: Record<string, string[]> = {};
+    const t = await (await fetch("/api/templates")).json() as {
+      templates: { name: string; status: string }[];
+    };
+    for (const tpl of t.templates.filter((x) => x.status === "ready")) {
+      const res = await fetch("/api/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: "600519", template: tpl.name }),
+      });
+      const d = (await res.json()) as { text?: string };
+      out[tpl.name] = (d.text ?? "")
+        .split("\n")
+        .filter((x) => x.startsWith("###"))
+        .map((x) => x.slice(0, 24));
+    }
+    return out;
+  });
+  for (const [name, heads] of Object.entries(r)) {
+    // 用 startsWith 不用 toContain：heads 是截断到 24 字的标题，toContain 对数组是精确匹配
+    expect(
+      heads.some((h) => h.startsWith("### 最新基本面")),
+      `${name} 必须有最新基本面头，实际段题=${heads.join(" | ")}`,
+    ).toBe(true);
+    // 三张盘上参考表（ADR-0015 已接、A 刀挂进模板）：估值 / 涨跌停 / 大盘
+    expect(heads.some((h) => h.includes("估值")), `${name} 必须有估值段`).toBe(true);
+    expect(heads.some((h) => h.includes("涨跌停")), `${name} 必须有涨跌停段`).toBe(true);
+    // 大盘段只服务短期/波段（剥 Beta，设计合成 §一 第 11 条）——长期投资是估值视角，
+    // 设计里就没给它挂 index_daily，这里不许一刀切。
+    if (name === "短期投资" || name === "波段") {
+      expect(heads.some((h) => h.includes("大盘")), `${name} 必须有大盘段`).toBe(true);
+    }
+  }
+});
+
+test("基本面头是键值两列表、含市值与 PE，且口径行在（06 §四 基本信息）", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  await page.locator('[data-testid="search"]').fill("600519");
+  await page.locator('[data-testid="suggest"] button').first().click();
+  const body = page.locator('[data-testid="prompt-body"]');
+  await expect(body).toContainText("### 最新基本面", { timeout: 20_000 });
+  await expect(body).toContainText("贵州茅台");
+  await expect(body).toContainText("600519");
+  // 估值四件套（ADR-0016 的字段清单）+ 口径行自证单位
+  await expect(body).toContainText("PE");
+  await expect(body).toContainText("PB");
+  // 口径行写明不复权收盘与「—」的语义（ADR-0022 决定 1 / ADR-0016 决定 2、3）
+  await expect(body).toContainText("不复权");
+});
+
+test("自定义组合能勾 1 分K，且天数封在 30 以内（B 刀接线）", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
+  await page.locator('[data-testid="search"]').fill("600519");
+  await page.locator('[data-testid="suggest"] button').first().click();
+  await expect(page.locator("pre")).toContainText("你是资深", { timeout: 20_000 });
+
+  await page.locator('[data-testid="templates"]').selectOption({ label: "自定义" });
+  // 1 分K 在自定义清单里（B 刀加的 DATASETS 项）
+  const box = page.locator("label", { hasText: "1 分K" }).locator('input[type="checkbox"]');
+  await expect(box).toBeVisible();
+  await box.check();
+  await page.locator('input[aria-label="1 分K 天数"]').fill("10");
+  await page.locator('[data-testid="generate"]').click();
+  await expect(page.locator('[data-testid="prompt-body"]')).toContainText("1 分K", { timeout: 20_000 });
+
+  // 31 天必须被服务端拒（site/api 的 cap=30），壳不静默改写
+  await page.locator('input[aria-label="1 分K 天数"]').fill("31");
+  await page.locator('[data-testid="generate"]').click();
+  await expect(page.locator('[data-testid="prompt-body"]')).toContainText(/31|1–30|越界/, {
+    timeout: 15_000,
+  });
+});
