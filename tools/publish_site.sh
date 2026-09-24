@@ -11,6 +11,15 @@ rsync -az --delete \
   /home/lei/zhixing_data/data/minute_60 \
   aliyun:/opt/zhixing_data/data/
 
+# 参考表（ADR-0015）：估值/预告/涨跌停等。**必须一起发**——2026-09-24 实测服务器上
+# daily_basic 是空的（本地 80M），于是「长期投资」的估值段在生产一律出「本节无数据」。
+# 只发行情四 dataset 的那版漏了这一段，提示词站点二期的估值组件等于没上线。
+# 目录不存在的跳过（fina_audit/stk_holdernumber 尚未采集是常态），不因此让整次发布失败。
+for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily; do
+  [ -d "/home/lei/zhixing_data/data/$t" ] || continue
+  rsync -az --delete "/home/lei/zhixing_data/data/$t" aliyun:/opt/zhixing_data/data/
+done
+
 rsync -az --delete \
   /home/lei/zhixing_data/golden/manifest.csv \
   "/home/lei/zhixing_data/golden/stock_info_sh_name_code__主板A股.csv" \
