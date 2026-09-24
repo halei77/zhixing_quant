@@ -20,7 +20,9 @@ rsync -az --delete \
 # daily_basic 是空的（本地 80M），于是「长期投资」的估值段在生产一律出「本节无数据」。
 # 只发行情四 dataset 的那版漏了这一段，提示词站点二期的估值组件等于没上线。
 # 目录不存在的跳过（fina_audit/stk_holdernumber 尚未采集是常态），不因此让整次发布失败。
-for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily; do
+# report_rc 是远期 PE 的原料（ADR-0022 决定 2）——2026-09-25 又差点漏了它（同族第二次）：
+# 新接一张参考表就该同步这行，否则生产远期PE 段一律「本节无数据」。
+for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily report_rc; do
   [ -d "/home/lei/zhixing_data/data/$t" ] || continue
   rsync -az --delete "/home/lei/zhixing_data/data/$t" aliyun:/opt/zhixing_data/data/
 done
@@ -48,12 +50,10 @@ if [ -d /home/lei/zhixing_data/data/minute_1 ]; then
     /home/lei/zhixing_data/data/minute_1 aliyun:/opt/zhixing_data/data/
 fi
 
-rsync -az --delete \
-  /home/lei/zhixing_data/golden/manifest.csv \
-  "/home/lei/zhixing_data/golden/stock_info_sh_name_code__主板A股.csv" \
-  "/home/lei/zhixing_data/golden/stock_info_sz_name_code__A股列表.csv" \
-  /home/lei/zhixing_data/golden/tool_trade_date_hist_sina.csv \
-  aliyun:/opt/zhixing_data/golden/
+# golden 整目录发，不再点名文件——2026-09-25 之前点名 4 个，于是 #57 加的停牌两份快照没发，
+# 「服务器缺它 zhixing-site 起不来」（#57 的 agent 当时手工补的）。**新接一份主数据快照就该
+# 自动跟上**，点名清单是第三种同族漏（前两种：参考表漏发、report_rc 漏列）。
+rsync -az --delete /home/lei/zhixing_data/golden/ aliyun:/opt/zhixing_data/golden/
 
 # 前端（ADR-0018 决定 7）：服务器无 node，故**本机构建、发构建产物**，不在服务器构建。
 # `frontend/dist` 在 .gitignore 里，仓库镜像带不过去，所以单发这一步；node_modules 不发
