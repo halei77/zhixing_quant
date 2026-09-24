@@ -348,3 +348,16 @@ main pre {
     backdrop-filter: none;
   }
 }
+/* docs/11 §五 降级的另一半：浏览器不支持 backdrop-filter 时，玻璃档退化为实底
+   （可读性优先于观感）。规范早写了这条，实现漏了——2026-09-24 实测全库 0 处 @supports
+   兜底，不支持 blur 的浏览器会拿到「半透明但背后没糊」的低对比卡片。
+   与上面 prefers-reduced-transparency 那段同一个落点，不另立一套值。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-chrome,
+  .glass-float,
+  .glass-inset {
+    background: var(--zx-surface-solid);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
