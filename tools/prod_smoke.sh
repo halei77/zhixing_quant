@@ -92,10 +92,40 @@ import json,sys,re; t=json.load(sys.stdin).get('text',''); print('|'.join(re.fin
 echo "  段题：$heads"
 chk "300308 出日K段" "$(echo "$heads" | grep -q '日K' && echo 1 || echo 0)"
 
-echo "== 8) pending 模板拒生成（400）=="
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/prompt" \
-  -H 'Content-Type: application/json' -d '{"code":"600519","template":"建仓价分析"}')
-chk "建仓价分析（pending）→ 400（实测 $code）" "$([ "$code" = 400 ] && echo 1 || echo 0)"
+echo "== 8) 模板状态与生成行为对得上（pending 拒、ready 出）=="
+# 2026-09-25 改判据：原来钉「建仓价分析 pending → 400」，而 ROE/增速（rds fina_indicator）
+# 接进干净区后它按 06 §十-6 **翻 ready 了**，那条断言随之过期（红了一晚）。判据本身改成
+# 「状态与行为一致」——不钉死哪个模板是 pending，免得下次转正又红。
+# 现状：建仓价分析 ready（21,662 token 满窗）、最新消息解读 pending（等消息组件）。
+cat > /tmp/prod_smoke_status.py <<'PY2'
+import json, sys, urllib.error, urllib.request
+base = sys.argv[1]
+tpls = json.load(urllib.request.urlopen(base + "/api/templates"))["templates"]
+bad = []
+for t in tpls:
+    req = urllib.request.Request(
+        base + "/api/prompt",
+        data=json.dumps({"code": "600519", "template": t["name"]}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req)
+        got = 200
+    except urllib.error.HTTPError as e:
+        got = e.code
+    want = 200 if t["status"] == "ready" else 400
+    flag = "ok" if got == want else "MISMATCH"
+    print(f"  {t['name']} status={t['status']} → {got}（期望 {want}）{flag}")
+    if got != want:
+        bad.append(t["name"])
+sys.exit(1 if bad else 0)
+PY2
+if python3 /tmp/prod_smoke_status.py "$BASE"; then
+  chk "模板状态与生成行为一致" 1
+else
+  chk "模板状态与生成行为一致" 0
+fi
 
 echo "== 9) 自定义组合（含 1 分K 封顶）=="
 code=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' -X POST "$BASE/api/prompt" \
