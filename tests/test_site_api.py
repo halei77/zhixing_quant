@@ -830,6 +830,35 @@ def test_custom_composition_rejects_the_four_illegal_shapes(client: TestClient) 
         assert needle in response.json()["detail"], payload
 
 
+def test_custom_accepts_minute_one_and_its_thirty_day_cap(client: TestClient) -> None:
+    """三处白名单的第三处：`minute_1` 进自定义且天数单独封顶 30（1 分K token 很贵，
+    10 天 ≈ 56.6k、30 天 ≈ 170k，设计合成 §三），超了按 400 带原话拒。"""
+    ok = client.post(
+        "/api/prompt",
+        json={
+            "code": "600519",
+            "template": "自定义",
+            "as_of": "2024-01-04",
+            "custom": [{"dataset": layout.MINUTE_1, "days": 30}, {"dataset": "daily", "days": 3}],
+        },
+    )
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["tokens"] > 0
+    assert "1 分K" in body["text"], "标题从名字派生（ADR-0012 决定 4），词表不在这层加"
+    beyond = client.post(
+        "/api/prompt",
+        json={
+            "code": "600519",
+            "template": "自定义",
+            "as_of": "2024-01-04",
+            "custom": [{"dataset": layout.MINUTE_1, "days": 31}],
+        },
+    )
+    assert beyond.status_code == 400
+    assert "1–30" in beyond.json()["detail"], "封顶要报 1–30，不是通用的 1–750"
+
+
 # ── ADR-0018 决定 2：发的是构建出来的前端 ───────────────────────────────────────
 
 

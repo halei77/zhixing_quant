@@ -107,10 +107,11 @@ def test_minute_frame_sends_symbol_period_and_no_adjust(period: str) -> None:
 
 
 def test_minute_frame_refuses_a_period_with_no_dataset() -> None:
-    """源真的会回 1 分钟的数据。让它走完再发现没有 `minute_1` 这个目录，是几十万请求之后才响。"""
+    """源真的会回这些周期的数据（`1`/`15` 都通）。让它走完再发现没有对应 dataset，是几十万
+    请求之后才响。`1` 已注册给 ngw 的 `minute_1`（2026-09-24），这道闸用仍然没注册的 `15` 判。"""
     call = Recorder([{"day": "2024-01-02 09:31:00"}])
     with pytest.raises(ValueError, match="不支持的分钟周期"):
-        fetch.minute_frame("600519", "1", call=call)
+        fetch.minute_frame("600519", "15", call=call)
     assert call.kwargs == []
 
 

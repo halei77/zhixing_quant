@@ -28,8 +28,11 @@ from zhixing_quant.domain.symbol import normalize_code
 
 #: 数据集名即目录名。分钟线（Step 4）另起名字：布局同构，但体量和口径都不同，不混在一份文件里。
 DAILY = "daily"
-#: 分钟线三个 dataset（ADR-0009 决定 7）。周期写在名字里而不是写在列里：一个文件全是
-#: 5 分钟的行，读它的人不需要先 `WHERE period=5`，也不必担心一次查询把两种周期平均到一起。
+#: 分钟线四个 dataset（ADR-0009 决定 7 定 5/30/60；1 分钟是后补的第四个，布局同构、
+#: 源是 niuguwang type=11——设计合成 design-2026-09-24 §2.3，源 ADR 待立）。周期写在
+#: 名字里而不是写在列里：一个文件全是 5 分钟的行，读它的人不需要先 `WHERE period=5`，
+#: 也不必担心一次查询把两种周期平均到一起。
+MINUTE_1 = "minute_1"
 MINUTE_5 = "minute_5"
 MINUTE_30 = "minute_30"
 MINUTE_60 = "minute_60"
@@ -130,6 +133,7 @@ class DatasetSpec:
 
 SPECS: tuple[DatasetSpec, ...] = (
     DatasetSpec(DAILY, COLUMNS, ("trade_date",), ("trade_date",)),
+    DatasetSpec(MINUTE_1, MINUTE_COLUMNS, ("ts",), ("trade_date", "ts")),
     DatasetSpec(MINUTE_5, MINUTE_COLUMNS, ("ts",), ("trade_date", "ts")),
     DatasetSpec(MINUTE_30, MINUTE_COLUMNS, ("ts",), ("trade_date", "ts")),
     DatasetSpec(MINUTE_60, MINUTE_COLUMNS, ("ts",), ("trade_date", "ts")),
@@ -148,10 +152,17 @@ def dataset_spec(dataset: str) -> DatasetSpec:
 
 
 def minute_dataset(period: str) -> str:
-    """周期（`5`/`30`/`60`）→ dataset 名。源那边给的就是这三个字符串，这里只做一遍映射。"""
+    """周期（`1`/`5`/`30`/`60`）→ dataset 名。源那边给的就是这几个字符串，这里只做一遍映射。
+
+    报错文案从 `SPECS` 现推而不是抄一句 ADR 摘要：注册表加一个周期，文案自动跟上——
+    写死的「只定了 5/30/60」在 1 分钟注册当天就变成了错话。
+    """
     name = f"minute_{period}"
     if name not in _BY_NAME:
-        raise ValueError(f"不支持的分钟周期 {period!r}：ADR-0009 只定了 5/30/60")
+        registered = "/".join(
+            sorted(spec.name for spec in SPECS if spec.name.startswith("minute_"))
+        )
+        raise ValueError(f"不支持的分钟周期 {period!r}：注册的分钟 dataset 是 {registered}")
     return name
 
 

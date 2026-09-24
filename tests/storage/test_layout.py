@@ -130,3 +130,23 @@ def test_record_of_follows_the_column_order() -> None:
         True,
         None,  # 日线没有收盘时刻：这一列在 `Record` 上存在，但不进日线文件（`COLUMNS`）
     )
+
+
+def test_minute_one_is_registered_like_the_other_minute_datasets() -> None:
+    """`minute_1`（ngw 1 分钟）进 `SPECS` 才有形状、主键、排序——漏注册的表现是
+    `dataset_spec` 响一声，而不是写进没人读的新目录。"""
+    spec = layout.dataset_spec(layout.MINUTE_1)
+    assert spec.name == "minute_1"
+    assert spec.columns == layout.MINUTE_COLUMNS
+    assert spec.key == ("ts",)
+    assert spec.order == ("trade_date", "ts")
+    assert layout.minute_dataset("1") == "minute_1"
+
+
+def test_the_period_error_lists_whats_registered_instead_of_a_stale_adr_line() -> None:
+    """错误文案从 `SPECS` 现推：写死的「ADR-0009 只定了 5/30/60」在 1 分钟注册当天就是错话。"""
+    with pytest.raises(ValueError, match="不支持的分钟周期") as caught:
+        layout.minute_dataset("15")
+    message = str(caught.value)
+    assert "5/30/60" not in message
+    assert "minute_1" in message and "minute_60" in message

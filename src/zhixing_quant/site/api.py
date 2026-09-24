@@ -229,7 +229,9 @@ def create_app(
         可变面收窄到 dataset × days；校验粒度与模板装载同级，全部 ValueError → 400 带原话。"""
         if not entries:
             raise ValueError("自定义组合是空的：至少要选一个K线类型")
-        allowed = {"daily", "minute_5", "minute_30", "minute_60"}
+        #: K线白名单与 layout.SPECS 里能按天窗读的那几个 dataset 一一对应（字面量而不是
+        #: layout 常量：ADR-0012 决定 1——storage 只出现在组合根，壳层只认名字）。
+        allowed = {"daily", "minute_1", "minute_5", "minute_30", "minute_60"}
         seen: set[str] = set()
         selections: list[Selection] = []
         for entry in entries:
@@ -239,8 +241,11 @@ def create_app(
                 )
             if entry.dataset in seen:
                 raise ValueError(f"K线类型 {entry.dataset} 选了两次")
-            if not 1 <= entry.days <= 750:
-                raise ValueError(f"{entry.dataset} 的天数 {entry.days} 越界（1–750）")
+            # 1 分K 单独封顶：10 天 ≈ 56.6k token、30 天 ≈ 170k（设计合成 §三 实测估算），
+            # 自定义面再放宽就会把 10 万阈值顶破；别的周期仍是 1–750。
+            cap = 30 if entry.dataset == "minute_1" else 750
+            if not 1 <= entry.days <= cap:
+                raise ValueError(f"{entry.dataset} 的天数 {entry.days} 越界（1–{cap}）")
             seen.add(entry.dataset)
             selections.append(Selection(dataset=entry.dataset, days=entry.days))
         from zhixing_quant.site.templates import Template as _T

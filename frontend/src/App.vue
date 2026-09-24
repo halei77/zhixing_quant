@@ -29,6 +29,9 @@ const DATASETS: { key: string; label: string; days: number }[] = [
   { key: 'minute_60', label: '60 分K', days: 60 },
   { key: 'minute_30', label: '30 分K', days: 30 },
   { key: 'minute_5', label: '5 分K', days: 10 },
+  // 1 分K（niuguwang 源，minute_1）：token 贵，默认深度取 10 天（≈56.6k token，
+  // 设计合成 §三 实测估算）；服务端把它的自定义天数封在 30 以内（site/api）。
+  { key: 'minute_1', label: '1 分K', days: 10 },
 ]
 function datasetLabel(key: string): string {
   return DATASETS.find((d) => d.key === key)?.label ?? key
@@ -52,7 +55,7 @@ const quote = ref<Quote | null>(null)
 
 const templates = ref<Template[]>([])
 const templateName = ref('')
-const custom = reactive<Record<string, boolean>>({ daily: true, minute_60: false, minute_30: false, minute_5: false })
+const custom = reactive<Record<string, boolean>>({ daily: true, minute_60: false, minute_30: false, minute_5: false, minute_1: false })
 const customDays = reactive<Record<string, number>>(
   Object.fromEntries(DATASETS.map((d) => [d.key, d.days])),
 )
