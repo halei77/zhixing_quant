@@ -748,3 +748,278 @@ def test_pull_page_size_defaults_to_the_table_cap(tmp_path: Any) -> None:
     assert "没有行" in report
     with pytest.raises(ValueError, match="上限 1000"):
         fetch_pages("forecast", {}, fetch=fetch, page_size=5000)  # 显式超上限：发前拒
+
+
+# ── fina_indicator：短页族第二张表（顶 100、全史左界 1985、rds-only） ──────────
+
+FINA_FIELDS = ["ts_code", "ann_date", "end_date", "roe_waa", "tr_yoy", "netprofit_yoy"]
+#: fina_indicator 的静默行顶（2026-09-25 实测：limit≥101 一律静默回 100 行）。
+FINA_CAP = 100
+
+
+def _fina_item(
+    ann: str = "20260425",
+    end: str = "20260331",
+    roe: str = "5.79",
+    tr: str = "4.65",
+    np: str = "3.03",
+    symbol: str = "600519.SH",
+) -> list[str]:
+    return [symbol, ann, end, roe, tr, np]
+
+
+def _fina_body(items: list[list[str]], fields: list[str] | None = None) -> dict[str, Any]:
+    return {"code": 0, "data": {"fields": fields or FINA_FIELDS, "items": items}}
+
+
+def test_fina_indicator_page_must_align_to_its_own_cap_of_100() -> None:
+    """fina_indicator 的顶是 100 不是 5000（2026-09-25 实测 limit≥101 静默回 100 行）：
+    拿 5000 来翻这一族，"页 < limit"恒真，截断会被读成拉完——发前拒。"""
+    from zhixing_quant.sources.relay.pages import SHORT_PAGE_CAPS, fetch_pages_short
+
+    assert SHORT_PAGE_CAPS["fina_indicator"] == 100 and "fina_indicator" in SHORT_PAGE_CAPS
+    calls: list[object] = []
+
+    def fetch(_api: str, _params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(_params)
+        raise AssertionError("不该发请求")
+
+    with pytest.raises(ValueError, match="只认 page_size=100"):
+        fetch_pages_short("fina_indicator", {"ts_code": "600519.SH"}, fetch=fetch, page_size=5000)
+    with pytest.raises(ValueError, match="limit=101 实测被静默顶成 100"):
+        fetch_pages_short("fina_indicator", {}, fetch=fetch, page_size=FINA_CAP + 1)
+    assert calls == []
+
+
+def test_fina_indicator_default_page_size_is_the_silent_cap() -> None:
+    """page_limit_of 短页族先查静默顶：fina=100、report_rc 仍 5000、forecast 仍 1000。"""
+    from zhixing_quant.sources.relay.pages import page_limit_of
+
+    assert page_limit_of("fina_indicator") == 100
+    assert page_limit_of("report_rc") == 5000
+    assert page_limit_of("forecast") == 1000
+
+
+def test_fina_indicator_full_page_splits_from_1985_not_1990() -> None:
+    """全史左界按表登记：实测 000001.SZ 最早报告期 end_date=19891231（首披 19900321）——
+    沿用 report_rc 的 1990 默认左界会把 1989 年报静默丢在窗外，二分永远问不到它。"""
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    today = date(2026, 9, 25)
+    calls: list[dict[str, Any]] = []
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(dict(params))
+        if "start_date" not in params:
+            return "rds", _fina_body([_fina_item()] * FINA_CAP)  # 首查顶满（全史只回最新 100 行）
+        start = date(int(str(params["start_date"])[:4]), 1, 1)
+        if start.year <= 2000:
+            return "rds", _fina_body([])  # 左半空窗短页即底
+        return "rds", _fina_body([_fina_item(), _fina_item(end="20260630", ann="20260815")])
+
+    _source, items, _fields, total = fetch_pages_short(
+        "fina_indicator", {"ts_code": "600519.SH"}, fetch=fetch, today=today
+    )
+    assert total is None and len(calls) == 3
+    assert calls[1]["start_date"] == "19850101", "第一刀左界必须是 1985（19891231 报告期在窗内）"
+    midpoint = date(1985, 1, 1) + (today - date(1985, 1, 1)) / 2
+    assert calls[1]["end_date"] == midpoint.strftime("%Y%m%d")
+    assert calls[2]["start_date"] == (midpoint + timedelta(days=1)).strftime("%Y%m%d")
+    assert calls[2]["end_date"] == "20260925"
+    assert len(items) == 2, "满页那份 100 行不入库本——重查的两半才是完整集"
+
+
+def test_fina_indicator_short_page_means_bottom_with_offset_zero() -> None:
+    from zhixing_quant.sources.relay.pages import fetch_pages_short
+
+    calls: list[dict[str, Any]] = []
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        calls.append(dict(params))
+        return "rds", _fina_body([_fina_item(), _fina_item(end="20260630", ann="20260815")])
+
+    source, items, fields, _total = fetch_pages_short(
+        "fina_indicator", {"ts_code": "600519.SH"}, fetch=fetch, today=date(2026, 9, 25)
+    )
+    assert source == "rds" and len(items) == 2 and fields == FINA_FIELDS
+    assert len(calls) == 1 and calls[0]["offset"] == 0 and calls[0]["limit"] == FINA_CAP
+
+
+# ── fina_indicator 解析：孪生去重与值域 ────────────────────────────────────────
+
+
+def test_fina_indicator_parse_dedupes_identical_twins_but_keeps_one() -> None:
+    """默认响应不带 update_flag，孪生在指标列上同值（2026-09-25 实测 600519 93 对孪生中
+    92 对同值）：同键同值跳过——留两行对存储是主键冲突，对读是多算一次。"""
+    from zhixing_quant.sources.relay.tables import parse_fina_indicator
+
+    rows = parse_fina_indicator("rds", FINA_FIELDS, [_fina_item(), _fina_item()])
+    assert len(rows) == 1
+    assert rows[0].roe_waa == 5.79 and rows[0].tr_yoy == 4.65 and rows[0].netprofit_yoy == 3.03
+
+
+def test_fina_indicator_parse_prefers_the_row_with_values_over_the_empty_twin() -> None:
+    """相异孪生实测恰是"值行 vs 空行"（000001.SZ 20240630：flag=1 行 roe_waa=5.79、
+    flag=0 行 roe_waa=None）：非 None 指标更多的那行胜出，空行不覆盖值行。"""
+    from zhixing_quant.sources.relay.tables import parse_fina_indicator
+
+    full = _fina_item()
+    empty = _fina_item(roe="None", tr="None", np="None")
+    rows = parse_fina_indicator("rds", FINA_FIELDS, [empty, full])
+    assert len(rows) == 1 and rows[0].roe_waa == 5.79
+    rows = parse_fina_indicator("rds", FINA_FIELDS, [full, empty])
+    assert len(rows) == 1 and rows[0].roe_waa == 5.79, "空行后到也不许把值行冲掉"
+
+
+def test_fina_indicator_parse_refuses_two_nonempty_rows_with_different_values() -> None:
+    """同键两行都非空且不同 → 抛：源自相矛盾，存储层不裁决谁对（ADR-0015 同款纪律）。"""
+    from zhixing_quant.sources.relay.tables import parse_fina_indicator
+
+    with pytest.raises(ValueError, match="相异且都非空"):
+        parse_fina_indicator(
+            "rds",
+            FINA_FIELDS,
+            [_fina_item(roe="5.79"), _fina_item(roe="6.01")],
+        )
+
+
+def test_fina_indicator_parse_keeps_nulls_none_and_rejects_garbage() -> None:
+    """null → None（禁 0 填充）；缺列整批拒；不可解析的脏串整批拒；量级垃圾整批拒。"""
+    from zhixing_quant.sources.relay.tables import parse_fina_indicator
+
+    rows = parse_fina_indicator("rds", FINA_FIELDS, [_fina_item(roe="None", tr="", np="nan")])
+    assert rows[0].roe_waa is None and rows[0].tr_yoy is None and rows[0].netprofit_yoy is None
+    with pytest.raises(ValueError, match="缺字段"):
+        parse_fina_indicator(
+            "rds",
+            ["ts_code", "ann_date", "end_date", "tr_yoy", "netprofit_yoy"],
+            [["600519.SH", "20260425", "20260331", "4.65", "3.03"]],
+        )
+    with pytest.raises(ValueError, match="could not convert"):
+        parse_fina_indicator("rds", FINA_FIELDS, [_fina_item(roe="暴涨")])
+    with pytest.raises(ValueError, match="量级域"):
+        parse_fina_indicator("rds", FINA_FIELDS, [_fina_item(roe="1e18")])
+
+
+def test_fina_indicator_parse_survives_field_order_drift() -> None:
+    from zhixing_quant.sources.relay.tables import parse_fina_indicator
+
+    shuffled = ["netprofit_yoy", "end_date", "ts_code", "roe_waa", "ann_date", "tr_yoy"]
+    raw = ["3.03", "20260331", "600519.SH", "5.79", "20260425", "4.65"]
+    rows = parse_fina_indicator("rds", shuffled, [raw])
+    assert rows[0].ann_date == date(2026, 4, 25) and rows[0].end_date == date(2026, 3, 31)
+    assert rows[0].roe_waa == 5.79
+
+
+# ── fina_indicator 表级与锚点 ─────────────────────────────────────────────────
+
+
+def test_fina_indicator_storage_roundtrip_idempotent_and_conflict_throws(tmp_path: Any) -> None:
+    from zhixing_quant.sources.relay.tables import FinaIndicatorRow
+    from zhixing_quant.storage.write import BarConflict
+
+    row = FinaIndicatorRow("rds", "600519", date(2026, 4, 25), date(2026, 3, 31), 5.79, 4.65, 3.03)
+    first = tables.write_table([row], table="fina_indicator", root=tmp_path)
+    assert (first.added, first.rewritten) == (1, 1)
+    again = tables.write_table([row], table="fina_indicator", root=tmp_path)
+    assert again.rewritten == 0, "同键同值重跑不重写"
+    twin = FinaIndicatorRow("rds", "600519", date(2026, 4, 25), date(2026, 3, 31), 6.01, 4.65, 3.03)
+    with pytest.raises(BarConflict, match="两条不同的行"):
+        tables.write_table([row, twin], table="fina_indicator", root=tmp_path)
+    back = tables.read_table(
+        "fina_indicator", "600519", date(2026, 1, 1), date(2026, 12, 31), root=tmp_path
+    )
+    assert [r.end_date for r in back] == [date(2026, 3, 31)] and back[0].roe_waa == 5.79
+    # 重述（同报告期、晚首披日）是另一个主键——两行并存，点时对齐靠 (end, ann) 分先后
+    revised = FinaIndicatorRow(
+        "rds", "600519", date(2026, 5, 1), date(2026, 3, 31), 5.81, 4.65, 3.03
+    )
+    second = tables.write_table([revised], table="fina_indicator", root=tmp_path)
+    assert second.added == 1
+
+
+def test_fina_indicator_anchor_refuses_bad_periods_and_future_publications() -> None:
+    """行级可验三条（与 forecast 同族）：非季末报告期、首披早于报告期、首披在未来 → 整批拒；
+    首披与报告期同日（实测 000001.SZ 19901231）必须放行——≥ 不是 >。"""
+    from zhixing_quant.sources.relay.tables import FinaIndicatorRow
+
+    good = FinaIndicatorRow("rds", "600519", date(2026, 4, 25), date(2026, 3, 31), 5.79, 4.65, 3.03)
+    same_day = FinaIndicatorRow(
+        "rds", "600519", date(1990, 12, 31), date(1990, 12, 31), 5.79, 4.65, 3.03
+    )
+    not_quarter = FinaIndicatorRow(
+        "rds", "600519", date(2026, 4, 25), date(2026, 4, 30), 5.79, 4.65, 3.03
+    )
+    early_ann = FinaIndicatorRow(
+        "rds", "600519", date(2026, 3, 1), date(2026, 3, 31), 5.79, 4.65, 3.03
+    )
+    future = FinaIndicatorRow(
+        "rds", "600519", date(2099, 1, 1), date(2098, 12, 31), 5.79, 4.65, 3.03
+    )
+    anchor = relay_cli.ANCHORS["fina_indicator"]
+    problems, unanchored, kept = anchor(
+        [good, same_day, not_quarter, early_ann, future], None, None, None
+    )
+    assert len(problems) == 3 and unanchored == 0
+    assert kept == [good, same_day]
+
+
+def test_pull_fina_indicator_is_a_short_page_table_end_to_end(tmp_path: Any) -> None:
+    """pull 逐票路径整条接通：date_param 不带 trade_date（公告类全史）、limit=100 对齐静默顶、
+    过行级锚、落盘。"""
+
+    def fetch(_api: str, params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        assert "trade_date" not in params, "fina_indicator 按 ts_code 拉全史，没有按日窗口"
+        assert params["limit"] == FINA_CAP and params["offset"] == 0
+        return "rds", _fina_body([_fina_item()])
+
+    args = _args(table="fina_indicator", symbols="600519", day="2026-09-25")
+    args.page_size = None  # CLI 缺省 → page_limit_of → 100
+    report, code, ledger = relay_cli._pull(
+        args,
+        fetch=fetch,
+        prev_ref_of=lambda _symbol, _day: 10.0,
+        same_ref_of=lambda _symbol, _day: 10.0,
+        limit_of=lambda _symbol: 10.0,
+        root=tmp_path,
+    )
+    assert code == 0 and ledger is not None and ledger.added == 1
+    back = tables.read_table(
+        "fina_indicator", "600519", date(2026, 1, 1), date(2026, 12, 31), root=tmp_path
+    )
+    assert back and back[0].roe_waa == 5.79
+    assert "fina_indicator" in report
+
+
+# ── fina_indicator 的 rds-only 白名单 ─────────────────────────────────────────
+
+
+def test_fina_indicator_fetch_filters_promax_even_in_the_default_relay_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认 (rds, promax) 对本表先交集再走：promax 一个请求都不发（2026-09-25 实测 promax
+    窗口 >366 天 400、无窗口行数不稳——它给的短页会把截断静默读成拉完）。"""
+    seen: list[str] = []
+
+    def fake_get(relay: str, _api: str, _params: Any, _timeout: float) -> dict[str, Any]:
+        seen.append(relay)
+        raise relay_client.RelayHttpError(relay, 503, None, b"down")
+
+    monkeypatch.setattr(relay_client, "_get", fake_get)
+    with pytest.raises(relay_client.RelayUnavailable):
+        relay_client.fetch(
+            "fina_indicator", {"ts_code": "600519.SH"}, sleep=lambda _s: None, backoff=(1,)
+        )
+    assert seen and set(seen) == {"rds"}, f"promax 不在白名单，不许发：{seen}"
+    assert "promax" not in seen
+
+
+def test_pinning_promax_for_fina_indicator_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_a: Any) -> dict[str, Any]:
+        raise AssertionError("不该发请求")
+
+    monkeypatch.setattr(relay_client, "_get", boom)
+    with pytest.raises(ValueError, match="实测可用源只有"):
+        relay_client.fetch("fina_indicator", {"ts_code": "600519.SH"}, relays=("promax",))

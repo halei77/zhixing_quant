@@ -433,6 +433,111 @@ def parse_report_rc(
     return rows
 
 
+class FinaIndicatorRow(NamedTuple):
+    """`fina_indicator` 一行：某票某报告期的财务指标（ROE / 营收与净利增速序列的正源原料）。
+
+    主键是 **(ann_date, end_date)**：`ann_date` 是**首披日**——点时可见性的唯一合法时钟
+    （03-L4：`end_date` 是报告期不是发布日，拿它当点时就是未来函数）；同报告期的重述以不同
+    ann_date 各自留行（forecast 同款：修正史本身就是点时可见性的证据）。
+
+    三列指标是**源原名原口径**（ADR-0015：不改写源的数、不换算单位）：
+
+    - `roe_waa`：加权平均净资产收益率（%）——2026-09-25 与东财业绩报表、新浪加权口径
+      各 30 组互锚 29/30 ≤0.05pp（唯一离群 000001 2026Q1：源侧 0.24 vs 两独立源 2.83，
+      源单格异常，锚点通过率吸收并留档）。报告期**累计、未年化**（600519 2024 年内
+      盘上回填后复核：Q1 10.57 → H1 17.63 → 9M 26.09 → FY 36.02 单调递增）。
+    - `tr_yoy`：营业总收入同比（%）——与东财「营业总收入-同比增长」30/30 精确互锚
+      （max 4.7e-5）。**不是** or_yoy（营业收入同比）：业绩报表的"营收增速"报的是营业总
+      收入口径（600519 2026Q1 两口径差 0.2pp，有财务公司的票利息收入在内）。
+    - `netprofit_yoy`：净利润同比（%）——与东财「净利润-同比增长」30/30 ≤0.05pp。
+
+    null 保持 None（禁 0 填充）；值域只挡量级垃圾（|v| ≤ 1e6）：实测 or_yoy 最大 9502.74
+    （300308 低基数真爆发）、roe 最大 83.05——收紧的域会把真极值挡在门外。
+    """
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    roe_waa: float | None
+    tr_yoy: float | None
+    netprofit_yoy: float | None
+
+
+#: 指标列与其量级域。域的取法与 report_rc 的"eps 不设下界"同一纪律：只挡不可能的数
+#: （1e15 的单位错），不发明"合理区间"去裁决源的真话。
+_FINA_METRICS = ("roe_waa", "tr_yoy", "netprofit_yoy")
+_FINA_VALUE_LIMIT = 1e6
+
+
+def _fin_metric(
+    row: Sequence[object], fields: Sequence[str], name: str, *, key: str
+) -> float | None:
+    """可空指标列：null → None（禁 0 填充），超出量级域 → 整批响（源给错了数）。"""
+    value = _opt(row, fields, name)
+    if value is not None and abs(value) > _FINA_VALUE_LIMIT:
+        raise ValueError(
+            f"{key} {name}={value} 超出量级域 ±{_FINA_VALUE_LIMIT:g}：不是数据是单位/脏值，整批拒"
+        )
+    return value
+
+
+def parse_fina_indicator(
+    source: str, fields: Sequence[str], items: Sequence[Sequence[object]]
+) -> list[FinaIndicatorRow]:
+    """一页 fina_indicator → 校验过的行。
+
+    **孪生行去重**（2026-09-25 实测：600519 全史 196 行里 103 个 (ann,end) 键、93 对孪生；
+    默认响应不带 `update_flag` 列，孪生在指标列上**同值**，仅 000001.SZ 20240630 一对相异
+    ——flag=1 行 roe_waa=5.79、flag=0 行 roe_waa=None）：
+
+    - 同键同值 → 跳过（叠行对存储是主键冲突，对读是多算一次）；
+    - 同键异值 → 取**非 None 指标更多**的那行（实测相异孪生恰是"值行 vs 空行"，取值行）；
+    - 非 None 计数打平还不同 → 抛（源自相矛盾，不裁决——ADR-0015 主键冲突抛的同款纪律）。
+
+    分页守卫保证键不跨页重叠（二分按 end_date 切窗，单调不重叠），这里的去重只管**页内**
+    源生孪生。
+    """
+    kept: dict[tuple[str, date, date], FinaIndicatorRow] = {}
+    for raw in items:
+        symbol = normalize_code(_field(raw, fields, "ts_code"))
+        ann_date = _as_date(_field(raw, fields, "ann_date"))
+        end_date = _as_date(_field(raw, fields, "end_date"))
+        key_text = f"{symbol}@{ann_date}"
+        row = FinaIndicatorRow(
+            source,
+            symbol,
+            ann_date,
+            end_date,
+            _fin_metric(raw, fields, "roe_waa", key=key_text),
+            _fin_metric(raw, fields, "tr_yoy", key=key_text),
+            _fin_metric(raw, fields, "netprofit_yoy", key=key_text),
+        )
+        key = (symbol, ann_date, end_date)
+        previous = kept.get(key)
+        if previous is None:
+            kept[key] = row
+        elif row == previous:
+            continue  # 同值孪生：跳过，不制造主键冲突
+        else:
+            score = sum(value is not None for value in _metrics_of(row))
+            prior = sum(value is not None for value in _metrics_of(previous))
+            if score > prior:
+                kept[key] = row  # 值行压过空行（实测 flag=1 值行 vs flag=0 空行）
+            elif score < prior:
+                continue
+            else:
+                raise ValueError(
+                    f"{key_text} 同一 (ann_date, end_date) 两行取值相异且都非空"
+                    f"（{previous} vs {row}）：源自相矛盾，不裁决"
+                )
+    return sorted(kept.values(), key=lambda row: (row.ann_date, row.end_date, row.symbol))
+
+
+def _metrics_of(row: FinaIndicatorRow) -> tuple[float | None, ...]:
+    return (row.roe_waa, row.tr_yoy, row.netprofit_yoy)
+
+
 PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], list[Any]]] = {
     "stk_limit": parse_stk_limit,
     "daily_basic": parse_daily_basic,
@@ -441,4 +546,5 @@ PARSERS: dict[str, Callable[[str, Sequence[str], Sequence[Sequence[object]]], li
     "stk_holdernumber": parse_holder_number,
     "index_daily": parse_index_daily,
     "report_rc": parse_report_rc,
+    "fina_indicator": parse_fina_indicator,
 }

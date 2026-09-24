@@ -3,8 +3,8 @@
 #
 # 默认组合是草案值（06 §五 底下那句）。草案值改一次就在这里改一次，git diff 就是评审记录。
 # `days` 数的是**交易日**，与查询层 `Cover.days` 同一口径（ADR-0011 决定 2）。
-# `status: pending` 的三条依赖还没落地的组件，站点会让它出现在列表里但拒生成，
-# 理由写在 `waiting_on`（一期只有K线，没有财务数据与消息组件——06 §四 的分期）。
+# `status: pending` 的模板依赖还没落地的组件，站点让它出现在列表里但拒生成，
+# 理由写在 `waiting_on`（还在等的是消息组件——06 §四 的分期）。
 
 token_warn_above: 100000
 
@@ -68,6 +68,9 @@ templates:
       # 远期 PE 与同模板的估值序列同窗（250，ADR-0016 的长期投资估值窗），不跟日K的 750：
       # 估值族内部同窗对齐，250 也正是一年交易日——点名规格「长期投资 250」。
       - {dataset: forward_pe, days: 250, fields: [close, fwd_pe, est_period, est_asof]}
+      # ROE/增速序列（06 §十-5，2026-09-25 落地）：与日K 同 days 同窗逐日点时（ADR-0022
+      # 默认同窗规则），750 天 ≈ 三年 ≈ 12 个季度点——"基本面趋势"要看得出斜率。
+      - {dataset: fina_trend, days: 750, fields: [roe_waa, tr_yoy, netprofit_yoy, fina_period, fina_asof]}
       - {dataset: forecast, days: 500, fields: [type, net_profit_min, net_profit_max]}
       - {dataset: stk_limit, days: 750, fields: [up_limit, down_limit]}
     format: markdown
@@ -77,13 +80,17 @@ templates:
       估值部分只允许使用提示词里给出的财务序列；序列缺失的年份明确写「数据未提供」。
 
   - name: 建仓价分析
-    status: pending
-    waiting_on: earnings/ROE/增速序列（A 桶财务指标组件验收后落地，daily_basic 只有估值没有盈利）
+    # 2026-09-25 翻 ready（06 §十-5/§十-6）：ROE/营收与净利增速序列（fina_trend）三样齐，
+    # 模板要的"增长率假设"有了可对回的原料（daily_basic 只有估值没有盈利的那句 waiting_on
+    # 随之作废）。
+    status: ready
     role: 你是资深 A 股基本面分析师
     task: 测算合理建仓区间，并给出区间对应的假设
     data:
       - {dataset: daily, days: 250}
-      # 转正时不再补：盘上已有的三张先挂上（设计合成 §一"便宜的先做"）。
+      # 与日K 同250 天同窗逐日点时（ADR-0022 默认同窗规则）：建仓假设里的增长率/ROE
+      # 要与这一年的价格窗对得上"那天"。
+      - {dataset: fina_trend, days: 250, fields: [roe_waa, tr_yoy, netprofit_yoy, fina_period, fina_asof]}
       - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
       - {dataset: stk_limit, days: 250, fields: [up_limit, down_limit]}
       - {dataset: index_daily, days: 250, fields: [open, high, low, close, volume, amount]}

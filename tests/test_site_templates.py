@@ -50,12 +50,13 @@ def bad(data: dict[str, Any]) -> str:
 
 
 def test_the_shipped_table_loads() -> None:
-    """真实那张表装得起来，且一期三条是 ready（06 §五 的默认组合照抄在配置里）。"""
+    """真实那张表装得起来，且该 ready 的都 ready（06 §五 的默认组合照抄在配置里）。"""
     cfg = templates.load(config.prompt_templates_file())
     assert cfg.token_warn_above == 100000
     ready = [t.name for t in cfg.templates if t.status == "ready"]
-    # 长期投资 2026-09-22 翻 ready（ADR-0016 估值组件）；建仓价分析等 earnings 序列仍 pending
-    assert ready == ["短期投资", "波段", "长期投资"]
+    # 长期投资 2026-09-22 翻 ready（ADR-0016 估值组件）；建仓价分析 2026-09-25 翻 ready
+    # （06 §十-5：ROE/营收与净利增速序列 fina_trend 三样齐）；只剩消息组件那条 pending。
+    assert ready == ["短期投资", "波段", "长期投资", "建仓价分析"]
     # 固定头在最前（ADR-0022 决定 1：always_data 装载时合并），参考表与日K同窗；
     # forward_pe（ADR-0022 决定 2）四列随行、与日K同 days（点名规格：短期 120/波段 250/长期 250）。
     assert [(s.dataset, s.days) for s in cfg.by_name("短期投资").data] == [
@@ -78,6 +79,17 @@ def test_the_shipped_table_loads() -> None:
                 ("close", "fwd_pe", "est_period", "est_asof"),
             )
         ], f"{name} 的远期 PE 要 {days} 天且 fields 四列齐（ADR-0022 决定 2）"
+    # fina_trend（06 §十-5）：与日K 同 days 同窗逐日点时（ADR-0022 默认同窗规则），
+    # 五列是规格不是可选项——长期投资 750（三年趋势）、建仓价分析 250（同其日K）。
+    for name, days in (("长期投资", 750), ("建仓价分析", 250)):
+        entry = [s for s in cfg.by_name(name).data if s.dataset == "fina_trend"]
+        assert [(s.dataset, s.days, s.fields) for s in entry] == [
+            (
+                "fina_trend",
+                days,
+                ("roe_waa", "tr_yoy", "netprofit_yoy", "fina_period", "fina_asof"),
+            )
+        ], f"{name} 的 ROE/增速序列要 {days} 天且 fields 五列齐（06 §十-5）"
 
 
 def test_a_missing_file_is_not_an_empty_table(tmp_path: Path) -> None:
@@ -449,9 +461,13 @@ def test_always_data_days_must_be_positive() -> None:
 
 
 def test_the_new_reference_tables_validate_fields_by_their_own_lists() -> None:
-    """stk_limit / index_daily 进了 `TABLE_DATASETS`：字段清单各归各，选错当场拒
+    """stk_limit / index_daily / fina_trend 进了 `TABLE_DATASETS`：字段清单各归各，选错当场拒
     （ADR-0016 决定 1 的"按 dataset 类别校验"随表扩展）。"""
-    for dataset, foreign in (("stk_limit", "pe_ttm"), ("index_daily", "up_limit")):
+    for dataset, foreign in (
+        ("stk_limit", "pe_ttm"),
+        ("index_daily", "up_limit"),
+        ("fina_trend", "eps"),
+    ):
         root(
             row(
                 data=[

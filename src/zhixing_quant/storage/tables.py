@@ -143,6 +143,22 @@ class ReportRcRow(NamedTuple):
     pe: float | None
 
 
+class FinaIndicatorRow(NamedTuple):
+    """与 `sources.relay.tables.FinaIndicatorRow` 同形同序（结构互认见模块说明）。
+
+    主键两列 (ann_date, end_date)：ann_date 是首披日（点时可见性的时钟，03-L4），
+    同报告期的重述以不同 ann_date 各自留行。
+    """
+
+    source: str
+    symbol: str
+    ann_date: date
+    end_date: date
+    roe_waa: float | None
+    tr_yoy: float | None
+    netprofit_yoy: float | None
+
+
 SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         name="stk_limit",
@@ -266,6 +282,23 @@ SPECS: tuple[TableSpec, ...] = (
         order=("report_date", "org_name", "quarter"),
         row=ReportRcRow,
         date_field="report_date",
+    ),
+    TableSpec(
+        name="fina_indicator",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("ann_date", "DATE"),
+            ("end_date", "DATE"),
+            ("roe_waa", "DOUBLE"),
+            ("tr_yoy", "DOUBLE"),
+            ("netprofit_yoy", "DOUBLE"),
+        ),
+        # 公告类表（date_field=ann_date）：按首披年分区，重述（同 end、不同 ann）各占一格
+        key=("ann_date", "end_date"),
+        order=("ann_date", "end_date"),
+        row=FinaIndicatorRow,
+        date_field="ann_date",
     ),
 )
 _BY_NAME = {spec.name: spec for spec in SPECS}

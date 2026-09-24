@@ -30,6 +30,17 @@ RELAYS: Mapping[str, str] = {
 #: 退避阶梯（秒）。1 → 5 → 30 分钟，之后换源。
 BACKOFF_SECONDS: Sequence[int] = (60, 300, 1800)
 
+#: 表 → 实测可用的源白名单（没登记的表按 ADR-0014 双源 rds→promax）。
+#: `fina_indicator` 钉 **rds-only**（2026-09-25 探测，报告见
+#: `${ZX_DATA_ROOT}/reports/source-probe/2026-09-25-fin-indicator.md`）：
+#: - promax 窗口 >366 天直接 HTTP 400 `date_range_too_large`——短页二分第一刀
+#:   （1985..今天）必 400；
+#: - promax 无窗口查询行数不稳（同参三跑 80 行、另一轮 100 行，rds 全史 196 行）、
+#:   无 has_more/count——短页族"页 < 顶即到底"会在 promax 上把截断**静默**读成拉完。
+#: 白名单交集为空时发前拒（ValueError，不烧退避）：跨源口径漂（实测 promax 2000 年窗口
+#: 与 rds 同窗行数一致但全史截断行数不同）比失败更坏。
+API_RELAYS: Mapping[str, tuple[str, ...]] = {"fina_indicator": ("rds",)}
+
 
 class RelayUnavailable(RuntimeError):
     """所有源全走完仍然没拿到——调用方按"今天没开始"处置，不是数据问题。"""
@@ -82,7 +93,18 @@ def fetch(
     """拿一张表的一页。返回 (源名, 响应体)——源名进报告，哪一源供的数要留痕。
 
     对每个源按阶梯退避，走完切下一个源重试同一请求；全走完抛 `RelayUnavailable`。
+    `API_RELAYS` 登记过白名单的表先交集再走：不在白名单的源一个请求都不发（fail-closed，
+    防跨源截断口径差把行静默丢掉），交集为空 → ValueError（配置错，不是源错，不进退避）。
     """
+    allowed = API_RELAYS.get(api)
+    if allowed is not None:
+        usable = tuple(name for name in relays if name in allowed)
+        if not usable:
+            raise ValueError(
+                f"{api} 实测可用源只有 {'、'.join(allowed)}（2026-09-25 探测），"
+                f"收到 relays={list(relays)}——钉不到可用源，发前拒"
+            )
+        relays = usable
     errors: list[str] = []
     for relay in relays:
         for attempt in range(len(backoff) + 1):

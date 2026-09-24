@@ -757,3 +757,103 @@ def test_report_rc_future_publication_fails_the_symbol_without_writing(tmp_path:
         tables.read_table("report_rc", "600519", date(2090, 1, 1), date(2100, 1, 1), root=tmp_path)
         == []
     )
+
+
+# ── fina_indicator（短页族第二张表：顶 100、公告类全史、rds-only） ──────────────
+
+FINA_FIELDS = ["ts_code", "ann_date", "end_date", "roe_waa", "tr_yoy", "netprofit_yoy"]
+FINA_ITEM = ["600519.SH", "20240417", "20240331", "9.07", "18.04", "15.66"]
+
+
+def test_fina_indicator_pulls_full_history_through_the_short_page_guard(tmp_path: Path) -> None:
+    """fina_indicator 进回填清单：公告类全史（无窗口参数）、短页守卫（limit=100 对齐静默顶、
+    offset=0）、行级锚放行、主键幂等——重跑一行不多（判据读盘，#53 口径）。"""
+    fetch = FakeRelay({"600519": [FINA_ITEM]}, fields=FINA_FIELDS)
+
+    first = _run("fina_indicator", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    assert first.added == 1 and first.exit_code() == 0
+    _api, params, _kwargs = fetch.calls[0]
+    assert params["ts_code"] == "600519.SH"
+    assert "start_date" not in params and "end_date" not in params, "全史拉取不带窗口"
+    assert params["limit"] == 100 and params["offset"] == 0, "短页族按表对齐静默顶（实测 100）"
+    assert first.page_size == 100, "报告里的 page_size 要点名真实发出的那个尺寸"
+    written = tables.read_table(
+        "fina_indicator", "600519", date(2024, 1, 1), date(2024, 12, 31), root=tmp_path
+    )
+    assert [row.end_date for row in written] == [date(2024, 3, 31)]
+    assert written[0].roe_waa == 9.07 and written[0].tr_yoy == 18.04
+    # 公告类分区按 ann_date 年（date_field=ann_date），不按报告期年
+    partition = tmp_path / "fina_indicator" / "year=2024" / "symbol=600519.parquet"
+    mtime = partition.stat().st_mtime_ns
+
+    second = _run("fina_indicator", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    assert len(fetch.calls) == 2, "公告类表判不出'齐'（#53 口径）：每跑重拉全史"
+    assert second.added == 0 and second.repaired == 0 and second.rewritten == 0
+    assert second.existing_skipped == 1, "主键幂等：同键同值一行不动"
+    assert partition.stat().st_mtime_ns == mtime, "重跑动了盘 = 不幂等"
+
+
+def test_fina_indicator_twin_rows_land_once(tmp_path: Path) -> None:
+    """页内孪生（默认响应不带 update_flag，指标同值的重复键）解析时去重：落盘 1 行、
+    重跑 existing_skipped=1——源吐 196 行只该在盘上留 103 个键（实测 600519 的形状）。"""
+    twin = [FINA_ITEM, FINA_ITEM]
+    fetch = FakeRelay({"600519": twin}, fields=FINA_FIELDS)
+
+    result = _run("fina_indicator", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    assert result.added == 1 and result.existing_skipped == 0
+    written = tables.read_table(
+        "fina_indicator", "600519", date(2024, 1, 1), date(2024, 12, 31), root=tmp_path
+    )
+    assert len(written) == 1
+
+
+def test_fina_indicator_future_ann_date_fails_the_symbol_without_writing(tmp_path: Path) -> None:
+    """行级锚（首披日 ≤ 今天）拦在未来日期上：整票拒、一行不写。"""
+    future = ["600519.SH", "20990101", "20981231", "9.07", "18.04", "15.66"]
+    fetch = FakeRelay({"600519": [future]}, fields=FINA_FIELDS)
+
+    result = _run("fina_indicator", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    (outcome,) = result.outcomes
+    assert outcome.status == "failed" and "锚点对账整批拒" in outcome.reason
+    assert "ann_date 在未来" in outcome.reason
+    assert (
+        tables.read_table(
+            "fina_indicator", "600519", date(2090, 1, 1), date(2100, 1, 1), root=tmp_path
+        )
+        == []
+    )
+
+
+def test_fina_indicator_non_quarter_end_fails_the_symbol(tmp_path: Path) -> None:
+    """报告期不是季末（财报口径的全部行级可验第一条）：整票拒。"""
+    odd = ["600519.SH", "20240417", "20240430", "9.07", "18.04", "15.66"]
+    fetch = FakeRelay({"600519": [odd]}, fields=FINA_FIELDS)
+
+    result = _run("fina_indicator", ["600519"], fetch, root=tmp_path, now=NOW)
+
+    (outcome,) = result.outcomes
+    assert outcome.status == "failed" and "不是季末" in outcome.reason
+
+
+def test_backfill_pin_promax_for_fina_indicator_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--relay promax 撞表级白名单（client.API_RELAYS）= 配置错：退出码 2、零请求。
+
+    不在装配处拒的后果是逐票失败 × breaker——把"钉错源"渲染成"源坏了"，报告会指向错误方向
+    （promax 实测：窗口 >366 天 400、无窗口行数不稳，给短页族的数不可信）。
+    """
+    import zhixing_quant.sources.relay.client as client_mod
+
+    def boom(*_a: Any, **_kw: Any) -> object:
+        raise AssertionError("不该发请求")
+
+    monkeypatch.setattr(client_mod, "_get", boom)
+    code = relay_cli.main(
+        ["backfill", "--table", "fina_indicator", "--relay", "promax", "--symbols", "600519"]
+    )
+    assert code == 2, "钉错源是没开始，不是跑挂了"

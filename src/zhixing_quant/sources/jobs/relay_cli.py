@@ -31,6 +31,7 @@ from typing import Any
 from zhixing_quant import config
 from zhixing_quant.backtest.cli import check_range
 from zhixing_quant.sources.jobs import backfill
+from zhixing_quant.sources.relay.client import API_RELAYS
 from zhixing_quant.sources.relay.pages import (
     SHORT_PAGE_TABLES,
     FetchFn,
@@ -311,6 +312,55 @@ def _anchor_report_rc(
     return problems, unanchored, anchored
 
 
+def _anchor_fina_indicator(
+    rows: list[Any],
+    _prev_ref_of: RefFn,
+    _same_ref_of: RefFn,
+    _limit_of: LimitPctFn,
+) -> tuple[list[str], int, list[Any]]:
+    """fina_indicator 的锚：行级可验（forecast 同族——财务披露没有逐行可比的干净区同口径行）。
+
+    三条判据都是 2026-09-25 三票全史实测立的（600519/300308/000001，1989..2026 盘上回填后
+    共 288 个键：103+63+122，与重探逐键一致；违例均 0）：
+
+    1. `end_date` 必须是**季末**（3/6/9/12 的最后一天）：A 股定期报告只有季/半年/年报；
+    2. `ann_date ≥ end_date`（首披日不早于报告期；**≥ 不是 >**——实测 000001.SZ 19901231
+       年报首披与报告期同日）；
+    3. `ann_date ≤ 今天`（首披日不在未来，与 forecast/report_rc 同款）。
+
+    为什么这三条是"全部分量"：提示词侧的点时对齐（`table.align_fina_trend`）**只**依赖
+    "ann_date ≤ t 的可见集 + end_date 最大者"——第 2 条在入盘时钉住，可见集里 end_date ≤ t
+    就是恒成立的（未来报告期进不了提示词）；抽样互核（≥20 组，与东财/新浪锚点）按 04 §五
+    在接表验收里做，见 tests/test_fina_indicator_data.py。
+    """
+    import calendar as cal
+
+    problems: list[str] = []
+    unanchored = 0
+    anchored: list[Any] = []
+    today = date.today()
+    for row in rows:
+        quarter_end = (3, 6, 9, 12)
+        if (
+            row.end_date.month not in quarter_end
+            or row.end_date.day != cal.monthrange(row.end_date.year, row.end_date.month)[1]
+        ):
+            problems.append(
+                f"{row.symbol}@{row.ann_date} end_date {row.end_date} 不是季末（财报报告期口径）"
+            )
+            continue
+        if row.ann_date < row.end_date:
+            problems.append(
+                f"{row.symbol}@{row.ann_date} 首披日早于报告期 {row.end_date}：时序不成立"
+            )
+            continue
+        if row.ann_date > today:
+            problems.append(f"{row.symbol}@{row.ann_date} ann_date 在未来")
+            continue
+        anchored.append(row)
+    return problems, unanchored, anchored
+
+
 #: 表名 → 锚点。没登记锚的表不许拉（ADR-0015 决定 3：每张表配锚点对账，没有豁免）。
 ANCHORS: dict[str, AnchorFn] = {
     "stk_limit": _anchor_stk_limit,
@@ -322,6 +372,7 @@ ANCHORS: dict[str, AnchorFn] = {
     "stk_holdernumber": _anchor_forecast,
     "index_daily": _anchor_forecast,  # OHLC 不变量在解析器；行情日没有"报告期"概念，行级可验即全部
     "report_rc": _anchor_report_rc,  # 研报发布日：行级可验 + 未来发布日拒；抽样互核见 _docstring
+    "fina_indicator": _anchor_fina_indicator,  # 季末报告期 + 首披日 ≥ 报告期且不在未来
 }
 
 #: 档位查询注入点：真跑用 `_limit_pct_of`（主数据 + gate.toml），测试注入常数表。
@@ -446,9 +497,12 @@ def _pull(
         # 后者撞 5000 行截断，前者绕开它。
         rows = []
         source = ""
-        # 公告类表（forecast / report_rc）按 ts_code 拉全史，没有 trade_date 参数——day 对
-        # 它们是"锚点与归档日期"，不是源端筛选。
-        date_param = None if args.table in ("forecast", "report_rc") else "trade_date"
+        # 公告类表（forecast / report_rc / fina_indicator）按 ts_code 拉全史，没有 trade_date
+        # 参数——day 对它们是"锚点与归档日期"，不是源端筛选。（fina_indicator 2026-09-25
+        # 实测：传 trade_date 源忽略它照回行，语义上仍不是按日表，不发。）
+        date_param = (
+            None if args.table in ("forecast", "report_rc", "fina_indicator") else "trade_date"
+        )
         for symbol in wanted:
             src, page_items, page_fields, _ = fetch_all_pages(
                 args.table,
@@ -539,6 +593,16 @@ def _backfill(
         scope = "主数据全市场" + (f"[:{args.limit}]" if args.limit is not None else "")
     if not pool:
         raise ValueError("票池是空的：--symbols 没解析出代码，或主数据在册名单为空")
+    if args.relay is not None:
+        # 显式钉源撞表级白名单（client.API_RELAYS）= 配置错：在装配处退出码 2 拒掉，
+        # 不进 run（逐票失败 × breaker 是"源坏了"的形状，钉错源不是）。
+        allowed = API_RELAYS.get(args.table)
+        if allowed is not None and args.relay not in allowed:
+            raise ValueError(
+                f"{args.table} 实测可用源只有 {'、'.join(allowed)}"
+                f"（promax 的窗口/截断口径与本表不合，2026-09-25 探测），"
+                f"--relay {args.relay} 钉不了它"
+            )
     relays: tuple[str, ...] = (args.relay,) if args.relay else ("rds", "promax")
     result = backfill.run(
         args.table,

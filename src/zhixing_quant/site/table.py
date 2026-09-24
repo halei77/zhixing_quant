@@ -110,6 +110,11 @@ VALUATION_HEADERS: dict[str, str] = {
     "fwd_pe": "远期PE",
     "est_period": "预测报告期",
     "est_asof": "预测发布日",
+    "roe_waa": "ROE(加权,%)",
+    "tr_yoy": "营业总收入同比(%)",
+    "netprofit_yoy": "净利润同比(%)",
+    "fina_period": "报告期",
+    "fina_asof": "发布日",
 }
 
 VALUATION_LABEL = (
@@ -142,6 +147,14 @@ REFERENCE_LABELS: dict[str, str] = {
         "Q1–Q3 是年内累计口径不当分母）；est_period=预测报告期、est_asof=该预测的发布日"
         "（必不晚于当日，点时可见性印在表里）；'—' 表示当日无可见预测，不回落PE(TTM)；"
         "来源转接源 rds report_rc"
+    ),
+    "fina_trend": (
+        "ROE/增速口径：逐日点时——每交易日取发布日（首披日）≤ 当日的当时最新报告期"
+        "（同报告期多次披露取发布日更晚者）；fina_period=报告期、fina_asof=该期发布日"
+        "（必不晚于当日，点时可见性印在表里）；roe_waa=加权平均净资产收益率(%)、"
+        "tr_yoy=营业总收入同比(%)、netprofit_yoy=净利润同比(%)（源字段原名，"
+        "各为该报告期**累计**口径、未年化——Q1 的 ROE 不是全年）；"
+        "'—' 表示当日尚无已披露财报；来源转接源 rds fina_indicator"
     ),
 }
 
@@ -405,6 +418,114 @@ def _forward_cell(name: str, row: ForwardRow) -> str:
     if name == "est_asof":
         return row.est_asof.isoformat() if row.est_asof else "—"
     return "—"  # 字段清单装载时已校验，走到这里是绕过装载的直构调用——不假装它是数
+
+
+class FinaTrendRow(NamedTuple):
+    """`fina_trend` 表的一行：某交易日点时可见的 ROE/增速及其报告身份证（ADR-0022 同手法）。
+
+    `fina_asof ≤ trade_date` 与 `fina_period ≤ fina_asof` 是这五列一起存在的理由——把点时
+    可见性印在表里，模型看得到"5.79% 是哪个报告期、哪天披露的"；披露前的日子三列全 None，
+    渲染成「—」。
+    """
+
+    trade_date: date
+    roe_waa: float | None
+    tr_yoy: float | None
+    netprofit_yoy: float | None
+    fina_period: date | None
+    fina_asof: date | None
+
+
+def align_fina_trend(bars: Sequence[Any], reports: Sequence[Any]) -> list[FinaTrendRow]:
+    """逐日点时对齐：窗口内每个交易日 t 各取「ann_date ≤ t 的当时最新一期」的 ROE/增速
+    （03-L4 未来函数禁令的落点；与 `align_forward_pe` 同手法——这里没有分母自由度，只有
+    "哪一期"一个选择）。
+
+    `bars` 是窗口内的日线（只要交易日做行序——ROE 不是价，close 不进这张表）；
+    `reports` 是 `fina_indicator` 行（duck 类型：`.ann_date/.end_date/.roe_waa/.tr_yoy/
+    .netprofit_yoy`，从干净区按**首披日全史**读出）。规则逐步：
+
+    1. **可见集** = `ann_date ≤ t` 的行。窗口前披露的老财报也算——窗口起点那天的"当时最新
+       一期"可能披露于三个月前，只读窗口内会把那段读成"无数据"。
+    2. **取当时最新一期** = 可见集里 `(end_date, ann_date)` 最大者：报告期最新者优先，同
+       报告期的重述取**发布日更晚**的那份（≤ t 的最新修正）。窗口前的老期间即便晚披露，
+       也压不过更新的报告期（(end, ann) 字典序，end 在前）。
+    3. **未来报告期进不来**：`ann_date ≥ end_date` 由行级锚在入盘时钉住，故可见集里
+       `end_date ≤ ann_date ≤ t`——第 1 条已经盖住了 03-L4 的"拿报告期当发布日"错法。
+    4. **披露前的日子**（IPO 后首份财报之前）：五列全 None，渲染「—」；整窗都 None →
+       取数侧出 `NO_DATA_NOTE`（ADR-0020）。
+
+    **as_of 回填禁令**：本函数只依赖 `(t, 截至 t 的可见集)`，没有 as_of 参数——想用
+    "as_of 那天的最新一期回填全窗"必须绕开本函数另写，而 tests/test_site_fina_trend 的
+    对值断言会把那种实现测红（与 forward_pe 的同款 fixture 一个手法）。
+    """
+    ordered = sorted(reports, key=lambda row: (row.ann_date, row.end_date))
+    rows: list[FinaTrendRow] = []
+    cursor = 0
+    best: Any = None
+    for bar in sorted(bars, key=lambda item: item.trade_date):
+        t = bar.trade_date
+        # 可见集随 t 单调增长：running max 按 (end_date, ann_date) 字典序更新即可
+        while cursor < len(ordered) and ordered[cursor].ann_date <= t:
+            candidate = ordered[cursor]
+            if best is None or (candidate.end_date, candidate.ann_date) > (
+                best.end_date,
+                best.ann_date,
+            ):
+                best = candidate
+            cursor += 1
+        if best is None:
+            rows.append(FinaTrendRow(t, None, None, None, None, None))
+        else:
+            rows.append(
+                FinaTrendRow(
+                    t,
+                    best.roe_waa,
+                    best.tr_yoy,
+                    best.netprofit_yoy,
+                    best.end_date,
+                    best.ann_date,
+                )
+            )
+    return rows
+
+
+def render_fina_trend(
+    rows: Sequence[FinaTrendRow],
+    *,
+    fields: Sequence[str],
+    format: Format = "markdown",
+) -> str:
+    """`fina_trend` 序列 → 表（估值表家族的序列形态，与 forward_pe 同一个渲染入口形状）。
+
+    口径行由代码给（`reference_label`），模板删不掉；空行集拒（`IncompleteComponent`）——
+    空表会被大模型读成"那段时间 ROE 一直是 0"，空段由取数侧出 `NO_DATA_NOTE`（ADR-0020）。
+    """
+    if not rows:
+        raise IncompleteComponent(
+            "一张都没有的 ROE/增速表不进提示词：那是组件没取到数，不是没有变化"
+        )
+    label = reference_label("fina_trend")
+    headers = ["时间", *(VALUATION_HEADERS.get(name, name) for name in fields)]
+    body_rows = [
+        [row.trade_date.isoformat(), *(_fina_cell(name, row) for name in fields)] for row in rows
+    ]
+    if format == "csv":
+        lines = [f"# {label}", ",".join(headers)]
+        lines += [",".join(cells) for cells in body_rows]
+        return "\n".join(lines)
+    lines = [f"> {label}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
+    lines += [f"| {' | '.join(cells)} |" for cells in body_rows]
+    return "\n".join(lines)
+
+
+def _fina_cell(name: str, row: FinaTrendRow) -> str:
+    """ROE/增速表的一个格子。缺测一律「—」——不是 0（源没披露 ≠ 这期 ROE 为零）。"""
+    if name == "fina_period":
+        return row.fina_period.isoformat() if row.fina_period else "—"
+    if name == "fina_asof":
+        return row.fina_asof.isoformat() if row.fina_asof else "—"
+    return _metric_cell(name, getattr(row, name, None))
 
 
 def _denominator(columns: Sequence[str], float_shares: float | None) -> float:

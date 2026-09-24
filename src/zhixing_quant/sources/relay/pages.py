@@ -14,13 +14,15 @@
    5000 直接 HTTP 400 `query limit is too large for this high-cardinality interface,
    max_limit:1000`。这不是数据问题，是参数问题：发请求前就拒（fail-closed，transport 零调用），
    上限按表登记在 `MAX_PAGE_SIZE`，没登记的按 5000（日表族实测在 5000 处静默截断而非 400）。
-2. **`report_rc` 族**（2026-09-25 实测，600519.SH 五次请求）：`has_more` **恒 False**、
-   `count` 是 limit 回显不是总数；`limit=5001` 静默回 5000 行；`offset=5000&limit=100` 回
-   HTTP 200 **0 行**；带窗口的查询各自顶 5000（`20150101..20240630` 同样回满 5000，且比不带
-   窗口的首行更早——单查询静默只留**最新** 5000 行，更早的行被丢）。has_more 守卫对它完全
-   失效（它从不举手）。这一族走 `fetch_pages_short`：**页 < limit 即到底 + 撞 5000 顶按
-   start_date/end_date 二分缩窗**——只有"没顶满"的查询才能把短页读成拉完；顶满说明可能还有
-   被静默丢掉的更早行，切窗查到每窗 <5000 为止，单日窗仍顶满则硬响。
+2. **短页族**（`report_rc`/`fina_indicator`，2026-09-25 实测）：`has_more` **恒 False**、
+   `count` 是 limit 回显不是总数、**offset 不可用**——`report_rc` 的顶是 5000（`limit=5001`
+   静默回 5000；`offset=5000&limit=100` 回 HTTP 200 **0 行**；带窗口的查询各自顶 5000 且比
+   不带窗口的首行更早——单查询静默只留**最新** 5000 行）；`fina_indicator` 的顶是 **100**
+   （`limit≥101` 一律静默回 100 行；`offset=10&limit=90` 回 80 行、`offset=50&limit=50` 回
+   0 行——offset 语义不可用）。has_more 守卫对这一族完全失效（它从不举手）。它们走
+   `fetch_pages_short`：**页 < 顶即到底 + 撞顶按 start_date/end_date 二分缩窗**——只有"没顶满"
+   的查询才能把短页读成拉完；顶满说明可能还有被静默丢掉的更早行，切窗查到每窗 < 顶为止，
+   单日窗仍顶满则硬响。顶按表登记在 `SHORT_PAGE_CAPS`（两张表两个顶，一个常量管不了两族）。
 
 守卫住在本文件的两个函数里而不是各调用点各写一份：pull 的"按日全市场"与 backfill 的
 "逐票区间"撞的是同一个 5000 行上限，两份守卫迟早漂成"一边响一边静默丢"。
@@ -45,20 +47,39 @@ DEFAULT_MAX_PAGE_SIZE = 5000
 #: fina_audit/stk_holdernumber 未实测，不猜——它们要接时先单接口最小验证再登记。
 MAX_PAGE_SIZE: Mapping[str, int] = {"forecast": 1000}
 
-#: `report_rc` 族（has_more 恒 False）：按源的 5000 行顶对齐分页的表名单。
-SHORT_PAGE_TABLES: frozenset[str] = frozenset({"report_rc"})
+#: 短页族（has_more 恒 False）：表 → 单查询静默行顶。只有对齐到顶的整页翻法才能靠
+#: "页 < 顶即到底"判定到底——页小了会撞源的顶，把截断读成拉完。
+#: 两个顶各有实测（2026-09-25）：report_rc `limit=5001` 静默回 5000；fina_indicator
+#: `limit≥101` 一律静默回 100（且 offset 实测语义不可用，offset=50&limit=50 回 0 行）。
+SHORT_PAGE_CAPS: Mapping[str, int] = {
+    "report_rc": 5000,
+    "fina_indicator": 100,
+}
+SHORT_PAGE_TABLES: frozenset[str] = frozenset(SHORT_PAGE_CAPS)
 
-#: `report_rc` 单查询的静默行顶（limit=5001 实测回 5000）。这一族只有对齐到顶的整页翻法
-#: 才能靠"页 < limit 即到底"判定到底——页小了会在第 5000 行处撞源的顶，把截断读成拉完。
+#: `report_rc` 单查询的静默行顶（`limit=5001` 实测回 5000）。具名常量留着给既有断言与
+#: 调用方；新表的顶进 `SHORT_PAGE_CAPS`，不要再加常量。
 SOURCE_ROW_CAP = 5000
 
 #: 二分缩窗的默认左界：params 没带 start_date 时的第一刀左端。1990 早于任何 A 股研报史
 #: （实测最早 2019-03-29 起），空窗一页 0 行即底，不值当一个专门参数。
 DEFAULT_WINDOW_START = date(1990, 1, 1)
 
+#: 表 → 二分缩窗的左界（没登记的用默认）。fina_indicator 必须 ≤1989：2026-09-25 实测
+#: 000001.SZ 最早财报期 end_date=19891231（首披 19900321），沿用 1990 的默认左界会把
+#: 1989 年报**静默丢在窗外**——二分永远问不到它。1985 实测 rds 接受（window 1985–1995
+#: 回 20 行含 19891231），留 4 年余量。
+WINDOW_STARTS: Mapping[str, date] = {"fina_indicator": date(1985, 1, 1)}
+
 
 def page_limit_of(table: str) -> int:
-    """这张表单请求允许的 limit 上限（按表登记，未登记按 5000）。"""
+    """这张表单请求允许的 limit 上限（按表登记，未登记按 5000）。
+
+    短页族先查：它的"上限"是源的**静默行顶**（`SHORT_PAGE_CAPS`），与 400 族的网关
+    `max_limit` 是两种失败——fina_indicator 的顶 100 实测不报 400，超了只是静默截断。
+    """
+    if table in SHORT_PAGE_CAPS:
+        return SHORT_PAGE_CAPS[table]
     return MAX_PAGE_SIZE.get(table, DEFAULT_MAX_PAGE_SIZE)
 
 
@@ -126,30 +147,36 @@ def fetch_pages_short(
     params: Mapping[str, object],
     *,
     fetch: FetchFn,
-    page_size: int = SOURCE_ROW_CAP,
+    page_size: int | None = None,
     today: date | None = None,
 ) -> tuple[str, list[list[str]], list[str], int | None]:
-    """`report_rc` 族：**页 < limit 即到底** + 撞 5000 行顶按日期二分缩窗。
+    """短页族：**页 < 顶即到底** + 撞静默行顶按日期二分缩窗（顶按表取，`SHORT_PAGE_CAPS`）。
 
     返回形状与 `fetch_pages` 一致；`total` 恒为 None——这一族的 `count` 是 limit 回显不是
-    总数（2026-09-25 实测：limit=100 回 count=100 而实际行数 ≥6870），拿它当总数会把
-    "回显"读成"拉完"。
+    总数（2026-09-25 实测：report_rc limit=100 回 count=100 而实际行数 ≥6870），拿它当总数
+    会把"回显"读成"拉完"。
 
     两条硬规矩（都是实测逼出来的）：
 
-    1. **`page_size` 必须恰为 5000**（发前拒，transport 零调用）。`limit=5001` 会被静默顶成
-       5000——比顶大的请求会让"页 < limit"恒真，把截断读成拉完；比顶小的页翻到第 5000 行
-       会撞同一堵墙（offset+limit 跨顶实测回空页），同样把截断读成拉完。只有对齐到顶的整页
+    1. **`page_size` 必须恰为该表的顶**（发前拒，transport 零调用；缺省 = `page_limit_of`）。
+       比顶大的请求会被静默顶小——"页 < limit"恒真，把截断读成拉完；比顶小的页翻到顶会撞
+       同一堵墙（跨顶/≥顶的 offset 实测回空页），同样把截断读成拉完。只有对齐到顶的整页
        才能无歧义地判"这一页满没满"。
-    2. **满页 ≠ 到底**。单查询静默只留最新 5000 行（实测：不带窗口的全史首行 20210826，
-       而 `20150101..20240630` 窗口内能取到 20190329——更早的行在全史查询里被丢了）。所以
-       页满时按 `start_date/end_date` 对半切窗重查（左窗到 mid、右窗 mid+1 起，单调不重叠），
-       直到每窗 <5000；切到单日仍满 → 硬响（一天 5000 行研报不是数据是事故）。
+    2. **满页 ≠ 到底**。单查询静默只留最新一段（report_rc 实测：不带窗口的全史首行
+       20210826，而 `20150101..20240630` 窗口内能取到 20190329——更早的行在全史查询里被丢
+       了；fina_indicator 同形，顶 100）。所以页满时按 `start_date/end_date` 对半切窗重查
+       （左窗到 mid、右窗 mid+1 起，单调不重叠），直到每窗 < 顶；切到单日仍满 → 硬响
+       （一天 5000 行研报 / 一天 100 行季报不是数据是事故）。
     """
-    if page_size != SOURCE_ROW_CAP:
+    cap = SHORT_PAGE_CAPS.get(table)
+    if cap is None:
+        raise ValueError(f"表 {table!r} 不在短页族 {sorted(SHORT_PAGE_CAPS)} 里：进错了守卫")
+    if page_size is None:
+        page_size = page_limit_of(table)
+    if page_size != cap:
         raise ValueError(
-            f"{table} 只认 page_size={SOURCE_ROW_CAP}（源的单查询静默行顶），收到 {page_size}："
-            f"limit={SOURCE_ROW_CAP + 1} 实测被静默顶成 {SOURCE_ROW_CAP} 行、"
+            f"{table} 只认 page_size={cap}（源的单查询静默行顶），收到 {page_size}："
+            f"limit={cap + 1} 实测被静默顶成 {cap} 行、"
             "跨顶/≥顶的 offset 实测回空页——不对齐到顶的分页会把截断读成拉完，发前就拒"
         )
     moment = today if today is not None else date.today()
@@ -169,15 +196,16 @@ def fetch_pages_short(
             items.extend(page)
             return
         if len(page) < page_size:
-            # 页 < limit 即到底——本族唯一的"拉完"信号（has_more 恒 False 顶不上来）。
+            # 页 < 顶即到底——本族唯一的"拉完"信号（has_more 恒 False 顶不上来）。
             items.extend(page)
             return
-        start, end = _window_bounds(bound, today=moment)
+        start, end = _window_bounds(bound, today=moment, table=table)
         if start >= end:
             described = start.isoformat() if start == end else f"{start}..{end}"
             raise ValueError(
                 f"{source} {table} 窗口 {described} 单窗仍返回满页 {page_size} 行——"
-                "已切到单日仍撞源的 5000 行静默顶，这一页可能被截断；该窗不是数据是事故，硬响"
+                f"已切到单日仍撞源的 {page_size} 行静默顶，这一页可能被截断；"
+                "该窗不是数据是事故，硬响"
             )
         midpoint = start + (end - start) / 2
         window({**bound, "start_date": _fmt(start), "end_date": _fmt(midpoint)})
@@ -205,10 +233,17 @@ def _fmt(day: date) -> str:
     return day.strftime("%Y%m%d")
 
 
-def _window_bounds(params: Mapping[str, object], *, today: date) -> tuple[date, date]:
-    """本次查询的日期二分界：params 自带 start_date/end_date 就用它，没带用默认全史界。"""
+def _window_bounds(
+    params: Mapping[str, object], *, today: date, table: str | None = None
+) -> tuple[date, date]:
+    """本次查询的日期二分界：params 自带 start_date/end_date 就用它，没带用该表的全史左界。
+
+    左界按表取（`WINDOW_STARTS`，没登记用 `DEFAULT_WINDOW_START`）：fina_indicator 的最早
+    报告期是 19891231（实测），沿用 1990 的默认左界会把它静默丢在窗外。
+    """
+    default_start = WINDOW_STARTS.get(table or "", DEFAULT_WINDOW_START)
     return (
-        _parse_ymd(params.get("start_date"), DEFAULT_WINDOW_START, field="start_date"),
+        _parse_ymd(params.get("start_date"), default_start, field="start_date"),
         _parse_ymd(params.get("end_date"), today, field="end_date"),
     )
 

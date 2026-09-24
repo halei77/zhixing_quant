@@ -62,10 +62,10 @@ from zhixing_quant.sources.relay.tables import PARSERS
 from zhixing_quant.storage import layout, tables
 from zhixing_quant.storage.query import read_bars
 
-#: 回填认这几张表（#53 圈定三张 + #59 C 刀的 report_rc）。别的参考表要先配锚、实测过
-#: 窗口参数才许进来——表名打错或没实测就开跑，在这里是退出码 2 的 ValueError，不是
-#: "先跑了再说"。
-BACKFILL_TABLES = ("daily_basic", "forecast", "stk_limit", "report_rc")
+#: 回填认这几张表（#53 圈定三张 + #59 C 刀的 report_rc + 本刀的 fina_indicator）。
+#: 别的参考表要先配锚、实测过窗口参数才许进来——表名打错或没实测就开跑，在这里是退出码 2
+#: 的 ValueError，不是"先跑了再说"。
+BACKFILL_TABLES = ("daily_basic", "forecast", "stk_limit", "report_rc", "fina_indicator")
 
 #: 按日序列表：续跑判据 = 日线有量交易日 − 盘上已有。公告类（forecast）没有应有集，
 #: 走"拉全史 + 主键幂等跳过"，见模块说明第 2 条。
@@ -254,12 +254,14 @@ def fetch_range(
     20240102..20240110 精确回 7 行、has_more=False。逐票 + 窗口把单查询压到几百行，rds 的
     5000 行静默截断碰不到；真撞上了 `pages.fetch_pages` 会硬响（ADR-0015 决定 3）。
 
-    `start`/`end` 给 None = 公告类全史拉取（forecast/report_rc 没有按日窗口，主键去重交给
-    `write_table` 的幂等）。promax 即便不认这两个参数，本地还有窗口过滤兜底（见 run）。
+    `start`/`end` 给 None = 公告类全史拉取（forecast/report_rc/fina_indicator 没有按日窗口，
+    主键去重交给 `write_table` 的幂等）。promax 即便不认这两个参数，本地还有窗口过滤兜底
+    （见 run）。
 
     **两种分页形状各走各的守卫**（2026-09-25 实测）：has_more 族（daily_basic/forecast/
-    stk_limit）进 `fetch_pages`；`report_rc` 族（has_more 恒 False、单查询静默顶 5000 行、
-    offset≥5000 空页）进 `fetch_pages_short`——页 < limit 即到底，满页按日期二分缩窗。
+    stk_limit）进 `fetch_pages`；短页族（report_rc/fina_indicator：has_more 恒 False、
+    单查询静默顶——5000 / 100 行、offset 语义不可用）进 `fetch_pages_short`——页 < 顶即
+    到底，满页按日期二分缩窗（顶与全史左界按表登记）。
     """
     params: dict[str, object] = {"ts_code": ts_code_of(symbol)}
     if start is not None and end is not None:

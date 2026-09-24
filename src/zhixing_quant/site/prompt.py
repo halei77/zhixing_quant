@@ -43,6 +43,11 @@ BENCHMARK_NAME = "上证指数"
 #: 1990 是"早于任何 A 股研报史"的兜底——读到的都是盘上真有的分区，空年份直接跳过。
 _REPORT_RC_HISTORY_START = date(1990, 1, 1)
 
+#: `fina_trend` 读 fina_indicator 全史的左界：实测最早报告期 end_date=19891231、首披
+#: ann_date=19900321（000001.SZ，2026-09-25 窗口探测）——1985 与采集侧的二分左界同值
+#: （pages.WINDOW_STARTS），留余量；读到的都是盘上真有的分区，空年份直接跳过。
+_FINA_HISTORY_START = date(1985, 1, 1)
+
 
 class TemplateNotReady(ValueError):
     """`status: pending` 的模板：它要的数据组件还没落地（决定 5）。
@@ -168,6 +173,7 @@ def title_of(dataset: str) -> str:
             "stk_limit": "涨跌停价",
             "index_daily": f"大盘（{BENCHMARK_NAME} {BENCHMARK}）",
             "forward_pe": "远期PE（逐日点时）",
+            "fina_trend": "ROE与增速（逐日点时）",
         }.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
 
@@ -317,6 +323,36 @@ def build(
                     title=heading(selection, len(aligned)),
                     body=table.render_forward_pe(
                         aligned,
+                        fields=selection.fields or (),
+                        format=template.format,
+                    ),
+                )
+            )
+            continue
+        if selection.dataset == "fina_trend":
+            # ROE/增速序列（ADR-0022 同手法，06 §十-5）：服务端现算、不落派生表——落盘会把
+            # as_of 钉死在回填那晚。日线只要交易日行序（ROE 不是价，close 不进这张表）；
+            # fina_indicator 读**首披日全史**：窗口起点那天的"当时最新一期"可能披露在窗口
+            # 之前，只读窗内会把那段读成"无数据"。逐日点时对齐（ann_date ≤ t）在纯层
+            # `table.align_fina_trend`。
+            bars_raw = read_bars(
+                code, start, end, adjust="raw", dataset=layout.DAILY, root=config.parquet_dir()
+            )
+            reports = read_table(
+                "fina_indicator", code, _FINA_HISTORY_START, end, root=config.parquet_dir()
+            )
+            trend = table.align_fina_trend(bars_raw, reports)
+            if not trend or all(row.fina_asof is None for row in trend):
+                # 窗口里一天都没有已披露财报（没回填 / 都在 IPO 前披露）→ 整节交代
+                # （ADR-0020），不给一张全「—」的表冒充"那段时间 ROE 一直是零"。
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            with_data += 1
+            sections.append(
+                Section(
+                    title=heading(selection, len(trend)),
+                    body=table.render_fina_trend(
+                        trend,
                         fields=selection.fields or (),
                         format=template.format,
                     ),

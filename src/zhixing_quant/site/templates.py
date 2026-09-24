@@ -51,10 +51,23 @@ FUNDAMENTAL_HEAD_FIELDS: tuple[str, ...] = (
 #: 发布日（把点时可见性印在表里）。清单同时是模板装载的可选字段——四列都是规格的一部分。
 FORWARD_PE_FIELDS: tuple[str, ...] = ("close", "fwd_pe", "est_period", "est_asof")
 
+#: `fina_trend` 的字段五列（ADR-0022 同手法，06 §十-5 的 ROE/营收与净利增速）：前三列是
+#: 源指标**原名**（roe_waa=加权 ROE、tr_yoy=营业总收入同比、netprofit_yoy=净利润同比——
+#: 原名端到端可追溯，不改名不改义）；fina_period/fina_asof 把点时可见性印在表里（所用
+#: 报告期与它的首披日，必不晚于行日期）。清单同时是模板装载的可选字段——五列都是规格。
+FINA_TREND_FIELDS: tuple[str, ...] = (
+    "roe_waa",
+    "tr_yoy",
+    "netprofit_yoy",
+    "fina_period",
+    "fina_asof",
+)
+
 #: 参考表类 dataset（ADR-0016）：字段清单按表各自声明，装载时按 dataset 类别校验。
 TABLE_DATASETS: dict[str, tuple[str, ...]] = {
     "fundamental_head": FUNDAMENTAL_HEAD_FIELDS,
     "forward_pe": FORWARD_PE_FIELDS,
+    "fina_trend": FINA_TREND_FIELDS,
     "daily_basic": (
         "close",
         "pe",
