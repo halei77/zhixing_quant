@@ -7,11 +7,14 @@
 :root {
   color-scheme: light;
   --zx-bg: #eef0f4;
-  --zx-ambient-1: rgba(213, 69, 60, 0.15);
-  --zx-ambient-2: rgba(31, 169, 122, 0.11);
+  /* 浅色底上 blur 要"有东西可折射"（docs/11 §3.2 实测注记）：.15/.11 铺在 #eef0f4 上
+     几乎无色，三档玻璃挤在近白区间分不开。提到 .30/.24 并把 chrome/float 压透明，
+     环境光才透得出来。 */
+  --zx-ambient-1: rgba(213, 69, 60, 0.3);
+  --zx-ambient-2: rgba(31, 169, 122, 0.24);
   --zx-text: #14161c;
   --zx-text-2: #5b6472;
-  --zx-text-3: #9aa1ad;
+  --zx-text-3: #868e9c;
   --zx-ink: #14161c;
   --zx-ink-contrast: #ffffff;
   --zx-focus: #5b6472;
@@ -20,13 +23,13 @@
   --zx-warn: #b26a00;
   --zx-seal: #d5453c;
 
-  --zx-glass-chrome: rgba(255, 255, 255, 0.62);
-  --zx-glass-float: rgba(255, 255, 255, 0.72);
+  --zx-glass-chrome: rgba(255, 255, 255, 0.55);
+  --zx-glass-float: rgba(255, 255, 255, 0.62);
   --zx-glass-inset: rgba(15, 23, 42, 0.05);
   --zx-surface-solid: rgba(255, 255, 255, 0.96);
-  --zx-stroke: rgba(15, 23, 42, 0.1);
+  --zx-stroke: rgba(15, 23, 42, 0.14);
   --zx-stroke-hi: rgba(255, 255, 255, 0.95);
-  --zx-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0) 45%);
+  --zx-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0) 48%);
   --zx-shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 6px 20px rgba(15, 23, 42, 0.08);
   --zx-shadow-float:
     inset 0 1px 0 var(--zx-stroke-hi), 0 18px 44px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
