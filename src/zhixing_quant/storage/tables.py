@@ -143,6 +143,30 @@ class ReportRcRow(NamedTuple):
     pe: float | None
 
 
+class NewsRow(NamedTuple):
+    """与 `sources.akshare.notice.NewsRow` 同形同序（结构互认见模块说明）。
+
+    主键两列 (ann_date, art_code)：`art_code` 是东财公告唯一码（AN+日期+序号），
+    ann_date 打头与公告类表族（forecast/fina_indicator）同构。
+
+    两个时间各有其职，别混（2026-09-25 探测报告 §2.2，72+150 行实测违例 0）：
+
+    - `ann_date` = 东财 `notice_date`（交易所公告日期，日级）——**点时时钟**。盘后发布的
+      公告归次日，它恒 ≥ `display_time` 当日，所以 `ann_date ≤ as_of` 蕴含"挂网不晚于
+      as_of"——保守方向，绝不把 as_of 之后的公告递进提示词（03-L4）。
+    - `publish_time` = 东财 `display_time` 原样（毫秒级挂网时刻，VARCHAR 存源真话）——
+      不作时钟，作证据列：模型看得到"这是 20:24 盘后挂的"。
+    """
+
+    source: str
+    symbol: str
+    ann_date: date
+    publish_time: str
+    art_code: str
+    title: str
+    content: str
+
+
 class FinaIndicatorRow(NamedTuple):
     """与 `sources.relay.tables.FinaIndicatorRow` 同形同序（结构互认见模块说明）。
 
@@ -298,6 +322,26 @@ SPECS: tuple[TableSpec, ...] = (
         key=("ann_date", "end_date"),
         order=("ann_date", "end_date"),
         row=FinaIndicatorRow,
+        date_field="ann_date",
+    ),
+    TableSpec(
+        name="news",
+        columns=(
+            ("source", "VARCHAR"),
+            ("symbol", "VARCHAR"),
+            ("ann_date", "DATE"),
+            # display_time 原样（"2026-09-24 20:24:36:584"，源的非标准毫秒格式）——存字符串
+            # 而非 TIMESTAMP：解析它要发明格式规则，存原样则重放/对账都不失真。
+            ("publish_time", "VARCHAR"),
+            ("art_code", "VARCHAR"),
+            ("title", "VARCHAR"),
+            ("content", "VARCHAR"),
+        ),
+        # art_code 全局唯一（AN+日期+序号），ann_date 打头与公告类表族同构；
+        # 同秒批量挂网的多条公告靠 art_code 分开（600519 实测同秒 5 条尾号各异）。
+        key=("ann_date", "art_code"),
+        order=("ann_date", "publish_time"),
+        row=NewsRow,
         date_field="ann_date",
     ),
 )

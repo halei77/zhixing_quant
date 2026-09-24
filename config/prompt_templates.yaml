@@ -4,7 +4,7 @@
 # 默认组合是草案值（06 §五 底下那句）。草案值改一次就在这里改一次，git diff 就是评审记录。
 # `days` 数的是**交易日**，与查询层 `Cover.days` 同一口径（ADR-0011 决定 2）。
 # `status: pending` 的模板依赖还没落地的组件，站点让它出现在列表里但拒生成，
-# 理由写在 `waiting_on`（还在等的是消息组件——06 §四 的分期）。
+# 理由写在 `waiting_on`（2026-09-25 消息组件转正后暂无 pending——下一条照此形状写）。
 
 token_warn_above: 100000
 
@@ -101,13 +101,18 @@ templates:
       先列假设（增长率、目标估值），再给区间；假设与区间要能逐项对回提供的数据。
 
   - name: 最新消息解读
-    status: pending
-    waiting_on: 消息组件（06 §四 列为候选：akshare 新闻接口质量未评估）
+    # 2026-09-25 翻 ready（06 §四 消息组件评估收口，探测报告 reports/source-probe/
+    # 2026-09-25-news-sources.md）：合格源 = 东财公告原文（np-anotice 列表 + np-cnotice
+    # 正文两端点）——akshare 新闻接口给的是摘要不是原文（不合格）、promax 新闻族无个股
+    # 绑定且窗口外静默错窗、rds 403、ngw 无接口，逐源实测见报告。
+    status: ready
     role: 你是资深 A 股事件驱动分析师
     task: 判断消息面对走势的影响与持续时间
     data:
       - {dataset: daily, days: 30}
-      # 同上：参考表先挂好，消息组件落地转正时只差它自己那一段。
+      # 消息原文（06 §四 新闻/公告类）：事件型参考表，点时 ann_date ≤ as_of（03-L4）；
+      # 与日K同 30 天窗（ADR-0022 同窗规则），三列是规格不是可选项。
+      - {dataset: news, days: 30, fields: [publish_time, title, content]}
       - {dataset: daily_basic, days: 30, fields: [close, pe_ttm, pb, turnover_rate]}
       - {dataset: stk_limit, days: 30, fields: [up_limit, down_limit]}
       - {dataset: index_daily, days: 30, fields: [open, high, low, close, volume, amount]}

@@ -174,6 +174,7 @@ def title_of(dataset: str) -> str:
             "index_daily": f"大盘（{BENCHMARK_NAME} {BENCHMARK}）",
             "forward_pe": "远期PE（逐日点时）",
             "fina_trend": "ROE与增速（逐日点时）",
+            "news": "最新消息（公告原文）",
         }.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
 
@@ -198,6 +199,10 @@ def window(calendar: TradingCalendar, as_of: date, days: int) -> tuple[date, dat
 def heading(selection: Selection, delivered: int) -> str:
     """小标题里的那个天数是**实际取到的**，不是模板要的（决定 3）。"""
     label = title_of(selection.dataset)
+    if selection.dataset == "news":
+        # 消息是事件不是日序列：delivered 数的是**公告条数**，写成"个交易日"会把条数
+        # 说成天数（30 条公告 ≠ 30 个交易日）——事件表的诚实标题是"条 + 窗口"两个数。
+        return f"{label}（{delivered} 条公告，窗口 {selection.days} 个交易日）"
     if delivered == selection.days:
         return f"{label}（{selection.days} 个交易日）"
     return f"{label}（盘上 {delivered} 个交易日，模板要 {selection.days}）"
@@ -297,6 +302,28 @@ def build(
                 Section(
                     title=heading(selection, len(rows)),
                     body=table.render_forecast(rows, format=template.format),
+                )
+            )
+            continue
+        if selection.dataset == "news":
+            # 消息是事件型（forecast 同款手法，06 §四 新闻/公告类）：点时 = ann_date ≤ as_of
+            # （03-L4 的落点，渲染层不放宽）。读区间右端用 as_of 而不是窗口末交易日——
+            # 公告可以落在非交易日/休市日（实测 600519 半年报批次 notice_date=2026-08-15
+            # 是周六），用窗口末会把周末公告整条切掉；ann_date ≤ as_of 才是点时的真判据，
+            # 区间放宽到 as_of 只是让它有机会被这条判据看到。
+            rows = [
+                row
+                for row in read_table("news", code, start, as_of, root=config.parquet_dir())
+                if row.ann_date <= as_of
+            ]
+            if not rows:
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            with_data += 1
+            sections.append(
+                Section(
+                    title=heading(selection, len(rows)),
+                    body=table.render_news(rows, format=template.format),
                 )
             )
             continue

@@ -63,11 +63,17 @@ FINA_TREND_FIELDS: tuple[str, ...] = (
     "fina_asof",
 )
 
+#: `news` 的字段三列（消息组件，06 §四 新闻/公告类，2026-09-25 评估收口转正）：
+#: `publish_time`（东财毫秒挂网时刻）、`title`（公告标题）、`content`（公告正文原文）。
+#: `ann_date`/`art_code` 是行身份（点时时钟与主键），每行都印、不进可选清单（forecast 同款）。
+NEWS_FIELDS: tuple[str, ...] = ("publish_time", "title", "content")
+
 #: 参考表类 dataset（ADR-0016）：字段清单按表各自声明，装载时按 dataset 类别校验。
 TABLE_DATASETS: dict[str, tuple[str, ...]] = {
     "fundamental_head": FUNDAMENTAL_HEAD_FIELDS,
     "forward_pe": FORWARD_PE_FIELDS,
     "fina_trend": FINA_TREND_FIELDS,
+    "news": NEWS_FIELDS,
     "daily_basic": (
         "close",
         "pe",

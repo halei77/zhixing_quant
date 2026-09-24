@@ -24,7 +24,7 @@ rsync -az --delete \
 # 新接一张参考表就该同步这行，否则生产远期PE 段一律「本节无数据」。
 # fina_indicator 是 ROE/增速序列（fina_trend）的原料（06 §十-5，2026-09-25 接）——同族第三张，
 # 漏了它生产上「建仓价分析」「长期投资」的 ROE/增速段一律「本节无数据」。
-for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily report_rc fina_indicator; do
+for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily report_rc fina_indicator news; do
   [ -d "/home/lei/zhixing_data/data/$t" ] || continue
   rsync -az --delete "/home/lei/zhixing_data/data/$t" aliyun:/opt/zhixing_data/data/
 done

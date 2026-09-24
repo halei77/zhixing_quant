@@ -167,3 +167,72 @@ def fetch_listings(*, call: AkCall | None = None) -> Rows:
     """akshare 侧三份上市列表拼成一份。北交所那份不在内，见 `LISTINGS`。"""
     frames = [listing_frame(function, group, call=call) for function, group in LISTINGS]
     return [row for frame in frames for row in frame]
+
+
+#: 东财公告两端点（data.eastmoney.com 公开 JSON）。akshare `stock_individual_notice_report`
+#: 只封了列表且**丢 `display_time`、没有正文**；正文端点 akshare 未封装——消息组件要
+#: 原文与毫秒挂网时刻，只能直调这两个（2026-09-25 探测报告 §2.1：25 连发全 200、
+#: 无 rate 头、headerless 可用、0.05–0.25s/发；调用方负责 ≥0.3s 限速与重试）。
+_NOTICE_LIST_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+_NOTICE_CONTENT_URL = "https://np-cnotice-stock.eastmoney.com/api/content/ann"
+
+
+def notice_list(
+    symbol: str,
+    begin: date,
+    end: date,
+    *,
+    page: int = 1,
+    page_size: int = 100,
+    timeout: float = 20.0,
+    get: Any = None,
+) -> dict[str, Any]:
+    """一页单票公告列表的**原始响应**。网络边界：只发请求不判形状——解析在
+    `sources.akshare.notice.parse_notice_list`（黄金样本重放测那边，本函数薄到不用测）。
+
+    `sr=-1` 按日期倒序（窗口查询实测有序），`ann_type=A` 只要 A 股；
+    `begin_time/end_time` 是东财自己的 YYYY-MM-DD 窗口参数。
+    """
+    if get is None:
+        import requests
+
+        get = requests.get
+    response = get(
+        _NOTICE_LIST_URL,
+        params={
+            "sr": "-1",
+            "page_size": str(page_size),
+            "page_index": str(page),
+            "ann_type": "A",
+            "client_source": "web",
+            "stock_list": symbol,
+            "f_node": "0",
+            "s_node": "0",
+            "begin_time": begin.strftime("%Y-%m-%d"),
+            "end_time": end.strftime("%Y-%m-%d"),
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def notice_content(
+    art_code: str, *, page: int = 1, timeout: float = 20.0, get: Any = None
+) -> dict[str, Any]:
+    """一条公告一页正文的**原始响应**。分页由 `page` 控制（每页 5000 字，`page_size` 是总页数）
+    ——回填只取首页（探测报告 §九 的存储口径），解析同样在 `notice.parse_notice_content`。
+    """
+    if get is None:
+        import requests
+
+        get = requests.get
+    response = get(
+        _NOTICE_CONTENT_URL,
+        params={"art_code": art_code, "client_source": "web", "page_index": str(page)},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    body: dict[str, Any] = response.json()
+    return body

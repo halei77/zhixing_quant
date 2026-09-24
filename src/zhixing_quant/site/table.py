@@ -281,6 +281,53 @@ def render_forecast(rows: Sequence[Any], *, format: Format = "markdown") -> str:
     return "\n".join(lines)
 
 
+NEWS_LABEL = (
+    "消息原文口径：东财公告，只含公告日不晚于截止日的公告——公告日期是交易所披露日（盘后发布"
+    "归次日、恒不早于挂网时刻），点时安全（03-L4）；正文为公告原文，超 600 字截断加 …；"
+    "挂网时刻是东财录入时间、截到秒"
+)
+
+#: 每条公告进提示词的正文上限。窗口内公告可能几十条（300308 近 30 天 30 条 × 源首页
+#: 5000 字会把 10 万 token 阈值顶破）——600 字保住"重要提示+首段事实"，超限截断并标 …。
+NEWS_CONTENT_CHARS = 600
+
+
+def _news_cell(text: str, *, limit: int | None = None, markdown: bool = False) -> str:
+    """公告单元格：换行压成空格（表格一行一条的硬约束），markdown 下转义竖线
+    （公告正文自带表格），可选截断加 …。CSV 只压换行——竖线在 CSV 里是普通字符。"""
+    cell = text.replace("\r", " ").replace("\n", " ")
+    if markdown:
+        cell = cell.replace("|", "\\|")
+    if limit is not None and len(cell) > limit:
+        cell = cell[:limit] + "…"
+    return cell
+
+
+def render_news(rows: Sequence[Any], *, format: Format = "markdown") -> str:
+    """news 参考表 → 公告原文事件列表（forecast 同族：事件型而非序列型）。
+
+    点时可见性在这里兑现：rows 由查询层按 `ann_date ≤ as_of` 筛过，渲染层不放宽——
+    一条 as_of 之后的公告出现在提示词里，就是给大模型递未来函数（03-L4）。
+    """
+    headers = ["公告日", "挂网时刻", "标题", "正文"]
+    body_rows = [
+        [
+            row.ann_date.isoformat(),
+            row.publish_time[:19],
+            _news_cell(row.title, markdown=format == "markdown"),
+            _news_cell(row.content, limit=NEWS_CONTENT_CHARS, markdown=format == "markdown"),
+        ]
+        for row in rows
+    ]
+    if format == "csv":
+        lines = [f"# {NEWS_LABEL}", ",".join(headers)]
+        lines += [",".join(r) for r in body_rows]
+        return "\n".join(lines)
+    lines = [f"> {NEWS_LABEL}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
+    lines += [f"| {' | '.join(row)} |" for row in body_rows]
+    return "\n".join(lines)
+
+
 class ForwardRow(NamedTuple):
     """`forward_pe` 表的一行：某交易日的远期 PE 及其所用预测的身份证（ADR-0022 决定 2）。
 

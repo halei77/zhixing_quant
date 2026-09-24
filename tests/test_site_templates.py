@@ -55,8 +55,18 @@ def test_the_shipped_table_loads() -> None:
     assert cfg.token_warn_above == 100000
     ready = [t.name for t in cfg.templates if t.status == "ready"]
     # 长期投资 2026-09-22 翻 ready（ADR-0016 估值组件）；建仓价分析 2026-09-25 翻 ready
-    # （06 §十-5：ROE/营收与净利增速序列 fina_trend 三样齐）；只剩消息组件那条 pending。
-    assert ready == ["短期投资", "波段", "长期投资", "建仓价分析"]
+    # （06 §十-5：ROE/营收与净利增速序列 fina_trend 三样齐）；最新消息解读 2026-09-25 翻
+    # ready（06 §四 消息组件评估收口，东财公告原文）——五条全 ready，暂无 pending。
+    assert ready == ["短期投资", "波段", "长期投资", "建仓价分析", "最新消息解读"]
+    # 消息组件（06 §四 新闻/公告类）：news 与日K同 30 天窗、三列字段齐（探测报告 2026-09-25）。
+    news_entry = [
+        (s.dataset, s.days, s.fields)
+        for s in cfg.by_name("最新消息解读").data
+        if s.dataset == "news"
+    ]
+    assert news_entry == [("news", 30, ("publish_time", "title", "content"))], (
+        "最新消息解读要 news 段且 fields 三列齐——消息原文是这条模板的立身之本"
+    )
     # 固定头在最前（ADR-0022 决定 1：always_data 装载时合并），参考表与日K同窗；
     # forward_pe（ADR-0022 决定 2）四列随行、与日K同 days（点名规格：短期 120/波段 250/长期 250）。
     assert [(s.dataset, s.days) for s in cfg.by_name("短期投资").data] == [
@@ -467,6 +477,7 @@ def test_the_new_reference_tables_validate_fields_by_their_own_lists() -> None:
         ("stk_limit", "pe_ttm"),
         ("index_daily", "up_limit"),
         ("fina_trend", "eps"),
+        ("news", "eps"),
     ):
         root(
             row(

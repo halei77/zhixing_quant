@@ -337,11 +337,12 @@ def test_reference_headers_cover_every_selectable_field() -> None:
 
     漂开的安静形态：往 TABLE_DATASETS 加一列，装载能过，渲染时 `VALUATION_HEADERS.get(c, c)`
     兜底把英文列名印进提示词——不响、不红，只是模型面前多了一个它没被告知含义的词。
-    forecast 例外：事件型表走 render_forecast 自己的固定表头（公告日/报告期/…）。
+    forecast / news 例外：事件型表走自己的固定表头（公告日/报告期/…、公告日/挂网时刻/…），
+    `VALUATION_HEADERS.get(c, c)` 的兜底路径它们走不到——硬要登记是一份没人用的重复清单。
     """
     covered = set(table.VALUATION_HEADERS) - {"time"}
     for dataset, fields in templates.TABLE_DATASETS.items():
-        if dataset == "forecast":
+        if dataset in ("forecast", "news"):
             continue
         missing = set(fields) - covered
         assert not missing, f"{dataset} 的字段没有中文表头：{sorted(missing)}"

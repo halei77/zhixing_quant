@@ -80,6 +80,18 @@ print(m.group(0) if m else 'NONE')")
 echo "  远期PE段题：$fwd"
 chk "远期PE段与日K 同窗（120 个交易日）" "$(echo "$fwd" | grep -q '120 个交易日' && echo 1 || echo 0)"
 
+# 消息组件（2026-09-25 接，探测报告 source-probe/2026-09-25-news-sources.md）：
+# 最新消息解读翻 ready 后必须出「公告原文段」——news 表漏发时这里会是 NONE（同族第四漏的
+# 机器哨兵：参考表漏发 → 生产段消失）。
+news_head=$(curl -s -X POST "$BASE/api/prompt" -H 'Content-Type: application/json' \
+  -d '{"code":"300308","template":"最新消息解读"}' | python3 -c "
+import json,sys,re
+t=json.load(sys.stdin).get('text','')
+m=re.search(r'### 最新消息（公告原文）[^\n]*', t)
+print(m.group(0) if m else 'NONE')")
+echo "  最新消息段题：$news_head"
+chk "最新消息解读出公告原文段（300308 实测条数）" "$(echo "$news_head" | grep -q '条公告' && echo 1 || echo 0)"
+
 echo "== 6) 估值段非空（2026-09-24 事故回归点：publish 漏发参考表）=="
 empty=$(curl -s -X POST "$BASE/api/prompt" -H 'Content-Type: application/json' \
   -d '{"code":"600519","template":"长期投资"}' | grep -c '本节无数据' || true)
@@ -96,7 +108,8 @@ echo "== 8) 模板状态与生成行为对得上（pending 拒、ready 出）=="
 # 2026-09-25 改判据：原来钉「建仓价分析 pending → 400」，而 ROE/增速（rds fina_indicator）
 # 接进干净区后它按 06 §十-6 **翻 ready 了**，那条断言随之过期（红了一晚）。判据本身改成
 # 「状态与行为一致」——不钉死哪个模板是 pending，免得下次转正又红。
-# 现状：建仓价分析 ready（21,662 token 满窗）、最新消息解读 pending（等消息组件）。
+# 现状：五条全 ready（2026-09-25 消息组件转正，news 表进发布清单）——判据仍是
+# 「状态与行为一致」，不钉死哪条是 pending，免得下次转正又红。
 cat > /tmp/prod_smoke_status.py <<'PY2'
 import json, sys, urllib.error, urllib.request
 base = sys.argv[1]
