@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # 数据发布（ADR-0006：WSL2 计算 → 验证 → 发布 → 阿里云）。
-# 规模（2026-09-24 实测）：行情四 dataset 518.6 MB / 33,238 文件 + 六张参考表 74 MB + golden
-# 1.5 MB ≈ **636 MB**——注释早期写的「≈4MB」在全市场 60 分首采后就失真了，别照它估带宽。
-# rsync 增量「秒级」那句仍然成立，但**只对**比对（dry-run 3.0 s / 33k 文件）成立；要传的
-# **字节数**才是变量（实测上传带宽 6.75 MB/s）。回填类操作跑完要手动跑一次本脚本——远端
-# 只有发过去的东西，回填后不发，生产估值段就是「本节无数据」（2026-09-24 踩过两次）。
+# 规模（2026-09-25 实测，分钟K 已按 ADR-0025 整体撤出发**行情只剩 daily ~180 MB** +
+# 参考表 ~74 MB + golden 1.5 MB）——rsync 增量「秒级」只对**比对**成立；要传的**字节数**
+# 才是变量（实测上传带宽 6.75 MB/s）。回填类操作跑完要手动跑一次本脚本——远端只有发过去
+# 的东西，回填后不发，生产估值段就是「本节无数据」（2026-09-24 踩过两次）。
 # 用法：tools/publish_site.sh （幂等；跑完打印远端健康检查一行）
 #
 # ⚠️ **发布只走本脚本，别手写 rsync。** 2026-09-25 晨的事故：为省一次 `npm ci` 手写了
@@ -16,9 +15,6 @@ cd "$(dirname "$0")/.."
 
 rsync -az --delete \
   /home/lei/zhixing_data/data/daily \
-  /home/lei/zhixing_data/data/minute_5 \
-  /home/lei/zhixing_data/data/minute_30 \
-  /home/lei/zhixing_data/data/minute_60 \
   aliyun:/opt/zhixing_data/data/
 
 # 参考表（ADR-0015）：估值/预告/涨跌停等。**必须一起发**——2026-09-24 实测服务器上
@@ -34,28 +30,8 @@ for t in daily_basic forecast stk_limit fina_audit stk_holdernumber index_daily 
   rsync -az --delete "/home/lei/zhixing_data/data/$t" aliyun:/opt/zhixing_data/data/
 done
 
-# 1 分钟K（ADR-0022 决定 3 的 minute_1）**年分区截断**：只发「当前年−1」起的 year=*。
-#
-# 为什么截断（交付策略定案，见 reports/design-2026-09-24-site-data-expansion.md §三）：
-# 服务器是 40G 盘、实测空闲 34G，而 minute_1 全市场外推 **12.4 GB/年**（132 万行/日 × 39 B/行，
-# 按 minute_60 实测的 38.9 B/行口径）——发全历史 5 年约 63 GB，**第 3 个自然年就爆盘**。
-# 两年窗峰值约 25 GB，跨年后 `--delete` 自动把最老年份清掉。
-#
-# **全历史留在家里**（ADR-0006 的分工：重计算在家、云只服务站点）——站点模板对分钟最深只要
-# 30 天（1 分K 自定义封顶 30，site/api 那条），两年窗是冗余保险；真要查全历史回家里跑。
-# 冷热分层（站点按需远端拉取）被否：破 ADR-0012 决定 2「生成之路上不联网」。
-if [ -d /home/lei/zhixing_data/data/minute_1 ]; then
-  KEEP_FROM=$(( $(date +%Y) - 1 ))
-  _ex=()
-  for _d in /home/lei/zhixing_data/data/minute_1/year=*; do
-    [ -e "$_d" ] || continue
-    _y=${_d##*year=}
-    if [ "$_y" -lt "$KEEP_FROM" ]; then _ex+=(--exclude "year=$_y"); fi
-  done
-  # `${_ex[@]+...}`：空数组在 `set -u` 下展开会炸，这是 bash 的老坑
-  rsync -az --delete ${_ex[@]+"${_ex[@]}"} \
-    /home/lei/zhixing_data/data/minute_1 aliyun:/opt/zhixing_data/data/
-fi
+# 分钟K（minute_1/5/30/60）**不再发布**——ADR-0025（2026-09-25）把分钟K 去本地化、需求转站点
+# 实时获取。原先的 minute_1 年窗截断逻辑连同一整段 rsync 一并删除（历史留在 git，别再恢复）。
 
 # golden 整目录发，不再点名文件——2026-09-25 之前点名 4 个，于是 #57 加的停牌两份快照没发，
 # 「服务器缺它 zhixing-site 起不来」（#57 的 agent 当时手工补的）。**新接一份主数据快照就该
@@ -77,10 +53,9 @@ ssh aliyun "mkdir -p /opt/zhixing_quant/frontend/dist"
 rsync -az --delete frontend/dist/ aliyun:/opt/zhixing_quant/frontend/dist/
 
 # 健康检查放最后：它报的是本次发布跑完之后的线上状态，不是数据 rsync 之后、前端之前的状态。
-# 除了 HTTP 200 还要看**磁盘余量**——minute_1 两年窗落地后 `/` 使用约 30G/40G、余约 10G
-# （交付策略的代价②）。只 curl 200 只证明进程活着，盘满了它照样 200 然后明天写不进去。
+# 除了 HTTP 200 还要看**磁盘余量**——只 curl 200 只证明进程活着，盘满了它照样 200 然后明天
+# 写不进去。（minute_1 两年窗的 du 行随 ADR-0025 撤出发布一并移除。）
 ssh aliyun "curl -s -o /dev/null -w '远端健康：HTTP %{http_code}\n' http://127.0.0.1:8000/ \
-  && df -h / | awk 'NR==2 {printf \"远端磁盘：%s 已用 / %s 可用（%s）\\n\", \$3, \$4, \$5}' \
-  && du -sh /opt/zhixing_data/data/minute_1 2>/dev/null || echo '远端 minute_1：未发'"
+  && df -h / | awk 'NR==2 {printf \"远端磁盘：%s 已用 / %s 可用（%s）\\n\", \$3, \$4, \$5}'"
 
 echo "发布完成 $(date '+%F %T')"
