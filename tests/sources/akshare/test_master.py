@@ -12,7 +12,7 @@ ST 帽是第三类，形状不一样：模型早就支持 ST 区间、R004 也�
 """
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -267,11 +267,13 @@ def test_skips_survive_the_round_trip_from_a_file(tmp_path: Path) -> None:
     assert [(x.raw_code, x.position) for x in load.skipped] == [("900901", 1)]
 
 
-def test_a_hatted_name_becomes_an_st_period_from_the_snapshot_day(tmp_path: Path) -> None:
+def test_a_hatted_name_becomes_an_st_period_from_the_day_after_capture(tmp_path: Path) -> None:
     """真快照里 188 只票的简称挂着 ST 帽，而它们一段 ST 区间都没有（坑 #19）。
 
-    帽的生效日期只能取自快照的抓取时间，所以区间是 `[抓取日, 持续中]`：往前不判（帽可能是那天
-    之后才戴上的），往后判到下一次抓取为止（摘帽没有源可查，但下一次重抓会把它截断）。
+    帽的生效日期只能取自快照的抓取时间，而抓取在盘后——**快照日当天的板价是旧状态定的**
+    （2026-09-25 实测：40 只当前 ST 抽样里 37 只当日板价仍 ±10%，#68），所以区间是
+    `[抓取次日, 持续中]`：往前不判（帽可能是那之后才戴上的，当天更已在板价里定了旧状态），
+    往后判到下一次抓取为止（摘帽没有源可查，但下一次重抓会把它截断）。
     """
     write_listings_all(
         tmp_path,
@@ -282,9 +284,14 @@ def test_a_hatted_name_becomes_an_st_period_from_the_snapshot_day(tmp_path: Path
     )
     write_manifest(tmp_path)
     master = am.read_master(tmp_path).to_master()
-    assert master.st_on("000016", CAPTURED) and master.st_on("600119", CAPTURED)
+    assert not master.st_on("000016", CAPTURED) and not master.st_on("600119", CAPTURED)  # 当天不判
+    assert master.st_on("000016", CAPTURED + timedelta(days=1)) and master.st_on(
+        "600119", CAPTURED + timedelta(days=1)
+    )  # 次日起生效
     assert not master.st_on("600519", CAPTURED) and not master.st_on("000001", CAPTURED)
-    assert master.state_on("000016", CAPTURED).is_st  # R004 读的就是这个字段
+    assert master.state_on("000016", CAPTURED + timedelta(days=1)).is_st  # R004 读的就是这个字段
+    # 帽生效日=次日：快照日当天的板价是旧状态定的（实测 09-24，#68）
+    assert not master.state_on("000016", CAPTURED).is_st
     # 快照日之前是"不知道"，不是"知道它非 ST"：R004 因此按非 ST 档判它，04 §二 写明了这条上限
     assert not master.st_on("000016", date(2024, 1, 2))
 
@@ -328,7 +335,8 @@ def test_the_newer_capture_is_the_only_one_we_vouch_for(tmp_path: Path) -> None:
     )
     master = am.read_master(tmp_path).to_master()
     assert master.st_on("000016", date(2024, 1, 2)) is False
-    assert master.st_on("000016", date(2024, 1, 3)) and master.st_on("600119", date(2024, 1, 3))
+    assert master.st_on("000016", date(2024, 1, 3)) is False  # 抓取当天：板价已按旧状态定
+    assert master.st_on("000016", date(2024, 1, 4)) and master.st_on("600119", date(2024, 1, 4))
 
 
 def test_a_manifest_without_both_capture_days_is_refused(tmp_path: Path) -> None:

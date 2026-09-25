@@ -22,7 +22,7 @@ from __future__ import annotations
 import csv
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from zhixing_quant import config
@@ -233,8 +233,13 @@ def read_master(directory: Path | None = None) -> MasterLoad:
             baidu_rows += raw
     return replace(
         load,
+        # 帽从**抓取次日**起生效：名称是快照日盘后抓的，而快照日当天的涨跌停早已按旧状态定板
+        # （2026-09-25 实测：40 只当前 ST 抽样里 37 只当日板价仍是 ±10%）。按抓取日起套，
+        # 等于拿"市场还没看到的公告"去判已经定板的价——R004 与 stk_limit 锚都会整行错判（#68）。
         st_periods=tuple(
-            Interval(item.code, observed_on) for item in load.listings if is_st_name(item.name)
+            Interval(item.code, observed_on + timedelta(days=1))
+            for item in load.listings
+            if is_st_name(item.name)
         ),
         suspensions=merge_intervals(
             [*intervals_from_em(em_rows), *intervals_from_baidu(baidu_rows)]

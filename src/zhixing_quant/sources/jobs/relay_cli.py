@@ -201,13 +201,27 @@ def _anchor_stk_limit(
         exceeded = _exceeded_at(row, prev, tol)
         if exceeded:
             ratio = ref_ratio_of(row.symbol, row.trade_date) if ref_ratio_of is not None else None
-            if ratio is not None and ratio != 1.0 and not _exceeded_at(row, prev * ratio, tol):
-                exdiv_notes.append(
-                    f"{row.symbol}@{row.trade_date} 板价对昨收超阈，按除权换算因子 {ratio:.4f}"
-                    f"（参考价 {prev * ratio:.2f}，昨收 {prev}）判过——除权日，放行待核"
-                )
-                anchored.append(row)
-                continue
+            if ratio is not None and ratio != 1.0:
+                # **按边判**：除权救援逐边重算，救得回的记下待核，救不回的边继续走超阈清单——
+                # 全有全无会让"昨收被缺根顶旧"的票整行否决（600617@2024-06-28 的 4 条，#68 诊断）。
+                ref = prev * ratio
+                rescued: list[str] = []
+                survivors: list[tuple[str, float, float]] = []
+                for name, price, pct in exceeded:
+                    if abs((price / ref - 1.0) * 100.0) > tol:
+                        survivors.append((name, price, pct))
+                    else:
+                        rescued.append(name)
+                if rescued:
+                    exdiv_notes.append(
+                        f"{row.symbol}@{row.trade_date} {'/'.join(rescued)} 对昨收超阈、"
+                        f"按除权换算因子 {ratio:.4f}（参考价 {ref:.2f}，昨收 {prev}）"
+                        "判过——除权日，放行待核"
+                    )
+                exceeded = survivors
+                if not exceeded:
+                    anchored.append(row)
+                    continue
             if ratio is None:
                 ref_up = row.up_limit / (1.0 + limit / 100.0)
                 ref_down = row.down_limit / (1.0 - limit / 100.0)
