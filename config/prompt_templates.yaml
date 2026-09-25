@@ -49,6 +49,8 @@ templates:
       - {dataset: forward_pe, days: 250, fields: [close, fwd_pe, est_period, est_asof]}
       - {dataset: stk_limit, days: 250, fields: [up_limit, down_limit]}
       - {dataset: index_daily, days: 250, fields: [open, high, low, close, volume, amount]}
+      # 远期评级与目标价（#66）：逐条研报明细（非一致预期），发布日≤生成日倒序 60 条
+      - {dataset: analyst_rating, days: 250, fields: [rating, max_price, min_price, eps]}
       - {dataset: minute_60, days: 90}
     format: markdown
     fields: [open, high, low, close, volume, amount]
@@ -68,6 +70,8 @@ templates:
       # 远期 PE 与同模板的估值序列同窗（250，ADR-0016 的长期投资估值窗），不跟日K的 750：
       # 估值族内部同窗对齐，250 也正是一年交易日——点名规格「长期投资 250」。
       - {dataset: forward_pe, days: 250, fields: [close, fwd_pe, est_period, est_asof]}
+      # 远期评级与目标价（#66）：逐条研报明细（非一致预期），发布日≤生成日倒序 60 条
+      - {dataset: analyst_rating, days: 250, fields: [rating, max_price, min_price, eps]}
       # ROE/增速序列（06 §十-5，2026-09-25 落地）：与日K 同 days 同窗逐日点时（ADR-0022
       # 默认同窗规则），750 天 ≈ 三年 ≈ 12 个季度点——"基本面趋势"要看得出斜率。
       - {dataset: fina_trend, days: 750, fields: [roe_waa, tr_yoy, netprofit_yoy, fina_period, fina_asof]}
@@ -91,6 +95,8 @@ templates:
       # 与日K 同250 天同窗逐日点时（ADR-0022 默认同窗规则）：建仓假设里的增长率/ROE
       # 要与这一年的价格窗对得上"那天"。
       - {dataset: fina_trend, days: 250, fields: [roe_waa, tr_yoy, netprofit_yoy, fina_period, fina_asof]}
+      # 远期评级与目标价（#66）：逐条研报明细（非一致预期），发布日≤生成日倒序 60 条
+      - {dataset: analyst_rating, days: 120, fields: [rating, max_price, min_price, eps]}
       - {dataset: daily_basic, days: 250, fields: [close, pe_ttm, pb, ps_ttm, dv_ttm, total_mv]}
       - {dataset: stk_limit, days: 250, fields: [up_limit, down_limit]}
       - {dataset: index_daily, days: 250, fields: [open, high, low, close, volume, amount]}

@@ -372,6 +372,11 @@ class ReportRcRow(NamedTuple):
 
     `eps` 必填（缺它的行不进表——见 parse 注释）；`pe` 是源自带的远期 PE，大量为 null
     （5000 行里 879 个），只当对账旁证不进提示词。
+
+    #66 列扩面（2026-09-25）：`rating`（机构评级，源原词如"增持(上调)"/"买入"——不改写）、
+    `max_price`/`min_price`（券商目标价区间上下限，元；大量 null——不是每份研报都给目标价，
+    实测 600519 一页里 max 缺失约三成）。三列都可空：null 保持 None，禁拿评级空行冒充中性；
+    **源整个没给这一列也读 None**（可选丰富列，不整批拒——parse 里的分派说得分明）。
     """
 
     source: str
@@ -381,6 +386,9 @@ class ReportRcRow(NamedTuple):
     quarter: str
     eps: float
     pe: float | None
+    rating: str | None = None
+    max_price: float | None = None
+    min_price: float | None = None
 
 
 #: quarter 的形状：YYYYQn（2026Q4）。实测脏值有 JSON null（6 个）与字面 'Q'（1 个）——
@@ -429,7 +437,28 @@ def parse_report_rc(
                 f"{symbol}@{report_date} {org_name} {quarter} 在同一页里出现两次（分页重叠）"
             )
         seen.add(key)
-        rows.append(ReportRcRow(source, symbol, report_date, org_name, quarter, eps, pe))
+        # 三列是可选丰富列（#66）：**源没给这一列**读 None，不整批拒——它们与"这份研报没给
+        # 目标价"在下游是同一个事实（格子「—」）；必列（eps/org_name/…）的缺列照旧整批响。
+        rating: str | None = None
+        if "rating" in fields:
+            rating_text = _field(raw, fields, "rating").strip()
+            rating = None if rating_text in ("", "None", "nan", "NULL", "null") else rating_text
+        max_price = _opt(raw, fields, "max_price") if "max_price" in fields else None
+        min_price = _opt(raw, fields, "min_price") if "min_price" in fields else None
+        rows.append(
+            ReportRcRow(
+                source,
+                symbol,
+                report_date,
+                org_name,
+                quarter,
+                eps,
+                pe,
+                rating,
+                max_price,
+                min_price,
+            )
+        )
     return rows
 
 

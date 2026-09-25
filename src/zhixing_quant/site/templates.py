@@ -68,11 +68,18 @@ FINA_TREND_FIELDS: tuple[str, ...] = (
 #: `ann_date`/`art_code` 是行身份（点时时钟与主键），每行都印、不进可选清单（forecast 同款）。
 NEWS_FIELDS: tuple[str, ...] = ("publish_time", "title", "content")
 
+#: `analyst_rating` 的字段四列（远期评级与目标价，#66，06 §十 远期族扩面）：源侧 report_rc
+#: 的 `rating`（机构评级·源原词）、`max_price`/`min_price`（券商目标价区间上下限·元）、
+#: `eps`（该研报对该报告期的预测）。`report_date`/`org_name`/`quarter` 是行身份（点时时钟、
+#: 券商、报告期），每行都印、不进可选清单（news 同款手法）。
+ANALYST_FIELDS: tuple[str, ...] = ("rating", "max_price", "min_price", "eps")
+
 #: 参考表类 dataset（ADR-0016）：字段清单按表各自声明，装载时按 dataset 类别校验。
 TABLE_DATASETS: dict[str, tuple[str, ...]] = {
     "fundamental_head": FUNDAMENTAL_HEAD_FIELDS,
     "forward_pe": FORWARD_PE_FIELDS,
     "fina_trend": FINA_TREND_FIELDS,
+    "analyst_rating": ANALYST_FIELDS,
     "news": NEWS_FIELDS,
     "daily_basic": (
         "close",

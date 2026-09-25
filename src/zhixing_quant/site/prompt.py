@@ -48,6 +48,11 @@ _REPORT_RC_HISTORY_START = date(1990, 1, 1)
 #: （pages.WINDOW_STARTS），留余量；读到的都是盘上真有的分区，空年份直接跳过。
 _FINA_HISTORY_START = date(1985, 1, 1)
 
+#: `analyst_rating` 的明细行数上限（#66，口径行里写明 60）：一报多报告期各占一行，
+#: 不设上限会把整份 report_rc 历史灌进提示词、顶破 10 万 token 阈值。取点时可见的
+#: 最近 60 行——研报按发布日倒序，越新越在前，截断丢的是最老的观察不是最新的。
+ANALYST_TOP = 60
+
 
 class TemplateNotReady(ValueError):
     """`status: pending` 的模板：它要的数据组件还没落地（决定 5）。
@@ -174,6 +179,7 @@ def title_of(dataset: str) -> str:
             "index_daily": f"大盘（{BENCHMARK_NAME} {BENCHMARK}）",
             "forward_pe": "远期PE（逐日点时）",
             "fina_trend": "ROE与增速（逐日点时）",
+            "analyst_rating": "远期评级与目标价（研报明细）",
             "news": "最新消息（公告原文）",
         }.get(dataset, dataset)
     raise UnnamedDataset(f"{dataset!r} 不是这一层认得的干净区 dataset：标题不知道该叫什么，不许编")
@@ -203,6 +209,10 @@ def heading(selection: Selection, delivered: int) -> str:
         # 消息是事件不是日序列：delivered 数的是**公告条数**，写成"个交易日"会把条数
         # 说成天数（30 条公告 ≠ 30 个交易日）——事件表的诚实标题是"条 + 窗口"两个数。
         return f"{label}（{delivered} 条公告，窗口 {selection.days} 个交易日）"
+    if selection.dataset == "analyst_rating":
+        # 研报明细同为事件型（#66）：delivered 是截断后的行数；"盘上 N 个交易日"那句
+        # 对这张表没有意义——行数是条、不是天。
+        return f"{label}（{delivered} 条研报，最新在前）"
     if delivered == selection.days:
         return f"{label}（{selection.days} 个交易日）"
     return f"{label}（盘上 {delivered} 个交易日，模板要 {selection.days}）"
@@ -353,6 +363,31 @@ def build(
                         fields=selection.fields or (),
                         format=template.format,
                     ),
+                )
+            )
+            continue
+        if selection.dataset == "analyst_rating":
+            # 远期评级与目标价（#66）：事件型明细（news 同族），不做逐日对齐——评级的产品
+            # 形态是"最近券商怎么看"，逐日点时序列会把同一份研报抄进每个交易日（token 爆炸
+            # 且无新信息）。读全史到 as_of、report_date ≤ as_of 点时筛（03-L4）、
+            # 发布日倒序截 ANALYST_TOP 条；读右端用 as_of 不是窗口末（研报发在周末，
+            # news 那条理由原样成立）。
+            reports = [
+                row
+                for row in read_table(
+                    "report_rc", code, _REPORT_RC_HISTORY_START, as_of, root=config.parquet_dir()
+                )
+                if row.report_date <= as_of
+            ]
+            if not reports:
+                sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
+                continue
+            newest_first = reports[-ANALYST_TOP:][::-1]  # read_table 已按 (date,org,quarter) 升序
+            with_data += 1
+            sections.append(
+                Section(
+                    title=heading(selection, len(newest_first)),
+                    body=table.render_analyst(newest_first, format=template.format),
                 )
             )
             continue

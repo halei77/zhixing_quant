@@ -19,10 +19,21 @@ from typing import Any
 
 
 def read[R](con: Any, path: Path, names: Sequence[str], factory: Callable[..., R]) -> list[R]:
-    """整个文件读回，列序按 `names`。文件不在就是空——第一天没有第一天，不是错误。"""
+    """整个文件读回，列序按 `names`。文件不在就是空——第一天没有第一天，不是错误。
+
+    **schema 演进（#66）**：Spec 后加的列在老文件里不存在——缺的列读成 None 而不是让
+    SELECT 报 Binder Error。「那条行落盘时还没有这一列」与「这一列是空的」在文件层面是
+    同一个事实，都答 None；反过来按名硬 SELECT 会把"新列刚上线、还没重灌"的窗口读成生产
+    事故，逼读端等回填收工——半老半新的盘只会更难查。新增列因此零停机：先容缺读，回填
+    逐票把值盖上。
+    """
     if not path.is_file():
         return []
-    columns = ", ".join(names)
+    present = {
+        str(row[0])
+        for row in con.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)]).fetchall()
+    }
+    columns = ", ".join(name if name in present else "NULL" for name in names)
     fetched: list[tuple[Any, ...]] = con.execute(
         f"SELECT {columns} FROM read_parquet(?)", [str(path)]
     ).fetchall()

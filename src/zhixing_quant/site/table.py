@@ -156,6 +156,15 @@ REFERENCE_LABELS: dict[str, str] = {
         "各为该报告期**累计**口径、未年化——Q1 的 ROE 不是全年）；"
         "'—' 表示当日尚无已披露财报；来源转接源 rds fina_indicator"
     ),
+    "analyst_rating": (
+        "远期评级与目标价口径：逐条研报明细（非一致预期——本表不做均值、不排序优劣），"
+        "发布日（report_date）≤ 生成日的研报按发布日倒序取最近 60 条，"
+        "一报覆盖多个报告期则各占一行；"
+        "评级是券商原词（含方向如'增持(上调)'），目标价为该研报给的区间上下限（元），"
+        "大量研报不给目标价——'—' 是'这份研报没给'，不是'没有目标'；"
+        "预测EPS为该研报对该报告期的预测，Q1–Q3 标签是**年内累计**口径不是全年（同远期PE的坑）；"
+        "来源转接源 rds report_rc"
+    ),
 }
 
 
@@ -324,6 +333,44 @@ def render_news(rows: Sequence[Any], *, format: Format = "markdown") -> str:
         lines += [",".join(r) for r in body_rows]
         return "\n".join(lines)
     lines = [f"> {NEWS_LABEL}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
+    lines += [f"| {' | '.join(row)} |" for row in body_rows]
+    return "\n".join(lines)
+
+
+def _analyst_price_cell(lo: float | None, hi: float | None) -> str:
+    """目标价格子：区间「下–上」、只给一端就单值、都没给「—」（口径行写明—不是没目标）。"""
+    if lo is not None and hi is not None and lo != hi:
+        return f"{lo:.2f}–{hi:.2f}"
+    only = hi if lo is None else lo
+    return "—" if only is None else f"{only:.2f}"
+
+
+def render_analyst(rows: Sequence[Any], *, format: Format = "markdown") -> str:
+    """report_rc 行 → 远期评级与目标价明细表（事件型，news/forecast 同族手法，#66）。
+
+    行身份三列（发布日/券商/报告期）每行都印；点时筛选（report_date ≤ as_of）与
+    倒序截断在取数侧（`site/prompt.py`），渲染层不放宽——同 `render_news` 那条纪律。
+    """
+    if not rows:
+        raise IncompleteComponent("一张都没有的研报明细不进提示词：那是组件没取到数，不是没有评级")
+    label = reference_label("analyst_rating")
+    headers = ["发布日", "券商", "报告期", "评级", "目标价(元)", "预测EPS"]
+    body_rows = [
+        [
+            row.report_date.isoformat(),
+            row.org_name,
+            row.quarter,
+            row.rating or "—",
+            _analyst_price_cell(row.min_price, row.max_price),
+            "—" if row.eps is None else f"{row.eps:.2f}",
+        ]
+        for row in rows
+    ]
+    if format == "csv":
+        lines = [f"# {label}", ",".join(headers)]
+        lines += [",".join(r) for r in body_rows]
+        return "\n".join(lines)
+    lines = [f"> {label}", "", f"| {' | '.join(headers)} |", f"|{'---|' * len(headers)}"]
     lines += [f"| {' | '.join(row)} |" for row in body_rows]
     return "\n".join(lines)
 

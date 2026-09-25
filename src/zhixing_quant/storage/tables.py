@@ -132,6 +132,9 @@ class ReportRcRow(NamedTuple):
 
     主键三列 (report_date, org_name, quarter)：同发布日同券商同报告期一行，冲突抛不裁决
     （2026-09-25 实测 41% 的 (date, quarter) 是同日多券商，两列键装不下真数据）。
+
+    #66 列扩面：rating=机构评级源原词（可空）、max/min_price=券商目标价区间上下限·元
+    （可空——不是每份研报都给目标价）。
     """
 
     source: str
@@ -141,6 +144,9 @@ class ReportRcRow(NamedTuple):
     quarter: str
     eps: float
     pe: float | None
+    rating: str | None = None
+    max_price: float | None = None
+    min_price: float | None = None
 
 
 class NewsRow(NamedTuple):
@@ -301,6 +307,9 @@ SPECS: tuple[TableSpec, ...] = (
             ("quarter", "VARCHAR"),
             ("eps", "DOUBLE"),
             ("pe", "DOUBLE"),
+            ("rating", "VARCHAR"),
+            ("max_price", "DOUBLE"),
+            ("min_price", "DOUBLE"),
         ),
         key=("report_date", "org_name", "quarter"),
         order=("report_date", "org_name", "quarter"),
