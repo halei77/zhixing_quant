@@ -127,6 +127,31 @@ def test_source_is_ngw_minute_one_and_unknown_periods_are_refused() -> None:
         minute.source_for("15")
 
 
+def test_periods_5_30_60_stamp_their_own_source_and_keep_identity_labels() -> None:
+    """#64 降级接线：同一行按时段标 `ngw_minute_5/30/60`，`ts` 照旧 identity。"""
+    for period in ("5", "30", "60"):
+        (draft,) = minute.minute_drafts([_row("20260924093500")], symbol="600519", period=period)
+        assert draft.source == f"ngw_minute_{period}"
+        assert draft.ts == datetime(2026, 9, 24, 9, 35)
+        assert draft.trade_date == date(2026, 9, 24)
+
+
+def test_measured_label_grids_survive_the_session_filter_period_by_period() -> None:
+    """2026-09-25 实测的三周期标签格（数据根 probe 报告）一根不丢；午休栏位照旧整行丢。"""
+    grids = {
+        "5": ("093500", "100000", "113000", "130500", "150000"),
+        "30": ("100000", "113000", "133000", "150000"),
+        "60": ("103000", "113000", "140000", "150000"),
+    }
+    for period, labels in grids.items():
+        rows = [_row(f"20260924{t}") for t in labels]
+        drafts = minute.minute_drafts(rows, symbol="600519", period=period)
+        assert [d.ts for d in drafts] == [
+            datetime.strptime(f"20260924{t}", "%Y%m%d%H%M%S") for t in labels
+        ]
+    assert minute.minute_drafts([_row("20260924130000")], symbol="600519", period="5") == []
+
+
 def test_no_adjust_factor_and_row_order_are_left_as_the_source_gave_them() -> None:
     """分钟线不落因子（ADR-0009 决定 4）；行序原样保留——在这里排一次序，R009 就瞎了。"""
     late = _row("20260924150000")

@@ -2,8 +2,8 @@
 
 只做装配，和 `zx-daily` 一样：判定、重试、落盘、日报都在 `jobs.minute`，周期 → dataset 的
 映射在 `storage.layout`，**周期 → 源**（1 → ngw `ngw_minute_1`，5/30/60 → akshare/sina
-`akshare_minute_*`）也住在 `jobs.minute`（`live_fetcher` 抓取分派 + `drafts_for` 行解析分派，
-同一个 `NGW_PERIOD` 键）。这个文件里没有一条业务规则。
+`akshare_minute_*`，抓空/抓错降级到 ngw `ngw_minute_*`）也住在 `jobs.minute`（`live_fetcher`
+抓取分派 + `drafts_for` 行解析分派，同一个 `Grabbed.via` 键）。这个文件里没有一条业务规则。
 
 它**拒绝猜范围**：`--symbols` 与 `--limit` 都不给时不启动（退出码 2）。全市场三周期约 13290
 请求、2–3 小时/日，而"采几个周期、票池多大"是 ADR-0009 决定 8 里等用户裁决的那一条——给一个
@@ -62,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="1[,5…]",
         help=(
             f"采哪几个周期，默认 {','.join(DEFAULT_PERIODS)}；"
-            f"{job.NGW_PERIOD} 走 ngw（源标识 ngw_minute_1），5/30/60 走 sina（akshare_minute_*）"
+            f"{job.NGW_PERIOD} 走 ngw（源标识 ngw_minute_1），5/30/60 走 sina"
+            "（akshare_minute_*）、抓空/抓错降级 ngw（ngw_minute_*，一轮预算 300 次）"
         ),
     )
     parser.add_argument(

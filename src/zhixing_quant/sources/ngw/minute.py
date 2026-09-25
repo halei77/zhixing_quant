@@ -1,8 +1,9 @@
-"""牛股王 1 分钟K 适配器：`timedata` → `BarDraft`（设计合成 §2.3 四条硬约束逐条兑现）。
+"""牛股王分钟K适配器：`timedata` → `BarDraft`（设计合成 §2.3 四条硬约束逐条兑现）。
 
 与 akshare 分钟适配器同一条分工：**这里不碰网络**，抓取在 `client.py`，样本在 CI 里离线
 重放（03 §二 L2）。四条硬约束（2026-09-24 实测证据见数据根
-`reports/source-probe/2026-09-24-ngw-niuguwang-source-access.md`）：
+`reports/source-probe/2026-09-24-ngw-niuguwang-source-access.md`；
+5/30/60 分周期的标签口径见 `reports/source-probe/2026-09-25-ngw-minute-periods.md`）：
 
 1. **`ts` 映射 = `times` 原样解析（identity），不再逐段 +1min 重标**。
    实测完整交易日 241 根，标签 = 09:30（开盘竞价栏，OHLC 全等开盘价）+ 09:31–11:30 +
@@ -27,6 +28,13 @@
    ——实测 `curvalue/(curvol×价)` p50=1.0000（238 根），20260924150000 那根
    27663×1237.00=34,219,131 与 `curvalue` 逐分相等。Qoute T-001 写「`curvalue/100`」
    把量纲记反了（fixture 按分造的数），照抄会把成交额缩小 100 倍。
+
+**5/30/60 分周期（任务 #64，2026-09-25 实测 600519 与 688981/920002/300750）**：`type=1/3/4`
+与 1 分钟同一响应形状、同一量纲（p50 1.0001–1.0008）；标签全是**右端点**且**没有 09:30 竞价栏**
+（5 分 09:35–11:30 + 13:05–15:00 共 48 根；30 分 10:00,10:30,11:00,11:30 + 13:30,14:00,14:30,15:00
+共 16 根；60 分 10:30,11:30 + 14:00,15:00 共 4 根，与 sina 三周期标签集逐格同口径）。
+所以 `_in_session` 的段窗口按 1 分钟标签集定，对四个周期原样成立：每个周期的合法标签都落在
+[09:30,11:30] ∪ [13:01,15:00] 内，而 11:31–13:00 的死标签（若有）照旧丢弃。
 """
 
 from __future__ import annotations
@@ -74,13 +82,17 @@ def _yuan(value: object) -> float | None:
     return None if number is None else number / 100.0
 
 
-def minute_drafts(rows: Sequence[Mapping[str, object]], *, symbol: str) -> list[BarDraft]:
-    """一行 `timedata` → 一条待判定的 1 分钟K线。行序原样保留（R009 判的是源交来的顺序）。
+def minute_drafts(
+    rows: Sequence[Mapping[str, object]], *, symbol: str, period: str = "1"
+) -> list[BarDraft]:
+    """一行 `timedata` → 一条待判定的分钟K线。行序原样保留（R009 判的是源交来的顺序）。
 
-    `period` 不是参数：ngw 这层只供 1 分钟（type=11），源标识恒为 `ngw_minute_1`——
-    60 分钟的接口挂了不该扣 1 分钟的健康分，反过来 1 分钟的口径也别长进别的周期里。
+    `period` 只决定源标识（`ngw_minute_1/5/30/60`，04 §三 按源打分：60 分的接口挂了不该扣
+    5 分的健康分）与 `source_for` 的合法性校验——行解析本身四个周期同一条：同一接口、同一
+    响应形状、标签全是右端点（模块说明的 5/30/60 段，2026-09-25 实测），`_in_session` 的段
+    窗口对四个周期的合法标签集原样成立。认不出的周期在 `source_for` 里抛，不发请求不落盘。
     """
-    source = source_for("1")
+    source = source_for(period)
     drafts: list[BarDraft] = []
     for row in rows:
         stamp = _stamp(row.get("times"))

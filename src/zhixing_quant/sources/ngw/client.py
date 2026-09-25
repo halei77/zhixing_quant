@@ -75,6 +75,11 @@ MAX_KLINE_COUNT = 1400
 #: 笔记写 3=60分/7=周 是错的——7 返回空）。
 KLINE_TYPE_1M = "11"
 
+#: **周期（分钟）→ `type` 的单点映射**（任务 #64，2026-09-25 实测 600519 起跨板块抽查：
+#: 15分 `type=2` 也通，但 layout 没有 minute_15 dataset，收进来就是第二个"有源没处落"的洞）。
+#: 分派处（`jobs.minute`）只读这一份——周期表漂成两份的那条路（抓 ngw、解析按 sina）从这里堵死。
+KLINE_TYPES: Mapping[str, str] = {"1": "11", "5": "1", "30": "3", "60": "4"}
+
 #: 传输边界：完整 URL（含查询串）+ 头 + 超时 → (状态码, 响应体)。4xx 以状态码回，不抛。
 Transport = Callable[[str, Mapping[str, str], float], tuple[int, bytes]]
 

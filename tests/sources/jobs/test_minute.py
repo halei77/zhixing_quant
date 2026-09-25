@@ -11,9 +11,10 @@
 4. **失败要说清是哪一天停的**。`newest` 是唯一能把"源停更了"与"跑早了"分开的东西。
 5. **对账读的就是刚落的那块盘**。dataset 名、列序、不复权口径这三件事只有走真存储才测得到，
    而 R011 报的每一句都建立在"它们没错"之上。判据本身在 `test_reconcile.py`，这里不重复。
-6. **周期 → 源的分派不许漂**。1 分走 ngw（`ngw_minute_1`）、5/30/60 走 sina
-   （`akshare_minute_*`）：一批一源是 quality engine 的强制，源标识混了健康分就说不清扣的是谁；
-   日报/告警的窗口口径（1970 根 vs 单页 + start 翻页）也按同一条分派分流。
+6. **周期 → 主源的分派 + 降级不许漂**。1 分走 ngw（`ngw_minute_1`）、5/30/60 走 sina
+   （`akshare_minute_*`），sina 抓空/抓错降级 ngw（`ngw_minute_*`，#64）：一批一源是 quality
+   engine 的强制，源标识混了健康分就说不清扣的是谁；行解析跟着 `Grabbed.via` 走而不是跟着
+   周期表走，抓谁解析谁；日报/告警的窗口口径（1970 根 vs 单页 + start 翻页）按同一条分流。
 
 网络层不在这里测：`fetch` 是参数，全部测试离线可跑（03 §二 L2）。
 """
@@ -23,7 +24,7 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -79,22 +80,27 @@ def ngw_bar(when: datetime, close_yuan: float = 100.0) -> dict[str, Any]:
     }
 
 
-def frame_today(*_args: object) -> Rows:
-    return [bar(MORNING), bar(AFTERNOON, 101.0)]
+def grabbed(*rows: dict[str, Any], via: str = "akshare") -> job.Grabbed:
+    """一批 sina 形状（默认）的源行 + 它由谁交来。`via` 是分派键（#64 起解析只看它）。"""
+    return job.Grabbed(list(rows), via)
 
 
-def frame_of(*rows: dict[str, Any]) -> job.MinuteFetcher:
-    def frame(*_args: object) -> Rows:
-        return list(rows)
+def frame_today(*_args: object) -> job.Grabbed:
+    return grabbed(bar(MORNING), bar(AFTERNOON, 101.0))
+
+
+def frame_of(*rows: dict[str, Any], via: str = "akshare") -> job.MinuteFetcher:
+    def frame(*_args: object) -> job.Grabbed:
+        return grabbed(*rows, via=via)
 
     return frame
 
 
-def empty_frame(*_args: object) -> Rows:
-    return []
+def empty_frame(*_args: object) -> job.Grabbed:
+    return grabbed(via="akshare")
 
 
-def failing(*_args: object) -> Rows:
+def failing(*_args: object) -> NoReturn:
     raise ConnectionError("源不可用")
 
 
@@ -263,8 +269,8 @@ def test_a_fatal_batch_alerts_without_voiding_the_other_periods(tmp_path: Path) 
     """
     garbled = {**bar(MORNING), "day": "源改口了"}
 
-    def frame(_code: str, period: str) -> Rows:
-        return [garbled] if period == "5" else frame_today()
+    def frame(_code: str, period: str) -> job.Grabbed:
+        return grabbed(garbled) if period == "5" else frame_today()
 
     alerts: list[tuple[str, str]] = []
     result = run_job(tmp_path, fetch=frame, periods=("5", "30"), alerts=alerts)
@@ -429,7 +435,7 @@ def test_period_one_lands_as_ngw_minute_1(tmp_path: Path) -> None:
     """
     result = run_job(
         tmp_path,
-        fetch=frame_of(ngw_bar(MORNING), ngw_bar(AFTERNOON, 101.0)),
+        fetch=frame_of(ngw_bar(MORNING), ngw_bar(AFTERNOON, 101.0), via=job.VIA_NGW),
         periods=("1",),
     )
     assert result.ok and not result.fatal
@@ -451,8 +457,10 @@ def test_a_mixed_run_keeps_one_source_per_dataset(tmp_path: Path) -> None:
     分派错了的表现正是混批：门禁响的是"混源"，病根却在接线。
     """
 
-    def fetch(_symbol: str, period: str) -> Rows:
-        return [ngw_bar(MORNING)] if period == "1" else [bar(MORNING)]
+    def fetch(_symbol: str, period: str) -> job.Grabbed:
+        return (
+            grabbed(ngw_bar(MORNING), via=job.VIA_NGW) if period == "1" else grabbed(bar(MORNING))
+        )
 
     result = run_job(tmp_path, fetch=fetch, periods=("1", "60"))
     one = query.read_bars("600519", DAY, DAY, dataset=layout.MINUTE_1, root=tmp_path)
@@ -481,7 +489,7 @@ def test_the_depth_note_splits_the_window_by_source(tmp_path: Path) -> None:
     ngw_only = run_job(
         tmp_path / "ngw",
         periods=("1",),
-        fetch=frame_of(ngw_bar(MORNING)),
+        fetch=frame_of(ngw_bar(MORNING), via=job.VIA_NGW),
         reconcile=lambda *_a: Recon(1, (), {layout.MINUTE_1: cover}),
     )
     assert "ngw 单页" in ngw_only.markdown
@@ -496,14 +504,19 @@ def test_the_depth_note_splits_the_window_by_source(tmp_path: Path) -> None:
     both = run_job(
         tmp_path / "both",
         periods=("1", "60"),
-        fetch=lambda _s, p: [ngw_bar(MORNING)] if p == "1" else [bar(MORNING)],
+        fetch=lambda _s, p: (
+            grabbed(ngw_bar(MORNING), via=job.VIA_NGW) if p == "1" else grabbed(bar(MORNING))
+        ),
         reconcile=lambda *_a: Recon(2, (), {layout.MINUTE_1: cover, layout.MINUTE_60: cover}),
     )
     assert "1970 根窗口" in both.markdown and "ngw 单页" in both.markdown
 
 
 def test_the_no_data_alert_splits_the_urgency_by_source(tmp_path: Path) -> None:
-    """无数据告警的"漏了有多急"按源说：sina 是永久缺失，ngw 是翻页可补——反了会误导处置。"""
+    """无数据告警的"漏了有多急"按源说：sina 是"主源滑窗、要人重跑补"，ngw 是"翻页可补、先查源"。
+
+    #64 起两边都"补得回来"，急法却仍不同——区别不在能不能，在要不要人动手、窗口还剩几天。
+    """
 
     def verdict(alerts: list[tuple[str, str]]) -> str:
         # 全失败时第 0 条是 with_retry 的逐票告警，"今日无数据"是收尾那条：按标题取。
@@ -518,8 +531,8 @@ def test_the_no_data_alert_splits_the_urgency_by_source(tmp_path: Path) -> None:
     run_job(tmp_path / "sina", periods=("5",), fetch=failing, alerts=sina_alerts)
     sina_body = verdict(sina_alerts)
     assert "1970 根" in sina_body
-    assert "永久没了" in sina_body
-    assert "补得回来" not in sina_body
+    assert "主源" in sina_body  # sina 的话要说清这是主源，兜底另有一家
+    assert "单页" not in sina_body  # ngw 的翻页句不许挂到 sina 的告警上
 
 
 # --- live_fetcher：真网络装配的分派（transport 注入，零外发）-----------------------------
@@ -566,11 +579,12 @@ def test_live_fetcher_wires_period_one_through_ngw() -> None:
     """
     client, calls = _stub_ngw_client(SEARCH_HIT, {"timedata": [ngw_bar(MORNING)]})
     fetch = job.live_fetcher(("1",), client=client)
-    rows = fetch("600519", "1")
+    grabbed_1 = fetch("600519", "1")
+    assert grabbed_1.via == job.VIA_NGW
     assert len(calls) == 2
     assert "homesearch" in calls[0] and "q=600519" in calls[0]
     assert "kline" in calls[1] and f"count={MAX_KLINE_COUNT}" in calls[1]
-    drafts = job.drafts_for(rows, symbol="600519", period="1")
+    drafts = job.drafts_for(grabbed_1, symbol="600519", period="1")
     assert drafts and all(d.source == "ngw_minute_1" for d in drafts)
     assert drafts[0].ts == MORNING
 
@@ -588,18 +602,32 @@ def test_live_fetcher_splits_periods_between_the_two_sources(
     monkeypatch.setattr(akshare_fetch, "minute_frame", fake_minute_frame)
     client, calls = _stub_ngw_client(SEARCH_HIT, {"timedata": [ngw_bar(MORNING)]})
     fetch = job.live_fetcher(("1", "60"), client=client)
-    assert fetch("600519", "1")
-    assert fetch("600519", "60") == [bar(MORNING)]
+    assert fetch("600519", "1").rows
+    sixty = fetch("600519", "60")
+    assert sixty.via == job.VIA_AKSHARE and sixty.rows == [bar(MORNING)]
     assert seen == [("600519", "60")]  # 60 分一次都没往 ngw 发
     # 1 分那轮只打了两发：innercode 检索 + kline 一页；60 分走的是 akshare，不在这本账上
     assert len(calls) == 2
     assert "homesearch" in calls[0] and "kline" in calls[1]
 
 
-def test_live_fetcher_builds_its_client_only_when_period_one_was_asked() -> None:
-    """没注入 client 时才在这里构造（1.5s 起步的那个装配点）；不含 1 的轮次不摸 token 路径。"""
-    assert callable(job.live_fetcher(("1",)))  # 构造真 NgwClient：不联网，只读 token 盘
-    assert callable(job.live_fetcher(("5", "30", "60")))
+def test_live_fetcher_never_touches_ngw_while_akshare_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归钉（#64 的"老路径一个字节不变"）：5/30/60 全程有数时，连 NgwClient 都不许构造。
+
+    构造即摸 token 路径、即建锁——纯 sina 的轮次不该有这些副作用，而懒构造坏了的最便宜测法
+    就是把构造函数换成炸的：不降级就永远炸不到。
+    """
+
+    def boom(**_kw: object) -> NgwClient:
+        raise AssertionError("client 不该被构造")
+
+    monkeypatch.setattr(job, "NgwClient", boom)
+    monkeypatch.setattr(akshare_fetch, "minute_frame", lambda *_a: [bar(MORNING)])
+    fetch = job.live_fetcher(("5", "30", "60"))
+    for period in ("5", "30", "60"):
+        assert fetch("600519", period).via == job.VIA_AKSHARE
 
 
 def test_live_fetcher_refuses_period_one_when_its_client_was_never_built() -> None:
@@ -607,6 +635,85 @@ def test_live_fetcher_refuses_period_one_when_its_client_was_never_built() -> No
     fetch = job.live_fetcher(("5",))
     with pytest.raises(ValueError, match="不含它"):
         fetch("600519", "1")
+
+
+# --- akshare→ngw 降级（#64）：空帧与异常都兜底，预算封顶，退回主源语义 ---------------------
+
+
+def _fallback_setup(
+    monkeypatch: pytest.MonkeyPatch, *, ak: Rows | Exception | None
+) -> tuple[job.MinuteFetcher, list[str]]:
+    """装一个「sina 按剧本、ngw 走脚本应答」的 live_fetcher，返回 (fetch, ngw 请求账本)。"""
+
+    def fake_minute_frame(_code: str, _period: str = "5") -> Rows:
+        if isinstance(ak, Exception):
+            raise ak
+        assert ak is not None
+        return list(ak)
+
+    monkeypatch.setattr(akshare_fetch, "minute_frame", fake_minute_frame)
+    client, calls = _stub_ngw_client(SEARCH_HIT, {"timedata": [ngw_bar(MORNING)]})
+    return job.live_fetcher(("5",), client=client), calls
+
+
+def test_live_fetcher_falls_back_to_ngw_on_an_empty_akshare_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sina 交回空帧（它真会这么干）：同周期降级 ngw，`type=1` 的那页、标 `via=ngw`。"""
+    fetch, calls = _fallback_setup(monkeypatch, ak=[])
+    got = fetch("600519", "5")
+    assert got.via == job.VIA_NGW and len(got.rows) == 1
+    assert "homesearch" in calls[0]
+    assert "kline" in calls[1] and "type=1" in calls[1]  # 5 分的 ngw type，不是 11
+    drafts = job.drafts_for(got, symbol="600519", period="5")
+    assert [d.source for d in drafts] == ["ngw_minute_5"]
+
+
+def test_live_fetcher_falls_back_to_ngw_when_akshare_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sina 抛错（限流/超时/半截 JSON）：一样降级，且错不吞——ngw 也错时错要冒到 with_retry。"""
+    fetch, calls = _fallback_setup(monkeypatch, ak=ConnectionError("sina 不理人"))
+    got = fetch("600519", "5")
+    assert got.via == job.VIA_NGW and len(calls) == 2
+
+
+def test_live_fetcher_stops_falling_back_at_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """预算是护栏不是开关：触顶后 sina 的错原样响、空帧原样交——不许 ngw 无声扛整源。"""
+    alerts: list[tuple[str, str]] = []
+
+    def fake_minute_frame(_code: str, _period: str = "5") -> Rows:
+        raise ConnectionError("sina 整源倒了")
+
+    monkeypatch.setattr(akshare_fetch, "minute_frame", fake_minute_frame)
+    client, calls = _stub_ngw_client(SEARCH_HIT, {"timedata": [ngw_bar(MORNING)]})
+    fetch = job.live_fetcher(
+        ("5",), client=client, fallback_budget=1, alert=lambda *a: alerts.append(a)
+    )
+    assert fetch("600519", "5").via == job.VIA_NGW  # 第 1 发：预算内的最后一次
+    assert [title for title, _b in alerts] == ["分钟线降级预算耗尽"]
+    with pytest.raises(ConnectionError):  # 第 2 发：预算耗尽，主源的错交出去
+        fetch("600519", "30")
+    assert len(calls) == 2  # ngw 只被打了第一发的那两枪
+
+
+def test_downgrades_are_counted_into_the_tally_and_the_daily_report(tmp_path: Path) -> None:
+    """降级要留名：`via=ngw` 的 5 分行落 `minute_5`、源标识 `ngw_minute_5`、日报单列一节。
+
+    1 分的主源本来就是 ngw——它不进这本账，否则每天全池都是"降级"，那节就废了。
+    """
+    result = run_job(
+        tmp_path,
+        fetch=frame_of(ngw_bar(MORNING), via=job.VIA_NGW),
+        periods=("5",),
+    )
+    assert result.tally.downgrades == ("600519/5min",)
+    back = query.read_bars("600519", DAY, DAY, dataset=layout.MINUTE_5, root=tmp_path)
+    assert [b.source for b in back] == ["ngw_minute_5"]
+    assert "## 源降级（akshare→ngw）" in result.markdown
+    assert "600519/5min" in result.markdown
 
 
 # --- 命令行入口：只剩"装配对不对"可测 --------------------------------------------------

@@ -4,12 +4,14 @@
 这条路径上的每一次复制迟早都会漂成两种"今天到底算成功没有"。四处不同决定了这个文件单独存在：
 
 - **没有回填旋钮**（`--previous-days` 不存在），而"尾巴有多长、漏一天有多急"**按源分两半**：
-  5/30/60 走 akshare/sina，源固定回最近 1970 根（决定 6），交回来的是一条尾巴、报告日只是
-  尾巴的右端；1 分钟走 ngw（ADR-0022 决定 3 的源），单页 count≤1400（约 5.8 个交易日）且有
-  `start` 截止参数能向过去翻页（B 刀 2026-09-24 实测翻到 2019）。两半的日报与告警口径因此
-  分开写——sina 的"1970 根窗口"句挂到 ngw 的报告上是替源传错了话。
+  5/30/60 主源 akshare/sina（抓空/抓错降级 ngw，任务 #64），sina 固定回最近 1970 根（决定 6），
+  交回来的是一条尾巴、报告日只是尾巴的右端；1 分钟走 ngw（ADR-0022 决定 3 的源），单页
+  count≤1400（约 5.8 个交易日）且有 `start` 截止参数能向过去翻页（B 刀 2026-09-24 实测翻到
+  2019）。两半的日报与告警口径因此分开写——sina 的"1970 根窗口"句挂到 ngw 的报告上是替源
+  传错了话。
 - **一只票 × 一个周期 = 一批**。两种周期混成一批会在 `(symbol, ts)` 上撞键（10:00 那根在 5min
-  与 30min 里都存在），R008 会把后到的判成重复；而它们本来就要落进两个 dataset。
+  与 30min 里都存在），R008 会把后到的判成重复；而它们本来就要落进两个 dataset。同一批内不混源：
+  降级发生在"这一批整个交给 ngw"的粒度上，`GateEngine` 的混源拒批因此永远碰不到兜底路径。
 - **跑多大由人说**（决定 8）。`symbols` 与 `limit` 至少给一个，都不给就抛 `ScopeNotConfigured`。
   全市场三周期 ≈ 13290 请求 ≈ 2–3 小时/日，替用户按下这个按钮不在自主工作的边界之内。
 - **它要读盘**。日线任务只看自己刚抓的那一批；分钟线存在的意义之一是跟另一本账（日线）比同一天，
@@ -39,6 +41,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 from zhixing_quant import config
 from zhixing_quant.domain.bar import BarDraft
@@ -65,14 +68,31 @@ from zhixing_quant.sources.jobs.daily import (
     with_retry,
 )
 from zhixing_quant.sources.ngw import minute as ngw_minute
-from zhixing_quant.sources.ngw.client import MAX_KLINE_COUNT, NgwClient
+from zhixing_quant.sources.ngw.client import KLINE_TYPES, MAX_KLINE_COUNT, NgwClient
 from zhixing_quant.sources.rows import Rows
 from zhixing_quant.storage import layout, query
 from zhixing_quant.storage.quarantine import QuarantineReport
 from zhixing_quant.storage.write import WriteReport
 
-#: 抓取边界：一只票、一个周期 → 源行。范围由 `stores` 的键说，而不是由一个窗口参数说。
-MinuteFetcher = Callable[[str, str], Rows]
+#: 抓取边界：一只票、一个周期 → 源行 + **是谁交来的**（`Grabbed.via`）。范围由 `stores` 的键说，
+#: 而不是由一个窗口参数说；源则必须由交行的那一刻亲口说——坑 #18/#20 的同一条纪律。
+MinuteFetcher = Callable[[str, str], "Grabbed"]
+
+
+class Grabbed(NamedTuple):
+    """一次抓取的结果：源行 + 经由的源（`VIA_AKSHARE` / `VIA_NGW`）。
+
+    `via` 不是元数据装饰，它决定**行解析选哪个适配器**（`drafts_for` 的唯一分派键）：
+    降级接线后同一个周期可能来自两个源（5 分：sina 挂了 ngw 顶），行形状完全不同
+    （sina `day/open/...`·元 vs ngw `times/openp/...`·分）。还按「周期 → 源」的老键分派，
+    就会把 ngw 的 `timedata` 送进 sina 解析器——整批挂在 R010 批级 FATAL 上，而日报看起来
+    像源改了列名。抓取说了谁，解析就信谁。
+    """
+
+    rows: Rows
+    via: str
+
+
 #: 对账边界：报告日 + 股票池 + 周期 → 两本账的差，顺带每个周期在盘上覆盖了多久。
 #: 生产上就是 `reconcile_pool`。
 Reconciler = Callable[[date, Sequence[str], Sequence[str]], Recon]
@@ -84,13 +104,26 @@ MINUTE_REPORTS = "minute"
 #: "每个源 Top10 而不是全局 Top10"是同一条理由）。
 KIND_SAMPLE = 3
 
-#: **周期 → 源的分派键**：`"1"` 走 ngw（源标识 `ngw_minute_1`），其余（5/30/60）走
-#: akshare/sina（`akshare_minute_*`，ADR-0009 决定 1、ADR-0021 决定 2 的口径，一个字节不改）。
-#: 一个周期一个源不是口味：04 §三 按源打分，ngw 的接口挂了不该扣 sina 分钟的健康分，反向
-#: 同理（ADR-0009 把 5/30/60 拆成三个源名的同款理由）。抓取分派（`live_fetcher`）与行解析
-#: 分派（`drafts_for`）都只看这一个常量，两处各列一份周期表迟早漂成"抓的是 ngw、解析按 sina"
-#: ——那会让整批挂在 R010（批级 FATAL 扣健康分），而真相只是接线错了。
+#: **`via` 的两个取值**——一次抓取由谁交行，写进 `Grabbed.via` 与 `drafts_for` 的解析分派。
+#: 这两个字符串不是源标识（那是 `akshare_minute_5`/`ngw_minute_5` 那种，由适配器按周期生成），
+#: 而是"哪一家把行交来"的粗分类，恰好对应两个适配器。别拿源标识当分派键：一个源可能供多个
+#: 周期，反过来同一个周期降级时会换源（5 分：sina 空了走 ngw）——只有"谁交的行"永不错。
+VIA_AKSHARE = "akshare"
+VIA_NGW = "ngw"
+
+#: **周期 → 主源**：`"1"` 的主源就是 ngw（源标识 `ngw_minute_1`，无降级——它本身就是兜底源），
+#: 其余（5/30/60）主源 akshare/sina（`akshare_minute_*`，ADR-0009 决定 1、ADR-0021 决定 2 的
+#: 口径，主路径一个字节不改），**抓空或抓错则降级到 ngw**（`ngw_minute_*`）。一个周期一个主源
+#: 不是口味：04 §三 按源打分，ngw 的接口挂了不该扣 sina 分钟的健康分，反向同理（ADR-0009 把
+#: 5/30/60 拆成三个源名的同款理由）。降级后的行由 ngw 适配器按各自周期打 `ngw_minute_*` 标，
+#: 于是"今天哪些票的 5 分是 ngw 补的"在日报各源表里点名可查。抓取分派（`live_fetcher`）与
+#: 行解析分派（`drafts_for`）都只看 `Grabbed.via` 这一个键——两处各列一份周期表迟早漂成
+#: "抓的是 ngw、解析按 sina"，那会让整批挂在 R010（批级 FATAL 扣健康分），而真相只是接线错了。
 NGW_PERIOD = "1"
+
+#: 降级到 ngw 时各周期的 K线 `type` 查表住在 `ngw.client.KLINE_TYPES`（协议事实归协议层，
+#: 1/5/30/60 一张表；实测见数据根 `reports/source-probe/2026-09-25-ngw-minute-periods.md`）——
+#: 这里再列一份「周期→type」就是本模块反复制原则要避开的第二种漂移。
 
 #: ngw pacer 的起步间隔（秒）。**选 1.5s**：Qoute T-001 的纪律原文是"串行 ≥1.5s 起步，
 #: 429 阈值未知，Qoute 按 1.5s 跑一个月无事故"（B 刀 client.py 抄了同一条并注明"首周批量
@@ -98,6 +131,14 @@ NGW_PERIOD = "1"
 #: （B 刀实测 0.3s 也通），本刀是首周批量接线，按纪律取 1.5：10 个请求 ≈ 15s 的代价换
 #: "不知道阈值时不逼近阈值"。限速住在这个装配常量而不是 CLI 旋钮——能随手调低的限速不是纪律。
 NGW_MIN_INTERVAL = 1.5
+
+#: **一轮运行最多降级多少次**。降级是"这只票这个周期 sina 没给"的补法，不是"sina 整源倒了
+#: 由 ngw 顶班"的换路——Qoute 的封禁史都是拿全市场节奏撞出来的，5558 只 × 3 周期真让 ngw
+#: 全接，1.5s 串行 ≈ 12+ 小时且把封禁风险整个转嫁给它，那是换 ADR 的事不是配额的量级。
+#: 300 的量级依据：正常日降级是个位数到几十（个别票 sina 缺行）；超过 300 只说明 sina 侧
+#: 系统性出问题了，此时要的是**停下来让人看见**（告警 + 日报点名），不是 ngw 无声扛住整源。
+#: 触顶后本轮回退纯主源语义（akshare 空/错就 Skipped），下一次运行重置。
+NGW_FALLBACK_BUDGET = 300
 
 #: ngw 一个完整交易日的 1 分钟根数（B 刀实测 241：09:30 开盘竞价栏 + 240 根标准右端点）。
 #: 只用于把单页根数换算成"约几个交易日"写进日报/告警，不参与任何判定。
@@ -110,13 +151,19 @@ class ScopeNotConfigured(ValueError):
 
 @dataclass(frozen=True)
 class Tally:
-    """一次跑完的账。`newest` 是这次见到的最后一根K线属于哪天——尾巴的右端，日报判不出它。"""
+    """一次跑完的账。`newest` 是这次见到的最后一根K线属于哪天——尾巴的右端，日报判不出它。
+
+    `downgrades` 是走了 ngw 兜底的 (票/周期) 清单（只数 5/30/60——1 分的主源本来就是 ngw，
+    不叫降级）。它是从 `via` 数出来的而不是从抓取闭包里数：落没落盘、判没判成以这里为准，
+    抓取层报"我降级了"而门禁把整批拒了的话，日报上那行就成了空头账。
+    """
 
     outcomes: tuple[GateOutcome, ...]
     skipped: tuple[Skipped, ...]
     landed: WriteReport
     quarantined: QuarantineReport
     newest: date | None
+    downgrades: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,50 +196,98 @@ def label(symbol: str, period: str) -> str:
     return f"{symbol}/{period}min"
 
 
-def drafts_for(rows: Rows, *, symbol: str, period: str) -> list[BarDraft]:
-    """源行 → 待判定草稿。**周期决定用哪个适配器**——本任务唯一的行解析分派。
+def drafts_for(grabbed: Grabbed, *, symbol: str, period: str) -> list[BarDraft]:
+    """源行 → 待判定草稿。**`via` 决定用哪个适配器**——本任务唯一的行解析分派。
 
-    与 `live_fetcher` 共用 `NGW_PERIOD` 这一个分派键：抓取按一个周期表、解析按另一个周期表，
-    迟早漂成"抓回 ngw 的 `timedata` 却按 sina 的 `day` 列解析"——整批挂在 R010（批级 FATAL
-    扣整源 40 分），而日报上看起来像源改了列名，查的方向整个是错的。
+    与 `live_fetcher` 共用 `Grabbed.via` 这一个分派键：抓取时谁交的行、解析就按谁，两处不再
+    各列一份周期表，于是漂成"抓回 ngw 的 `timedata` 却按 sina 的 `day` 列解析"的路被彻底
+    堵死（那种漂移会整批挂在 R010 批级 FATAL 扣整源 40 分，而日报看起来像源改了列名，查的
+    方向整个是错的）。`period` 只负责给选中的适配器定源标识与粒度，不参与选解析器。
     """
-    if period == NGW_PERIOD:
-        return ngw_minute.minute_drafts(rows, symbol=symbol)
-    return akshare_minute.minute_drafts(rows, symbol=symbol, period=period)
+    if grabbed.via == VIA_NGW:
+        return ngw_minute.minute_drafts(grabbed.rows, symbol=symbol, period=period)
+    return akshare_minute.minute_drafts(grabbed.rows, symbol=symbol, period=period)
 
 
-def live_fetcher(periods: Sequence[str], *, client: NgwClient | None = None) -> MinuteFetcher:
-    """真网络抓取的周期分派（生产装配在 `minute_cli`，它调这一个函数）。
+def live_fetcher(
+    periods: Sequence[str],
+    *,
+    client: NgwClient | None = None,
+    fallback_budget: int = NGW_FALLBACK_BUDGET,
+    alert: Alert = stdout_alert,
+) -> MinuteFetcher:
+    """真网络抓取的**主源 + 降级**分派（生产装配在 `minute_cli`，它调这一个函数）。
 
-    - `NGW_PERIOD` → `client.innercode`（六位码换 K 线接口要的 innercode）+ `client.kline`
-      一页（`count=MAX_KLINE_COUNT`，单页最深；`start` 不传 = 从最新往回，每日增量要的就是
-      这条尾巴）。
-    - 5/30/60 → `akshare_fetch.minute_frame`，与接线前逐字同一条老路径。
+    - `NGW_PERIOD`（1 分）→ 直接 ngw：`client.innercode`（六位码换 K 线接口要的 innercode）+
+      `client.kline` 一页（`count=MAX_KLINE_COUNT`，单页最深；`start` 不传 = 从最新往回，
+      每日增量要的就是这条尾巴）。1 分本就是 ngw 专属，没有"降级"可言。
+    - 5/30/60 → 先 `akshare_fetch.minute_frame`（与接线前逐字同一条老路径）；**它抛异常或交回
+      空帧**，就降级到 ngw 同周期（`KLINE_TYPES[period]`，`via=VIA_NGW`，源标识落 `ngw_minute_*`）。
 
-    三件装配事实：
+    四件装配事实：
 
     - **client 整轮共享**：pacer 的 `_last_at` 活在 client 上，每只票新建一个等于没有限速
       （Qoute 纪律：串行是它没被封的原因）。一次 `zx-minute` 运行 = 一个 client。
-    - **`periods` 不含 `NGW_PERIOD` 就不构造 client**：不摸 token 路径、不建没用的锁，
-      5/30/60 的老路径一个字节都不变（回归钉在测试里）。
+    - **client 懒构造**：`periods` 不含 1 分且 sina 全程健康时根本不建 ngw client——纯
+      5/30/60 的老路径一个字节都不变、不摸 token 路径、不建没用的锁；只有真要降级时才
+      `ensure_ngw` 建一个并整轮复用（回归钉在测试里）。
+    - **降级有预算**（`fallback_budget`，常量注释里算了账）：一轮降级次数触顶后不再降级，
+      退回"主源空/错就响"的语义并响一次。降级是补个别票的缺行，不是替 sina 整源顶班。
     - **`client` 是测试注入点**（可注入 transport 的真 client，03 §二 L2 离线重放），
       生产不传、在这里按 `NGW_MIN_INTERVAL` 构造。
     """
-    ngw: NgwClient | None = None
-    if NGW_PERIOD in periods:
-        ngw = client if client is not None else NgwClient(interval=NGW_MIN_INTERVAL)
+    ngw: NgwClient | None = client
+    fallbacks = 0
 
-    def fetch(symbol: str, period: str) -> Rows:
+    def ensure_ngw() -> NgwClient:
+        nonlocal ngw
+        if ngw is None:
+            ngw = NgwClient(interval=NGW_MIN_INTERVAL)
+        return ngw
+
+    def ngw_grab(symbol: str, period: str) -> Grabbed:
+        c = ensure_ngw()
+        return Grabbed(
+            c.kline(c.innercode(symbol), count=MAX_KLINE_COUNT, ktype=KLINE_TYPES[period]).rows,
+            VIA_NGW,
+        )
+
+    def downgrade() -> None:
+        """记一次降级；恰好在触顶那一发响一次。逐次不响——几十个降级是常态噪声，
+        它们的账由 `collect` 从 `via` 数进日报，这里只喊"这不再是个别票缺行"。"""
+        nonlocal fallbacks
+        fallbacks += 1
+        if fallbacks == fallback_budget:
+            alert(
+                "分钟线降级预算耗尽",
+                f"akshare→ngw 降级累计 {fallbacks} 次（预算 {fallback_budget}）：这不再是"
+                "个别票缺行，是 sina 侧系统性出问题了。后续批次退回主源语义（空/错就响），"
+                "先查 reports/minute/ 日报与 sina，别让 ngw 无声扛整源。",
+            )
+
+    def fetch(symbol: str, period: str) -> Grabbed:
         if period == NGW_PERIOD:
-            if ngw is None:
+            if NGW_PERIOD not in periods:
                 # 谁调谁错：`live_fetcher` 的 periods 与 `stores` 的键在 CLI 里是同一份清单，
                 # 这条只可能出自装配 bug。响在这里比把 sina 的 1 分钟行送进 ngw 解析便宜。
                 raise ValueError(
                     f"周期 {NGW_PERIOD} 要走 ngw，但 live_fetcher 建轮时 periods={tuple(periods)}"
                     " 不含它：抓取分派与 stores 的键必须是同一份清单"
                 )
-            return ngw.kline(ngw.innercode(symbol), count=MAX_KLINE_COUNT).rows
-        return akshare_fetch.minute_frame(symbol, period)
+            return ngw_grab(symbol, period)
+        try:
+            rows = akshare_fetch.minute_frame(symbol, period)
+        except Exception:
+            if fallbacks >= fallback_budget:
+                raise  # 预算耗尽：把主源的原始错交出去，不悄悄吞
+            downgrade()
+            return ngw_grab(symbol, period)
+        if rows:
+            return Grabbed(rows, VIA_AKSHARE)
+        if fallbacks >= fallback_budget:
+            return Grabbed(rows, VIA_AKSHARE)  # 空帧照旧：主源给了空就是空，预算不再降级
+        downgrade()
+        return ngw_grab(symbol, period)
 
     return fetch
 
@@ -226,6 +321,7 @@ def collect(
     skipped: list[Skipped] = []
     written: list[WriteReport] = []
     recorded: list[QuarantineReport] = []
+    downgrades: list[str] = []
     newest: date | None = None
     consecutive = 0
     for position, symbol in enumerate(symbols):
@@ -256,6 +352,9 @@ def collect(
                 # 交给门禁会得到 R006 的整批 FATAL，而那条要扣整源 40 分。
                 skipped.append(Skipped(symbol=label(symbol, period), reason=REASON_NO_ROWS))
                 continue
+            if period != NGW_PERIOD and grabbed.via == VIA_NGW:
+                # 判成了才算降级：抓取层说"我兜了底"而门禁把整批拒了的账，不进日报那一节。
+                downgrades.append(label(symbol, period))
             judged = engine.run(drafts)
             written.append(store(judged.clean_zone))
             recorded.append(quarantine(judged.quarantined, day))
@@ -269,6 +368,7 @@ def collect(
         landed=sum_writes(written),
         quarantined=sum_quarantines(recorded),
         newest=newest,
+        downgrades=tuple(downgrades),
     )
 
 
@@ -312,6 +412,27 @@ def reconcile_pool(
         for period in periods
     }
     return Recon(groups=len(symbols) * len(periods), findings=tuple(findings), covers=covers)
+
+
+def _downgrade_section(tally: Tally) -> str:
+    """「今天哪些票靠 ngw 兜底」单独成节。降级不藏进各源表：那张表说的是分数，这节说的是账。
+
+    没降级就整节省掉——日报的存在感来自异常，零异常的节每天占两行，看的人学会跳过它之后，
+    真出事那天他也会跳过。
+    """
+    if not tally.downgrades:
+        return ""
+    shown = "、".join(tally.downgrades[:KIND_SAMPLE])
+    more = (
+        f"（其余 {len(tally.downgrades) - KIND_SAMPLE} 组未列）"
+        if len(tally.downgrades) > KIND_SAMPLE
+        else ""
+    )
+    return (
+        "\n\n## 源降级（akshare→ngw）\n\n"
+        f"- {len(tally.downgrades)} 组判成：{shown}{more}\n"
+        "- 行的源标识是 `ngw_minute_*`；sina 恢复重跑同一天会按主键覆盖回主源口径。\n"
+    )
 
 
 def _tolerance() -> float:
@@ -457,7 +578,7 @@ def run(
         quarantined=tally.quarantined,
         skipped=tally.skipped,
         directory=directory,
-        extra=_disk_sections(recon, tuple(stores)),
+        extra=_disk_sections(recon, tuple(stores)) + _downgrade_section(tally),
     )
     result = MinuteResult(
         day=target,
@@ -475,18 +596,21 @@ def run(
 def _tail_urgency(periods: Sequence[str]) -> str:
     """“这一天的尾巴漏了有多急”按本次跑的源分开说——两种急法处置不同。
 
-    - sina 三周期：固定 1970 根 tail，滑出就**永久没了**（ADR-0009 代价三）——要立刻补采，
-      而补采窗口正在关。
+    - sina 三周期：固定 1970 根 tail，滑出窗口的日子**主源**再也给不出（ADR-0009 代价三）。
+      但任务 #64 起这不是终点：ngw 侧有 `start` 翻页，显式重跑 `zx-minute` 就能按同口径补回
+      （降级在抓取层自动发生，事后回填则要人发起）——要补，只是不会自己补上。
     - ngw（`NGW_PERIOD`）：单页 `count=MAX_KLINE_COUNT` 截一段最近的尾巴，另有 `start`
       截止参数能向过去翻页（B 刀实测翻到 2019）——漏的这几天**补得回来**，先查源与网络，
-      不必按"永久缺失"的节奏处置。
+      不必按"主源已滑窗"的节奏处置。
 
-    只跑其中一半就只说那一半：把 1970 句挂到纯 ngw 的告警上，会把"翻页可补"误报成"永久缺失"。
+    只跑其中一半就只说那一半：把 sina 窗口句挂到纯 ngw 的告警上，会把"翻页可补"误报成
+    "只剩主源这一家"；反向挂则会把"显式重跑才有"说成"自动兜底"。
     """
     parts: list[str] = []
     if any(period != NGW_PERIOD for period in periods):
         parts.append(
-            "分钟线（sina）只能取回源窗口内的最近 1970 根：这一天的尾巴滑出窗口就永久没了。"
+            "分钟线（sina 主源）只能取回源窗口内的最近 1970 根：这一天的尾巴滑出窗口，主源"
+            "就再也给不出了；ngw 兜底有 start 翻页，重跑 zx-minute 按同口径补得回来（#64）。"
         )
     if NGW_PERIOD in periods:
         parts.append(
