@@ -97,7 +97,7 @@ class BarRefs:
 
     预载而不是逐行 `read_bars`：回填窗口一张票几百个行锚，原来 `_same_ref_of` 是每行一次
     DuckDB 查询（开连接 + glob + 读分区），一票就要几百次；整票读一次压成查表后，锚点是
-    O(log n)/O(1)。`same`/`prev`/`factor` 的签名就是 `relay_cli` 锚函数要的 RefFn/FactorFn。
+    O(log n)/O(1)。`same`/`prev`/`ref_ratio` 的签名就是 `relay_cli` 锚函数要的 RefFn/RefRatioFn。
 
     昨收用排序日序列 + bisect 而不是线性扫：全市场 stk_limit 回填是几千票 × 几百行，
     O(n²) 会把 CPU 烧在找昨收上。`ordered_days` 含窗口回带（REF_PAD_DAYS）里那天——
@@ -143,9 +143,20 @@ class BarRefs:
             return None
         return self.closes[self.ordered_days[index - 1]]
 
-    def factor(self, symbol: str, day: date) -> float | None:
-        """当日复权因子（除权待核的存在性检查）。"""
-        return self.factors.get(day) if symbol == self.symbol else None
+    def ref_ratio(self, symbol: str, day: date) -> float | None:
+        """昨收 → 除权参考价的换算因子：前一交易日因子 ÷ 当日因子（后复权阶梯的比值，
+        无除权 = 1.0，缺档 = None）。`prev` 的"严格早于 day 的最近有量日"同一条昨收定义——
+        折算乘的必须正是锚点用的那个昨收自己的因子。"""
+        if symbol != self.symbol:
+            return None
+        index = bisect_left(self.ordered_days, day)
+        if index == 0:
+            return None
+        f_prev = self.factors.get(self.ordered_days[index - 1])
+        f_day = self.factors.get(day)
+        if not f_prev or not f_day:
+            return None
+        return f_prev / f_day
 
 
 @dataclass(frozen=True)

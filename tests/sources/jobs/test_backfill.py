@@ -146,7 +146,7 @@ def _run(
         table,
         symbols=list(symbols),
         fetch=fetch,
-        anchor=relay_cli.make_anchor(table, limit_of=lambda _symbol: 10.0),
+        anchor=relay_cli.make_anchor(table, limit_of=lambda _symbol, _day: 10.0),
         root=root,
         directory=root / "reports" / "relay",
         **kwargs,

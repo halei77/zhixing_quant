@@ -362,7 +362,7 @@ def test_pull_writes_anchored_rows_and_counts_unanchored(tmp_path: Any) -> None:
     def prev(symbol: str, _day: date) -> float | None:
         return 10.03 if symbol == "600519" else None
 
-    def limit(_symbol: str) -> float:
+    def limit(_symbol: str, _day: date) -> float:
         return 10.0
 
     report, code, ledger = relay_cli._pull(
@@ -384,7 +384,7 @@ def test_pull_rejects_the_whole_page_when_anchor_breaks(tmp_path: Any) -> None:
         fetch=fetch,
         prev_ref_of=lambda _symbol, _day: 10.03,
         same_ref_of=lambda _symbol, _day: 10.03,
-        limit_of=lambda _symbol: 10.0,
+        limit_of=lambda _symbol, _day: 10.0,
         root=tmp_path,
     )
     assert code == 1 and ledger is None
@@ -429,7 +429,7 @@ def test_pull_filters_by_symbols_and_handles_empty_day(tmp_path: Any) -> None:
         fetch=fetch,
         prev_ref_of=lambda _symbol, _day: 10.0,
         same_ref_of=lambda _symbol, _day: 10.0,
-        limit_of=lambda _symbol: 10.0,
+        limit_of=lambda _symbol, _day: 10.0,
         root=tmp_path,
     )
     assert code == 0 and ledger is None and "没有行" in report
@@ -713,7 +713,7 @@ def test_pull_report_rc_is_a_short_page_table_end_to_end(tmp_path: Any) -> None:
         fetch=fetch,
         prev_ref_of=lambda _symbol, _day: 10.0,
         same_ref_of=lambda _symbol, _day: 10.0,
-        limit_of=lambda _symbol: 10.0,
+        limit_of=lambda _symbol, _day: 10.0,
         root=tmp_path,
     )
     assert code == 0 and ledger is not None and ledger.added == 1
@@ -982,7 +982,7 @@ def test_pull_fina_indicator_is_a_short_page_table_end_to_end(tmp_path: Any) -> 
         fetch=fetch,
         prev_ref_of=lambda _symbol, _day: 10.0,
         same_ref_of=lambda _symbol, _day: 10.0,
-        limit_of=lambda _symbol: 10.0,
+        limit_of=lambda _symbol, _day: 10.0,
         root=tmp_path,
     )
     assert code == 0 and ledger is not None and ledger.added == 1

@@ -24,9 +24,9 @@ import json
 import sys
 from collections.abc import Callable, Mapping
 from datetime import date, timedelta
-from functools import lru_cache, partial
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zhixing_quant import config
 from zhixing_quant.backtest.cli import check_range
@@ -44,7 +44,7 @@ from zhixing_quant.storage import tables
 from zhixing_quant.storage.tables import TableWriteReport
 
 RefFn = Callable[[str, date], float | None]
-LimitPctFn = Callable[[str], float]
+LimitPctFn = Callable[[str, date], float]
 
 #: 两种锚参考语义（2026-09-22 教训：混用一个"≤ day 最近收盘"会把 stk_limit 的参考取到
 #: 当天自己的收盘、把 daily_basic 的参考取到缺数日子之前的旧收盘——两种错法都是大面积
@@ -151,7 +151,19 @@ def fetch_all_pages(
     return fetch_pages(table, params, fetch=fetch, page_size=page_size)
 
 
-FactorFn = Callable[[str, date], float | None]
+def _exceeded_at(row: Any, ref: float, tol: float) -> list[tuple[str, float, float]]:
+    """板价对某个参考价的超阈边：(名, 价, 偏差%)。闭包不捕获行——逐行显式传参。"""
+    return [
+        (name, price, (price / ref - 1.0) * 100.0)
+        for name, price in (("涨停", row.up_limit), ("跌停", row.down_limit))
+        if abs((price / ref - 1.0) * 100.0) > tol
+    ]
+
+
+#: 昨收 → 除权参考价的换算因子（当日因子与前一交易日因子的比值；无除权=1.0，查不到=None）。
+#: 旧版这里是"当日复权因子的存在性检查"（stub），因子取而不用——除权日因此全被 0.8~1.2
+#: 邻域判成假超阈（#65 实测 683 票、12.9%；真除权折算比 0.66~0.83 落在邻域外）。
+RefRatioFn = Callable[[str, date], float | None]
 AnchorFn = Callable[..., tuple[list[str], int, list[Any]]]
 
 
@@ -160,16 +172,20 @@ def _anchor_stk_limit(
     prev_ref_of: RefFn,
     _same_ref_of: RefFn,
     limit_of: LimitPctFn,
-    factor_of: FactorFn | None = None,
+    ref_ratio_of: RefRatioFn | None = None,
 ) -> tuple[list[str], int, list[Any]]:
     """涨跌停价对**昨收**（严格 < day）：任一边越过 R004 档位 +1pp 即记一条超阈。
 
-    **超阈的例外不是豁免是换一个验证**：交易所的板价按**除权参考价**算（2026-09-22
-    实测：601318 除息日跌停价对原始昨收 −11.57%），干净区又还没有分红表；且日线缺更近
-    一日时昨收本身就是旧的。超阈的行改用自洽校验——涨停/跌停各反推一个参考价
-    （`price ÷ (1 ± 档位)`），两者一致且落在昨收的合理邻域内 → 这行与某个"我们还没的
-    参考价"自洽，放行并在报告里点名待核；不自洽的依旧算超阈。两种可能（除权 / 日线缺
-    当日）报告里如实并列，不假装分得清。
+    **档位按这一行的交易日查**（`limit_of(symbol, trade_date)`）：主数据的 ST 帽按 #57
+    只从快照日起生效，拿"今天"查整段历史 = 把当前的帽子前套两年——回填 663 日时当前 ST 的
+    票全灭（#65 首跑 971 只拒收的根因，2026-09-25 复算：被按 5% 判的 197 只票 197 只都在
+    当前 ST 名单里，零例外）。
+
+    **除权日的超阈不是例外是换算**：交易所板价按除权参考价算（= 昨收 × 前一日因子 ÷ 当日
+    因子，后复权价连续性的恒等式，ADR-0009 决定 4）。给了 `ref_ratio_of` 就先按因子换算
+    参考价再判——通过则记除权待核（换算因子写在话术里）；因子查不到才退回旧的两界反推自洽
+    校验（`price ÷ (1 ± 档位)` 两边一致且落在昨收邻域——"日线缺更近一日"那种场景仍要有
+    逃生门），两种待核在报告里如实并列。
     """
     problems: list[str] = []
     unanchored = 0
@@ -180,34 +196,38 @@ def _anchor_stk_limit(
         if prev is None or prev <= 0:
             unanchored += 1
             continue
-        limit = limit_of(row.symbol)
-        exceeded: list[tuple[str, float, float]] = []
-        for name, price in (("涨停", row.up_limit), ("跌停", row.down_limit)):
-            pct = (price / prev - 1.0) * 100.0
-            if abs(pct) > limit + ANCHOR_TOLERANCE_PP:
-                exceeded.append((name, price, pct))
+        limit = limit_of(row.symbol, row.trade_date)
+        tol = limit + ANCHOR_TOLERANCE_PP
+        exceeded = _exceeded_at(row, prev, tol)
         if exceeded:
-            ref_up = row.up_limit / (1.0 + limit / 100.0)
-            ref_down = row.down_limit / (1.0 - limit / 100.0)
-            plausible = (
-                0.8 * prev <= ref_up <= 1.2 * prev and abs(ref_up - ref_down) <= CLOSE_TOLERANCE
-            )
-            if factor_of is not None and plausible:
-                factor_of(row.symbol, row.trade_date)  # 因子存在性检查留给实现；此处只标记
+            ratio = ref_ratio_of(row.symbol, row.trade_date) if ref_ratio_of is not None else None
+            if ratio is not None and ratio != 1.0 and not _exceeded_at(row, prev * ratio, tol):
                 exdiv_notes.append(
-                    f"{row.symbol}@{row.trade_date} 板价对昨收超阈但两界反推参考价一致"
-                    f"（≈{ref_up:.2f}，昨收 {prev}）——除权日或日线缺更近一日，放行待核"
+                    f"{row.symbol}@{row.trade_date} 板价对昨收超阈，按除权换算因子 {ratio:.4f}"
+                    f"（参考价 {prev * ratio:.2f}，昨收 {prev}）判过——除权日，放行待核"
                 )
                 anchored.append(row)
                 continue
+            if ratio is None:
+                ref_up = row.up_limit / (1.0 + limit / 100.0)
+                ref_down = row.down_limit / (1.0 - limit / 100.0)
+                plausible = (
+                    0.8 * prev <= ref_up <= 1.2 * prev and abs(ref_up - ref_down) <= CLOSE_TOLERANCE
+                )
+                if plausible:
+                    exdiv_notes.append(
+                        f"{row.symbol}@{row.trade_date} 板价对昨收超阈但两界反推参考价一致"
+                        f"（≈{ref_up:.2f}，昨收 {prev}，因子查不到）"
+                        "——除权日或日线缺更近一日，放行待核"
+                    )
+                    anchored.append(row)
+                    continue
             for name, price, pct in exceeded:
                 problems.append(
                     f"{row.symbol}@{row.trade_date} {name}价 {price} 对昨收 {prev} 偏差 "
                     f"{pct:.2f}%，超出档位 {limit:.1f}%+{ANCHOR_TOLERANCE_PP:.0f}pp"
                 )
         anchored.append(row)
-    if exdiv_notes:
-        anchored = list(anchored)
     _exdiv_notes.extend(exdiv_notes)  # 话术经模块级列表带回，见 _pull
     return problems, unanchored, anchored
 
@@ -388,12 +408,28 @@ def _prev_ref_of(symbol: str, day: date) -> float | None:
     return earlier[-1].close if earlier else None
 
 
-def _factor_of(symbol: str, day: date) -> float | None:
-    """当日复权因子（除权待核的旁证；目前只做存在性检查）。"""
+def _ref_ratio_of(symbol: str, day: date) -> float | None:
+    """昨收 → 除权参考价的换算因子（读盘版）：前一有量交易日因子 ÷ 当日因子。
+
+    与 `_prev_ref_of` 同一条"严格 < day"的昨收定义——参考价折算乘的必须正是那个昨收自己的
+    因子，两边不一致会把普通日算成除权日。因子缺档（老数据没抓到 adj_factor）→ None，
+    锚点退回两界反推的旧逃生门。
+    """
     from zhixing_quant.storage.query import read_bars
 
-    bars = read_bars(symbol, day, day, dataset="daily")
-    return bars[-1].adj_factor if bars else None
+    bars = [
+        bar
+        for bar in read_bars(symbol, day - timedelta(days=30), day, dataset="daily")
+        if bar.volume > 0
+    ]
+    todays = [bar for bar in bars if bar.trade_date == day]
+    earlier = [bar for bar in bars if bar.trade_date < day]
+    if not todays or not earlier:
+        return None
+    f_day, f_prev = todays[-1].adj_factor, earlier[-1].adj_factor
+    if not f_prev or not f_day:
+        return None
+    return float(f_prev) / float(f_day)
 
 
 def _same_ref_of(symbol: str, day: date) -> float | None:
@@ -406,26 +442,43 @@ def _same_ref_of(symbol: str, day: date) -> float | None:
     return rows[-1].close if rows else None
 
 
-def _limit_pct_of(symbol: str) -> float:
-    """R004 的档位表 + 主数据的板块/ST 档。查不出按主板 10% 处理——锚点容差 1pp 兜住
-    四舍五入；错档（20% 板当 10% 锚）会真的报出来，那正是它该响的时候。"""
-    from zhixing_quant.quality import gate_config
-    from zhixing_quant.sources.akshare import master as master_source
+if TYPE_CHECKING:
+    from zhixing_quant.domain.security import SecurityMaster
 
-    params = gate_config.load(config.gate_config_file()).rule("R004").params
-    limits: Mapping[str, float] = params["limits_pct"]
+#: 进程级单例（不是缓存键）：主数据快照与 gate 配置在一次运行内不变，读一次就够。
+#: 旧形状是 `_limit_pct_of` 每次调用重读快照 + lru_cache 按票兜底——档位查询带上交易日后
+#: 缓存键变成 (票, 日)，回填一票几百个键，lru 从"省读盘"变成"堆内存"；单例 + 二分查询
+#: 把两头都省了（state_on 本来就是区间上的 bisect）。
+_MASTER_SINGLETON: SecurityMaster | None = None
+_R004_LIMITS: Mapping[str, float] | None = None
+
+
+def _limit_pct_of(symbol: str, as_of: date) -> float:
+    """R004 的档位表 + 主数据在**该交易日**的板块/ST 档。
+
+    档位查询必须带日期：ST 区间按 #57 只从快照日起生效（历史段是"未知"不是"没被 ST"），
+    按"今天"查等于把当前的帽子套在整段历史上——回填首跑 971 只拒收里被 5% 档错判的 197 只，
+    全部是当前 ST 名单成员（2026-09-25 复算，子代理诊断）。
+    查不出（票不在主数据）按主板 10% 处理——锚点容差 1pp 兜住四舍五入；错档（20% 板当 10%
+    锚）会真的报出来，那正是它该响的时候。
+    """
+    global _MASTER_SINGLETON, _R004_LIMITS
+    from zhixing_quant.quality import gate_config
+
+    if _R004_LIMITS is None:
+        params = gate_config.load(config.gate_config_file()).rule("R004").params
+        _R004_LIMITS = dict(params["limits_pct"])
     try:
-        state = master_source.read_master().to_master().state_on(symbol, date.today())
+        if _MASTER_SINGLETON is None:
+            from zhixing_quant.sources.akshare import master as master_source
+
+            _MASTER_SINGLETON = master_source.read_master().to_master()
+        state = _MASTER_SINGLETON.state_on(symbol, as_of)
         from zhixing_quant.domain.limits import limit_pct
 
-        return limit_pct(state.board, is_st=state.is_st, limits_pct=limits)
+        return limit_pct(state.board, is_st=state.is_st, limits_pct=_R004_LIMITS)
     except KeyError:
-        return limits["main"]
-
-
-#: 档位查询的进程级缓存：`_limit_pct_of` 每次都重读主数据快照，stk_limit 回填一票几百行
-#: 会把快照读几百遍。缓存按票一份——一池票几千个键，几个 float 的事。
-_limit_pct_cached = lru_cache(maxsize=None)(_limit_pct_of)
+        return _R004_LIMITS["main"]
 
 
 def make_anchor(table: str, *, limit_of: LimitOfFn | None = None) -> backfill.AnchorFn:
@@ -442,7 +495,7 @@ def make_anchor(table: str, *, limit_of: LimitOfFn | None = None) -> backfill.An
             f"表 {table!r} 没有登记解析器或锚点对账：ADR-0015 决定 3 不允许无锚入干净区"
         )
     anchor = ANCHORS[table]
-    picker = limit_of if limit_of is not None else _limit_pct_cached
+    picker = limit_of if limit_of is not None else _limit_pct_of
 
     def call(
         rows: list[Any], refs: backfill.BarRefs
@@ -450,7 +503,7 @@ def make_anchor(table: str, *, limit_of: LimitOfFn | None = None) -> backfill.An
         take_exdiv_notes()  # 上一票的残留先清：话术只许归产它的那一批
         if table == "stk_limit":
             problems, unanchored, kept = anchor(
-                rows, refs.prev, refs.same, picker, factor_of=refs.factor
+                rows, refs.prev, refs.same, picker, ref_ratio_of=refs.ref_ratio
             )
         else:
             problems, unanchored, kept = anchor(rows, refs.prev, refs.same, picker)
@@ -537,7 +590,7 @@ def _pull(
             prev_ref_of,
             same_ref_of,
             limit_of or _limit_pct_of,
-            factor_of=_factor_of,
+            ref_ratio_of=_ref_ratio_of,
         )
     else:
         problems, unanchored, kept = anchor(
