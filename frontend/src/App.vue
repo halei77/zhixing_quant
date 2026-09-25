@@ -47,6 +47,11 @@ const recent = ref<Entry[]>([])
 let searchTimer: number | undefined
 // 键盘流的高亮位：随新结果归 0（第一条即默认候选），鼠标悬停跟随。
 const activeHit = ref(-1)
+// 搜索态（#67 前端优化，用户 2026-09-25 拍板「就地展开为独立结果面板」）：聚焦 = 左栏进
+// 搜索模式——行情/K线让位，候选面板长在搜索框正下方的文档流里（不悬浮、不遮挡）；
+// 选中 / 失焦 / Esc 即收起。面板高度贴合结果数，只留滚动上限，不再预留 44vh 的大空框。
+const searchFocused = ref(false)
+const searching = computed(() => searchFocused.value && hits.value.length > 0)
 
 const selected = ref<{ code: string; name: string; kind: 'stock' | 'index' } | null>(null)
 const bars = ref<Bar[]>([])
@@ -108,8 +113,23 @@ function handleError(error: unknown) {
 
 // ── 搜索 ──────────────────────────────────────────────
 function onSearchInput() {
+  // Enter 选中后焦点可能仍留在输入框：再次键入 = 重新进搜索模式（flag 归位，不等 focus 事件）
+  searchFocused.value = true
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(runSearch, 160)
+}
+
+function onSearchFocus() {
+  searchFocused.value = true
+  onSearchInput()
+}
+
+function onSearchBlur(event: FocusEvent) {
+  // 点候选时先触发输入框 blur——relatedTarget 落在搜索卡片内（候选按钮）不收面板，
+  // 否则鼠标用户永远点不到；移向卡外才收起。
+  const next = event.relatedTarget as HTMLElement | null
+  if (next && (event.target as HTMLElement).closest("section")?.contains(next)) return
+  searchFocused.value = false
 }
 
 async function runSearch() {
@@ -144,12 +164,15 @@ function onSearchKeydown(event: KeyboardEvent) {
   } else if (event.key === 'Escape') {
     hits.value = []
     activeHit.value = -1
+    searchFocused.value = false
+    ;(event.target as HTMLInputElement).blur()
   }
 }
 
 async function pick(hit: Hit) {
   hits.value = []
   activeHit.value = -1
+  searchFocused.value = false  // 选中即收起搜索模式：左栏回到行情+K线
   query.value = `${hit.code} ${hit.name}`
   selected.value = { code: hit.code, name: hit.name, kind: hit.kind }
   bars.value = []
@@ -382,14 +405,16 @@ onUnmounted(() => {
           :aria-expanded="hits.length > 0"
           :aria-activedescendant="activeHit >= 0 ? `hit-${activeHit}` : undefined"
           @input="onSearchInput"
-          @focus="onSearchInput"
+          @focus="onSearchFocus"
+          @blur="onSearchBlur"
           @keydown="onSearchKeydown"
         />
         <Transition name="pop">
           <ul
-            v-if="hits.length"
+            v-if="searching"
             data-testid="suggest"
-            class="surface-solid absolute inset-x-0 top-[calc(100%+6px)] z-30 max-h-[44vh] overflow-auto p-1.5"
+            class="surface-solid mt-2 max-h-[min(56vh,520px)] overflow-auto p-1.5"
+            style="border-radius: var(--zx-r-lg)"
             role="listbox"
           >
             <li v-for="(hit, i) in hits" :key="hit.code" :id="`hit-${i}`" role="option" :aria-selected="i === activeHit">
@@ -409,7 +434,7 @@ onUnmounted(() => {
           </ul>
         </Transition>
 
-        <div v-if="!hits.length && recent.length" class="pt-2">
+        <div v-if="searchFocused && !searching && recent.length" class="pt-2">
           <p class="px-1 text-[13px]" style="color: var(--zx-text-3)">最近搜过</p>
           <ul class="flex flex-wrap gap-1.5 px-1 pt-1.5">
             <li v-for="entry in recent" :key="entry.code">
@@ -428,8 +453,9 @@ onUnmounted(() => {
         <p v-if="hint" class="px-1 pt-2 text-[13px]" style="color: var(--zx-text-2)">{{ hint }}</p>
       </section>
 
-      <!-- 行情：整块是内容层（docs/11 §二「正文与数字一律实底」），不是玻璃 -->
-      <section v-if="selected" class="surface-solid p-4">
+      <!-- 行情：整块是内容层（docs/11 §二「正文与数字一律实底」），不是玻璃；
+           搜索模式下让位给候选面板（#67 前端优化：就地展开为独立结果面板） -->
+      <section v-if="selected && !searchFocused" class="surface-solid p-4">
         <div class="p-1">
           <div class="flex items-start justify-between">
             <div>

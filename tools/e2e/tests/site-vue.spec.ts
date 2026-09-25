@@ -212,13 +212,20 @@ test("只采到日K的票：空组件出交代、不整条拒（300308 实测）
 });
 
 test("生成失败时正文区给出原因，不是空白", async ({ page }) => {
+  // 2026-09-25 判据更新：原测试借「建仓价分析是 pending」触发服务端拒绝，而它 #61 已翻
+  // ready——判据随数据状态漂移。失败路径改用 route mock：本条测的是**前端行为**
+  // （接口 400 时正文区给出原因而非空白），不该依赖哪个模板恰好 pending。
+  await page.route("**/api/prompt", (route) =>
+    route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "组件还没落地：缺财务数据（测试桩）" }),
+    }),
+  );
   await page.goto("/");
   await expect(page.locator(".dot-on")).toBeVisible({ timeout: 10_000 });
-  // 建仓价分析是 pending 模板：服务端拒，理由写在 waiting_on
   await page.locator('[data-testid="search"]').fill("600519");
   await page.locator('[data-testid="suggest"] button').first().click();
-  await expect(page.locator("pre")).toContainText("你是资深", { timeout: 15_000 });
-  await page.locator('[data-testid="templates"]').selectOption("建仓价分析（未上线）");
   const body = page.locator('[data-testid="prompt-body"]');
   await expect(body).toContainText("还没落地", { timeout: 15_000 });
   await expect(body).not.toContainText("选一只票，点生成");
