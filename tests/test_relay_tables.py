@@ -821,7 +821,9 @@ def test_fina_indicator_full_page_splits_from_1985_not_1990() -> None:
         "fina_indicator", {"ts_code": "600519.SH"}, fetch=fetch, today=today
     )
     assert total is None and len(calls) == 3
-    assert calls[1]["start_date"] == "19850101", "第一刀左界必须是 1985（19891231 报告期在窗内）"
+    assert calls[1]["start_date"] == "19850101", (
+        "首次切分的左界必须是 1985（19891231 报告期在窗内）"
+    )
     midpoint = date(1985, 1, 1) + (today - date(1985, 1, 1)) / 2
     assert calls[1]["end_date"] == midpoint.strftime("%Y%m%d")
     assert calls[2]["start_date"] == (midpoint + timedelta(days=1)).strftime("%Y%m%d")

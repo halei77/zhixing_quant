@@ -62,7 +62,7 @@ from zhixing_quant.sources.relay.tables import PARSERS
 from zhixing_quant.storage import layout, tables
 from zhixing_quant.storage.query import read_bars
 
-#: 回填认这几张表（#53 圈定三张 + #59 C 刀的 report_rc + 本刀的 fina_indicator）。
+#: 回填认这几张表（#53 圈定三张 + #59 批次 C 的 report_rc + 本批次的 fina_indicator）。
 #: 别的参考表要先配锚、实测过窗口参数才许进来——表名打错或没实测就开跑，在这里是退出码 2
 #: 的 ValueError，不是"先跑了再说"。
 BACKFILL_TABLES = ("daily_basic", "forecast", "stk_limit", "report_rc", "fina_indicator")

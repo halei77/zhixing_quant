@@ -26,7 +26,7 @@ rds/promax 转接谱系——协议（无 X-API-Key、非 Tushare fields/items �
 自限 `--pace`（默认 0.3s/发）；失败重试 1→2→4s 阶梯，`--attempts` 次数耗尽即该票记败。
 
 入口：`uv run --frozen python -m zhixing_quant.sources.akshare.notice --symbols 600519,…`
-（本刀文件集不含 pyproject，故无 console script——`python -m` 即入口）。
+（本批次文件集不含 pyproject，故无 console script——`python -m` 即入口）。
 """
 
 from __future__ import annotations

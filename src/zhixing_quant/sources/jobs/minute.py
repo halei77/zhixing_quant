@@ -6,7 +6,7 @@
 - **没有回填旋钮**（`--previous-days` 不存在），而"尾巴有多长、漏一天有多急"**按源分两半**：
   5/30/60 主源 akshare/sina（抓空/抓错降级 ngw，任务 #64），sina 固定回最近 1970 根（决定 6），
   交回来的是一条尾巴、报告日只是尾巴的右端；1 分钟走 ngw（ADR-0022 决定 3 的源），单页
-  count≤1400（约 5.8 个交易日）且有 `start` 截止参数能向过去翻页（B 刀 2026-09-24 实测翻到
+  count≤1400（约 5.8 个交易日）且有 `start` 截止参数能向过去翻页（批次 B 2026-09-24 实测翻到
   2019）。两半的日报与告警口径因此分开写——sina 的"1970 根窗口"句挂到 ngw 的报告上是替源
   传错了话。
 - **一只票 × 一个周期 = 一批**。两种周期混成一批会在 `(symbol, ts)` 上撞键（10:00 那根在 5min
@@ -126,9 +126,9 @@ NGW_PERIOD = "1"
 #: 这里再列一份「周期→type」就是本模块反复制原则要避开的第二种漂移。
 
 #: ngw pacer 的起步间隔（秒）。**选 1.5s**：Qoute T-001 的纪律原文是"串行 ≥1.5s 起步，
-#: 429 阈值未知，Qoute 按 1.5s 跑一个月无事故"（B 刀 client.py 抄了同一条并注明"首周批量
+#: 429 阈值未知，Qoute 按 1.5s 跑一个月无事故"（批次 B 的 client.py 抄了同一条并注明"首周批量
 #: 把 interval 调到 1.5 再跑"）。`client.py` 的 `DEFAULT_MIN_INTERVAL=0.3` 是通用起步值
-#: （B 刀实测 0.3s 也通），本刀是首周批量接线，按纪律取 1.5：10 个请求 ≈ 15s 的代价换
+#: （批次 B 实测 0.3s 也通），本批次是首周批量接线，按纪律取 1.5：10 个请求 ≈ 15s 的代价换
 #: "不知道阈值时不逼近阈值"。限速住在这个装配常量而不是 CLI 旋钮——能随手调低的限速不是纪律。
 NGW_MIN_INTERVAL = 1.5
 
@@ -140,7 +140,7 @@ NGW_MIN_INTERVAL = 1.5
 #: 触顶后本轮回退纯主源语义（akshare 空/错就 Skipped），下一次运行重置。
 NGW_FALLBACK_BUDGET = 300
 
-#: ngw 一个完整交易日的 1 分钟根数（B 刀实测 241：09:30 开盘竞价栏 + 240 根标准右端点）。
+#: ngw 一个完整交易日的 1 分钟根数（批次 B 实测 241：09:30 开盘竞价栏 + 240 根标准右端点）。
 #: 只用于把单页根数换算成"约几个交易日"写进日报/告警，不参与任何判定。
 BARS_PER_DAY_1M = 241
 
@@ -499,7 +499,7 @@ def _disk_sections(recon: Recon | None, periods: Sequence[str]) -> str:
             f"，{cover.days} 个有行交易日 × {cover.symbols} 只票"
         )
     # 「起点那天不足全天」的注脚按源说：1970 根窗口是 sina 三周期的口径，挂到 ngw 的
-    # minute_1 上是替源传错话（ngw 是单页截断 + start 翻页，B 刀实测）。
+    # minute_1 上是替源传错话（ngw 是单页截断 + start 翻页，批次 B 实测）。
     ngw_dataset = layout.minute_dataset(NGW_PERIOD)
     covered = [name for name, cover in recon.covers.items() if cover is not None]
     if any(name != ngw_dataset for name in covered):
@@ -600,7 +600,7 @@ def _tail_urgency(periods: Sequence[str]) -> str:
       但任务 #64 起这不是终点：ngw 侧有 `start` 翻页，显式重跑 `zx-minute` 就能按同口径补回
       （降级在抓取层自动发生，事后回填则要人发起）——要补，只是不会自己补上。
     - ngw（`NGW_PERIOD`）：单页 `count=MAX_KLINE_COUNT` 截一段最近的尾巴，另有 `start`
-      截止参数能向过去翻页（B 刀实测翻到 2019）——漏的这几天**补得回来**，先查源与网络，
+      截止参数能向过去翻页（批次 B 实测翻到 2019）——漏的这几天**补得回来**，先查源与网络，
       不必按"主源已滑窗"的节奏处置。
 
     只跑其中一半就只说那一半：把 sina 窗口句挂到纯 ngw 的告警上，会把"翻页可补"误报成
@@ -616,7 +616,7 @@ def _tail_urgency(periods: Sequence[str]) -> str:
         parts.append(
             f"1 分钟（ngw）单页 count={MAX_KLINE_COUNT}（约 "
             f"{MAX_KLINE_COUNT / BARS_PER_DAY_1M:.1f} 个交易日），且有 start 截止参数可向过去"
-            "翻页（B 刀实测翻到 2019）：漏的这几天补得回来，先查源与网络。"
+            "翻页（批次 B 实测翻到 2019）：漏的这几天补得回来，先查源与网络。"
         )
     return "".join(parts)
 

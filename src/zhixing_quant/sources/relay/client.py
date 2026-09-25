@@ -33,7 +33,7 @@ BACKOFF_SECONDS: Sequence[int] = (60, 300, 1800)
 #: 表 → 实测可用的源白名单（没登记的表按 ADR-0014 双源 rds→promax）。
 #: `fina_indicator` 钉 **rds-only**（2026-09-25 探测，报告见
 #: `${ZX_DATA_ROOT}/reports/source-probe/2026-09-25-fin-indicator.md`）：
-#: - promax 窗口 >366 天直接 HTTP 400 `date_range_too_large`——短页二分第一刀
+#: - promax 窗口 >366 天直接 HTTP 400 `date_range_too_large`——短页二分的首次切分
 #:   （1985..今天）必 400；
 #: - promax 无窗口查询行数不稳（同参三跑 80 行、另一轮 100 行，rds 全史 196 行）、
 #:   无 has_more/count——短页族"页 < 顶即到底"会在 promax 上把截断**静默**读成拉完。

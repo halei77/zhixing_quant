@@ -1,7 +1,7 @@
 """牛股王基本面采集器**骨架**：stockshare / finacereport 响应 → 参考表行（NamedTuple）。
 
-本刀只做到「解析出 NamedTuple + 测试」：**不接进 `zx-*` 任务、不落盘**——落盘要走
-ADR-0015 逐表验收（表级校验器 + 锚点对账 + 黄金样本），那是下一刀的事。
+本批次只做到「解析出 NamedTuple + 测试」：**不接进 `zx-*` 任务、不落盘**——落盘要走
+ADR-0015 逐表验收（表级校验器 + 锚点对账 + 黄金样本），那是后续批次的事。
 
 两条响应的形状（2026-09-24 实测，黄金样本在数据根 `golden/`）：
 
@@ -134,7 +134,7 @@ class ReportCell(NamedTuple):
 
 def fina_report_rows(body: Mapping[str, object]) -> tuple[ReportCell, ...]:
     """finacereport 响应 → 格子序列。**保源序**（报告期倒序）：骨架不排序——点时排序是
-    下一刀表级校验器的事。
+    后续批次表级校验器的事。
 
     按 `FiledName` 对齐（04 §五：禁硬编码下标）；标题行（FiledName 为空）跳过——它们是
     排版，不是指标。

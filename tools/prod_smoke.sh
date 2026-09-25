@@ -70,7 +70,7 @@ chk "含最新基本面头" "$(awk '/^has_head/{print $2}' /tmp/prod_smoke_5.txt
 chk "含估值段" "$(awk '/^has_valuation/{print $2}' /tmp/prod_smoke_5.txt | grep -q True && echo 1 || echo 0)"
 chk "含涨跌停段" "$(awk '/^has_limit/{print $2}' /tmp/prod_smoke_5.txt | grep -q True && echo 1 || echo 0)"
 chk "含大盘段（短期投资要有）" "$(awk '/^has_index/{print $2}' /tmp/prod_smoke_5.txt | grep -q True && echo 1 || echo 0)"
-# 远期 PE（用户点名项，C 刀）：与日K 同窗——120 天日K 必须配 120 天远期 PE
+# 远期 PE（用户点名项，交付批次 C）：与日K 同窗——120 天日K 必须配 120 天远期 PE
 fwd=$(curl -s -X POST "$BASE/api/prompt" -H 'Content-Type: application/json' \
   -d '{"code":"600519","template":"短期投资"}' | python3 -c "
 import json,sys,re

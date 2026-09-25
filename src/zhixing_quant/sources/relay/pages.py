@@ -61,7 +61,7 @@ SHORT_PAGE_TABLES: frozenset[str] = frozenset(SHORT_PAGE_CAPS)
 #: 调用方；新表的顶进 `SHORT_PAGE_CAPS`，不要再加常量。
 SOURCE_ROW_CAP = 5000
 
-#: 二分缩窗的默认左界：params 没带 start_date 时的第一刀左端。1990 早于任何 A 股研报史
+#: 二分缩窗的默认左界：params 没带 start_date 时首次切分的左端。1990 早于任何 A 股研报史
 #: （实测最早 2019-03-29 起），空窗一页 0 行即底，不值当一个专门参数。
 DEFAULT_WINDOW_START = date(1990, 1, 1)
 

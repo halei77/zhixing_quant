@@ -67,7 +67,7 @@ def bar(when: datetime, close: float = 100.0) -> dict[str, Any]:
 
 
 def ngw_bar(when: datetime, close_yuan: float = 100.0) -> dict[str, Any]:
-    """一根 ngw 侧原样 `timedata` 行（B 刀实测形状）：OHLC 是字符串·分，`curvalue` 是元。"""
+    """一根 ngw 侧原样 `timedata` 行（批次 B 实测形状）：OHLC 是字符串·分，`curvalue` 是元。"""
     fen = round(close_yuan * 100)
     return {
         "times": f"{when:%Y%m%d%H%M%S}",
@@ -430,7 +430,7 @@ def test_an_unlanded_dataset_says_so_instead_of_inventing_a_start(tmp_path: Path
 def test_period_one_lands_as_ngw_minute_1(tmp_path: Path) -> None:
     """`--periods 1` 的行进 minute_1、源标识 `ngw_minute_1`——不是 `akshare_minute_1`。
 
-    单位顺带钉死（B 刀硬约束 4）：分→元后 close=100.0，`curvalue` 不除 100 后 amount=100000.0。
+    单位顺带钉死（批次 B 硬约束 4）：分→元后 close=100.0，`curvalue` 不除 100 后 amount=100000.0。
     源标识错了的表现是同一个 minute_1 dataset 里两种 source 混着，健康分从此说不清扣的是谁。
     """
     result = run_job(
