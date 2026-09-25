@@ -159,12 +159,15 @@ class NgwClient:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         transport: Transport | None = None,
+        backoff: tuple[int, ...] = BACKOFF,
     ) -> None:
         self._token = _read_token(token_path)
         self._interval = interval
         self._sleep = sleep
         self._clock = clock
         self._transport = transport if transport is not None else _urlopen_transport
+        #: 阶梯可由装配裁短（ADR-0026 实时路：(5,) 最坏 ~20s；采集/回填保持默认 (5,15,45)）
+        self._backoff = backoff
         # 一把锁贯穿「pacer 等待 → 请求 → 退避」整个周期：并发调用在这里排成队，
         # 禁并发不是靠调用方自觉（Qoute 纪律：串行是它没被封的原因）。
         self._lock = threading.Lock()
@@ -198,7 +201,7 @@ class NgwClient:
             target = f"{url}?{display}"
             request_url = f"{url}?{urllib.parse.urlencode(query)}"
             last = "未知错误"
-            for delay in (0, *BACKOFF):
+            for delay in (0, *self._backoff):
                 if delay:
                     self._sleep(delay)
                     self._pace()
@@ -280,6 +283,7 @@ class NgwClient:
         ktype: str = KLINE_TYPE_1M,
         start: str | None = None,
         ex: str | None = None,
+        timeout: float = 60.0,
     ) -> KlinePage:
         """一页 K线（`start` 是**截止**时间，向过去翻页；不传 = 从最新往回）。
 
@@ -301,7 +305,7 @@ class NgwClient:
         if ex is not None:
             params["ex"] = ex
         params.update(APP_PARAMS)
-        body = self._get(KLINE_URL, params, timeout=60.0)
+        body = self._get(KLINE_URL, params, timeout=timeout)
         raw = body.get("timedata") or []
         if not isinstance(raw, list):
             raise NgwError(f"timedata 不是列表：{type(raw).__name__}")

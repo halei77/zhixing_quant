@@ -27,16 +27,18 @@ from zhixing_quant.site.compose import Section, assemble
 from zhixing_quant.site.templates import Selection, Template
 from zhixing_quant.sources.akshare.master import read_master
 from zhixing_quant.storage import layout
-from zhixing_quant.storage.query import read_bars
+from zhixing_quant.storage.query import adjusted_bars, factors_for, read_bars
 from zhixing_quant.storage.tables import read_table
 
 #: `minute_` 这个前缀从 `layout.MINUTE_5` 反推，不再抄一遍字符串：分钟线加一个周期（ADR-0009
 #: 决定 7 那个目录）时，这一层不需要第二处改动。
 _MINUTE = f"{layout.MINUTE_5.rsplit('_', 1)[0]}_"
 
-#: 分钟K活取源（ADR-0026）：`(code, dataset, start, end) → 后复权 Bar 升序`。与 `calendar`
-#: 同构的注入——这一层依旧不自己起 HTTP（模块说明那句），联网的事实装在调用方给的能力里；
-#: 没给（None）则分钟段退回读盘（盘上已无分钟，ADR-0025）→ 「本节无数据」交代，与过渡态一致。
+#: 分钟K活取源（ADR-0026）：`(code, dataset, start, end) → **原始价** Bar 升序`，provider
+#: 只联网不碰盘（`site/live.py` 的分工，用户拍板）；复权由本文件现算——口径换算全项目只有
+#: 一处，那处在读干净区的那个文件里。与 `calendar` 同构的注入：这一层依旧不自己起 HTTP
+#: （模块说明那句），联网的事实装在调用方给的能力里；没给（None）则分钟段退回读盘（盘上已无
+#: 分钟，ADR-0025）→ 「本节无数据」交代，与过渡态一致。
 MinuteSource = Callable[[str, str, date, date], Sequence[Bar]]
 
 #: 大盘基准：模板里的 `index_daily` 段读**这只**指数，不是当前个股。个股代码与指数代码的
@@ -453,12 +455,23 @@ def build(
             )
             continue
         if selection.dataset.startswith(_MINUTE) and minute_source is not None:
-            # 分钟K活取（ADR-0026）：截断/缓存/降级都在 provider 里，这一层只管调用与渲染；
+            # 分钟K活取（ADR-0026）：截断/缓存/降级在 provider 里，**复权在这里**——provider
+            # 交原始价，本文件是唯一读盘根：后复权与日线走同一条 adjusted_bars/factors_for，
+            # 截断语义也对齐（up_to_year=end.year，别让之后的除权回头改窗口内的价）。
             # 抛异常 = 这次没取到 → 该节交代（ADR-0020），不拖垮其余段——与"读盘读到空"同形。
             try:
-                bars = list(minute_source(code, selection.dataset, start, end))
+                live_raw = list(minute_source(code, selection.dataset, start, end))
             except Exception:
-                bars = []
+                live_raw = []
+            bars = (
+                adjusted_bars(
+                    live_raw,
+                    adjust=template.adjust,
+                    factors=factors_for(code, root=config.parquet_dir(), up_to_year=end.year),
+                )
+                if live_raw
+                else []
+            )
         else:
             bars = read_bars(
                 code,

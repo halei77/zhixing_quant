@@ -31,6 +31,12 @@ ROOT_MODULE = "prompt.py"
 #: 壳：读主数据快照与日历，不 import `storage`（ADR-0013 决定 1）。
 SHELL_MODULE = "api.py"
 
+#: 分钟K活取能力层（ADR-0026 决定 1 的分工，用户拍板 2026-09-25）：只许联网——
+#: `sources` 给 sina/ngw，`storage` 永远不许 import：复权因子与口径换算留在组合根
+#: （`prompt.py`），"全项目只有一处换算式"不因来了个新文件就变两处。
+LIVE_MODULE = "live.py"
+LIVE_ALLOWED = frozenset({"site", "domain", "sources"})
+
 #: 纯模块往上只允许看见这两层：`domain/*`（纯数据结构）与 `site` 自己。
 #: `config` 不在列：模板表的路径是调用方读好后传进来的（`load(path)`），纯层自己去翻仓库目录，
 #: 等于给"这份配置从哪来"开一条暗道（与 ADR-0010 决定 1 同一条取舍）。
@@ -69,7 +75,7 @@ def _modules() -> list[str]:
 
 
 def _pure_modules() -> list[str]:
-    return [name for name in _modules() if name not in {ROOT_MODULE, SHELL_MODULE}]
+    return [name for name in _modules() if name not in {ROOT_MODULE, SHELL_MODULE, LIVE_MODULE}]
 
 
 def _declared_pure_modules() -> list[str]:
@@ -99,6 +105,15 @@ def test_the_clean_zone_is_read_in_exactly_one_place() -> None:
     """
     readers = {name for name in _modules() if _sources_of(SITE / name) & STORAGE_PACKAGES}
     assert readers == {ROOT_MODULE}, f"读干净区的位置应当只有 {ROOT_MODULE}，实际 {sorted(readers)}"
+
+
+def test_live_stays_a_network_capability() -> None:
+    """live.py 的专属边界：可见 sources（联网），永不可见 storage（碰盘只此一家）。"""
+    seen = _sources_of(SITE / LIVE_MODULE)
+    assert not seen - LIVE_ALLOWED, f"live.py 越界 import：{sorted(seen - LIVE_ALLOWED)}"
+    assert not seen & STORAGE_PACKAGES, (
+        "复权因子读盘在 prompt.py——live 碰 storage 就有了第二处口径换算"
+    )
 
 
 def test_auxiliary_io_stays_inside_the_two_named_files() -> None:

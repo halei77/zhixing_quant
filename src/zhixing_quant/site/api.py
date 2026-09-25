@@ -32,7 +32,7 @@ from zhixing_quant import config
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.domain.security import Listing
 from zhixing_quant.domain.symbol import UnknownCode, normalize_code
-from zhixing_quant.site import prompt, search, templates
+from zhixing_quant.site import live, prompt, search, templates
 from zhixing_quant.site.search import search_indexes
 from zhixing_quant.site.templates import Selection
 from zhixing_quant.sources.akshare.calendar import load_calendar
@@ -181,6 +181,7 @@ def create_app(
     calendar: TradingCalendar,
     recent: Recent,
     static_dir: Path = STATIC_DIR,
+    minute_source: prompt.MinuteSource | None = None,
 ) -> FastAPI:
     """装配应用。依赖全部从参数进来（与 ADR-0010 决定 1 同一手法），只有 `main` 从盘上取。
 
@@ -188,6 +189,8 @@ def create_app(
     造一份假 dist 判"发的是谁"，而不必先跑一次 npm build（CI 的干净 checkout 里没有 dist）。
 
     字典既用来搜，也用来判"这只票存不存在"（`_known`）——同一份名单，不另立第二份答案。
+    `minute_source`（ADR-0026）是分钟K活取能力：生产由 `main()` 装配，测试注入假件；
+    没给就是过渡态——分钟段读盘（盘上已无）出交代，行为与 ADR-0025 落地日一致。
     """
     book = search.Index(listings)
     names = {listing.code: listing.name for listing in listings}
@@ -287,6 +290,7 @@ def create_app(
                 body.as_of or date.today(),
                 calendar=calendar,
                 token_warn_above=cfg.token_warn_above,
+                minute_source=minute_source,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -370,6 +374,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         calendar=load_calendar(until=date.today()),
         recent=Recent(config.site_recent_file()),
         static_dir=served,
+        minute_source=live.make_minute_source(),
     )
     host = os.environ.get("ZX_SITE_HOST", "127.0.0.1")
     port = int(os.environ.get("ZX_SITE_PORT", "8000"))
