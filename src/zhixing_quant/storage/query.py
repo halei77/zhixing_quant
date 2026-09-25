@@ -108,6 +108,21 @@ def read_bars(
     return adjusted_bars(bars, adjust=adjust, factors=factors)
 
 
+def factors_for(
+    symbol: str, *, root: Path | None = None, up_to_year: int = 9999
+) -> tuple[AdjustmentFactor, ...]:
+    """一只票的复权因子阶梯（公开读口）。因子源恒为日线 dataset——`_factors` 那条纪律的
+    对外形状，供「Bar 不在盘上」的路径换算口径（站点分钟K实时获取，ADR-0026）：
+    实时抓回的原始价分钟 Bar 配这份日线因子，走同一条 `adjusted_bars` 换算。
+
+    `up_to_year` 默认到顶：展示路径不存在"区间之后的除权回头改价"的复现性问题——
+    它要的就是**此刻**的后复权口径；回测/读盘路径仍走 `read_bars` 里的截断语义。
+    """
+    code = normalize_code(symbol)
+    with duckdb.connect() as con:
+        return _factors(con, code, root=root, up_to_year=up_to_year)
+
+
 def depth(dataset: str, *, root: Path | None = None) -> Cover | None:
     """整个 dataset 在盘上的覆盖范围；一格都没落过时给 None（不是"0 天"）。
 

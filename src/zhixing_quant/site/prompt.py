@@ -14,11 +14,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
 from zhixing_quant import config
+from zhixing_quant.domain.bar import Bar
 from zhixing_quant.domain.calendar import TradingCalendar
 from zhixing_quant.site import table, templates, tokens
 from zhixing_quant.site.compose import Section, assemble
@@ -31,6 +33,11 @@ from zhixing_quant.storage.tables import read_table
 #: `minute_` 这个前缀从 `layout.MINUTE_5` 反推，不再抄一遍字符串：分钟线加一个周期（ADR-0009
 #: 决定 7 那个目录）时，这一层不需要第二处改动。
 _MINUTE = f"{layout.MINUTE_5.rsplit('_', 1)[0]}_"
+
+#: 分钟K活取源（ADR-0026）：`(code, dataset, start, end) → 后复权 Bar 升序`。与 `calendar`
+#: 同构的注入——这一层依旧不自己起 HTTP（模块说明那句），联网的事实装在调用方给的能力里；
+#: 没给（None）则分钟段退回读盘（盘上已无分钟，ADR-0025）→ 「本节无数据」交代，与过渡态一致。
+MinuteSource = Callable[[str, str, date, date], Sequence[Bar]]
 
 #: 大盘基准：模板里的 `index_daily` 段读**这只**指数，不是当前个股。个股代码与指数代码的
 #: 六位空间重叠（000001 既是平安银行也是上证指数），不换 symbol 就会把个股名字下不存在的
@@ -247,11 +254,14 @@ def build(
     calendar: TradingCalendar,
     token_warn_above: int,
     float_shares: float | None = None,
+    minute_source: MinuteSource | None = None,
 ) -> Prompt:
     """按模板组装一条提示词。数据一段都不补：读回来是什么就是什么。
 
     `float_shares` 只有模板请求 `turnover` 时才用得上，缺它由 `table.render` 拒（ADR-0011
     决定 5）。日历由调用方给（决定 2）：这一层不联网抓日历，"生成提示词"的路上不该藏着 HTTP。
+    `minute_source` 同一族的第二个能力（ADR-0026）：分钟K去本地化后（ADR-0025），活取源由
+    组合根装配注入，本层只调用它、不自己联网；没注入就退回读盘——盘上已无分钟，出交代。
 
     **一个组件一行都没有** → 那一节出 `NO_DATA_NOTE` 交代，不给空表、也不拖垮整条：5565 只
     票里只有分钟采集池那几只有 minute_*，`短期投资` 四段里三段空就整条拒的话，全市场只剩池内
@@ -442,14 +452,22 @@ def build(
                 )
             )
             continue
-        bars = read_bars(
-            code,
-            start,
-            end,
-            adjust=template.adjust,
-            dataset=selection.dataset,
-            root=config.parquet_dir(),
-        )
+        if selection.dataset.startswith(_MINUTE) and minute_source is not None:
+            # 分钟K活取（ADR-0026）：截断/缓存/降级都在 provider 里，这一层只管调用与渲染；
+            # 抛异常 = 这次没取到 → 该节交代（ADR-0020），不拖垮其余段——与"读盘读到空"同形。
+            try:
+                bars = list(minute_source(code, selection.dataset, start, end))
+            except Exception:
+                bars = []
+        else:
+            bars = read_bars(
+                code,
+                start,
+                end,
+                adjust=template.adjust,
+                dataset=selection.dataset,
+                root=config.parquet_dir(),
+            )
         if not bars:
             sections.append(Section(title=heading(selection, 0), body=NO_DATA_NOTE))
             continue
