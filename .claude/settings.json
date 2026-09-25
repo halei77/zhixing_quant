@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git push --delete:*)",
+      "Bash(tools/publish_site.sh:*)",
+      "Bash(./tools/publish_site.sh:*)"
+    ]
+  }
+}
