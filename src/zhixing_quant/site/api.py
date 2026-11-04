@@ -314,6 +314,37 @@ def create_app(
             "quote": prompt.quote_of(bars),
         }
 
+    @app.get("/api/quote")
+    def api_quote(code: str) -> Any:
+        """Muse 用行情快照：盘中给分钟末根价，分钟无今日数据时回落日线。
+
+        口径在 `prompt.build_quote`（与面板 `quote_of` 同处，组合根是口径唯一位置）；
+        这里只做两件装配事：
+        干净区日线读 `prompt.read_kline`、分钟活取调注入的 `minute_source`。
+        活取抛错不 500——收敛成日线回落并在 `note` 里说清，这是 ADR-0020 的
+        诚实规则在查看接口上的版本；未知代码仍是 404，与 K线端点同一判据。
+        """
+        code = _known(code, names)
+        today = date.today()
+        daily = prompt.read_kline(code, days=5, kind="stock")
+        minute_dicts: list[dict[str, object]] = []
+        minute_failed = False
+        if minute_source is not None:
+            try:
+                bars = minute_source(code, prompt.QUOTE_MINUTE_DATASET, today, today)
+                minute_dicts = [prompt.minute_bar_dict(bar) for bar in bars]
+            except Exception:
+                minute_failed = True
+        return prompt.build_quote(
+            code=code,
+            name=names[code],
+            daily_bars=daily,
+            minute_bars=minute_dicts,
+            as_of=today,
+            fetched_at=datetime.now(UTC),
+            minute_failed=minute_failed,
+        )
+
     @app.get("/api/recent")
     def api_recent_list() -> Any:
         return {"entries": recent.load()}

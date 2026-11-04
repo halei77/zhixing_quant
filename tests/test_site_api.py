@@ -87,6 +87,7 @@ PROMPT_NO_DATE: dict[str, object] = {"code": "600519", "template": "短期投资
 ENDPOINTS: tuple[tuple[str, str, Callable[[TestClient], httpx.Response]], ...] = (
     ("搜索", "GET /api/search", lambda c: c.get("/api/search", params={"q": "600"})),
     ("K线", "GET /api/kline", lambda c: c.get("/api/kline", params={"code": "600519"})),
+    ("行情快照", "GET /api/quote", lambda c: c.get("/api/quote", params={"code": "600519"})),
     ("模板", "GET /api/templates", lambda c: c.get("/api/templates")),
     ("生成", "POST /api/prompt", lambda c: c.post("/api/prompt", json=PROMPT_OK)),
     ("留痕·读", "GET /api/recent", lambda c: c.get("/api/recent")),

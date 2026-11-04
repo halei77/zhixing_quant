@@ -14,9 +14,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from zhixing_quant import config
@@ -168,6 +168,148 @@ def quote_of(bars: list[dict[str, object]]) -> dict[str, object] | None:
         "high": _price(last.get("high")),
         "low": _price(last.get("low")),
         "volume": "—" if volume is None else f"{round(volume):,}",
+    }
+
+
+#: Muse 用行情快照取分钟活取的 dataset：5 分钟是 sina 主、ngw 兜底的那条
+#: （`live.py`），1 分钟只走 ngw、粒度更细但源更单一；看盘取 5 分钟是“主源优先”
+#: 与“新鲜度”的折中。名字从 `layout.MINUTE_5` 取，不另抄一份字符串。
+QUOTE_MINUTE_DATASET = layout.MINUTE_5
+#: 活取源的对外名：`live.py` 不暴露这一请求到底走了 sina 还是 ngw（`Grabbed.via`
+#: 只在采集路的日报里点名），所以这里不冒充“本次走了 sina”——只说清链路是
+#: 分钟活取，链路内部的主备关系在模块 docstring 里，不在每次响应里编一个。
+QUOTE_MINUTE_SOURCE = "minute_5_live"
+QUOTE_DAILY_SOURCE = "daily_clean_zone"
+
+
+def _quote_bar_date(bar: Mapping[str, object]) -> str | None:
+    value = bar.get("date")
+    return value if isinstance(value, str) else None
+
+
+def _sorted_quote_bars(
+    bars: Sequence[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """按（日期，时刻）升序：分钟源给的是升序，但口径层不赌上游的序。"""
+    return sorted(
+        bars,
+        key=lambda bar: (_quote_bar_date(bar) or "", str(bar.get("ts") or "")),
+    )
+
+
+def build_quote(
+    *,
+    code: str,
+    name: str,
+    daily_bars: Sequence[Mapping[str, object]],
+    minute_bars: Sequence[Mapping[str, object]],
+    as_of: date,
+    fetched_at: datetime,
+    minute_failed: bool = False,
+) -> dict[str, object]:
+    """Muse 用行情快照：把“今天看什么价”算成一个口径，壳只搬不改。
+
+    与 `quote_of`（面板格式化字符串）不同，这里返回的数字一律是数值，因为
+    调用方是 Muse：它要拿数值再算、再比对，格式化是展示层的事，不该在这里
+    先做掉。查看 ≠ 研究：分钟价是展示用的现场行情，不进干净区、不进门禁、
+    不给回测用；要变成研究数据资产，回去跑 `zx-minute` 采集。
+    分钟价是**分钟线末根价，不是逐笔价**；失败收敛成“无数据”，不编数。
+    昨收的取法只有一条：分钟价当天的昨收 = 该日前最后一根日线；日线价本身
+    的昨收 = 它前一根日线——日线里已含当天收盘的那根，不能把它再当成自己的
+    昨收，那会把涨跌幅算成 0。
+    """
+    as_of_text = as_of.isoformat()
+    daily = _sorted_quote_bars(daily_bars)
+    minute_today = [
+        bar
+        for bar in _sorted_quote_bars(minute_bars)
+        if _quote_bar_date(bar) == as_of_text
+        and _num(bar.get("close")) is not None
+        and (_num(bar.get("close")) or 0) > 0
+    ]
+    if minute_today:
+        bar = minute_today[-1]
+        before = [row for row in daily if (_quote_bar_date(row) or "") < as_of_text]
+        prev = _num(before[-1].get("close")) if before else None
+        mode = "minute"
+        source = QUOTE_MINUTE_SOURCE
+        note = "分钟线末根价，非逐笔；昨收取自干净区日线。"
+        if prev is None:
+            note += "干净区无该日之前的日线，涨跌幅无法计算。"
+    elif daily:
+        bar = daily[-1]
+        prev = _num(daily[-2].get("close")) if len(daily) > 1 else None
+        mode = "daily"
+        source = QUOTE_DAILY_SOURCE
+        note = "分钟活取无今日数据，已回落到干净区日线收盘价，非实时。"
+        if minute_failed:
+            note = "分钟活取失败，" + note
+        if prev is None:
+            note += "日线不足两根，涨跌幅无法计算。"
+    else:
+        return {
+            "code": code,
+            "name": name,
+            "mode": "unavailable",
+            "source": None,
+            "price": None,
+            "prev_close": None,
+            "change": None,
+            "change_pct": None,
+            "open": None,
+            "high": None,
+            "low": None,
+            "volume": None,
+            "amount": None,
+            "bar_date": None,
+            "bar_time": None,
+            "fetched_at": fetched_at.isoformat(),
+            "note": "分钟活取与干净区日线均无数据，不编造价格。",
+        }
+    price = _num(bar.get("close"))
+    change: float | None = None
+    change_pct: float | None = None
+    if price is not None and prev is not None and prev > 0:
+        change = price - prev
+        change_pct = round(change / prev * 100, 4)
+    ts = bar.get("ts")
+    return {
+        "code": code,
+        "name": name,
+        "mode": mode,
+        "source": source,
+        "price": price,
+        "prev_close": prev,
+        "change": change,
+        "change_pct": change_pct,
+        "open": _num(bar.get("open")),
+        "high": _num(bar.get("high")),
+        "low": _num(bar.get("low")),
+        "volume": _num(bar.get("volume")),
+        "amount": _num(bar.get("amount")),
+        "bar_date": _quote_bar_date(bar),
+        "bar_time": ts if isinstance(ts, str) else None,
+        "fetched_at": fetched_at.isoformat(),
+        "note": note,
+    }
+
+
+def minute_bar_dict(bar: Bar) -> dict[str, object]:
+    """把分钟 `Bar` 转成 `build_quote` 要的 dict 形：只搬字段，不改口径。
+
+    `ts` 转 ISO 字符串：分钟K 的收盘时刻（右端点）是“这根价到几点”的唯一
+    证据，丢了它，调用方就分不清“刚收的 5 分钟”与“上午的旧根”。
+    """
+    ts = bar.ts
+    return {
+        "date": bar.trade_date.isoformat(),
+        "ts": ts.isoformat() if ts is not None else None,
+        "open": bar.open,
+        "high": bar.high,
+        "low": bar.low,
+        "close": bar.close,
+        "volume": bar.volume,
+        "amount": bar.amount,
     }
 
 
