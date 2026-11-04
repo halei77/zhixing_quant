@@ -175,11 +175,14 @@ def quote_of(bars: list[dict[str, object]]) -> dict[str, object] | None:
 #: （`live.py`），1 分钟只走 ngw、粒度更细但源更单一；看盘取 5 分钟是“主源优先”
 #: 与“新鲜度”的折中。名字从 `layout.MINUTE_5` 取，不另抄一份字符串。
 QUOTE_MINUTE_DATASET = layout.MINUTE_5
+#: 快照窗口向回拉的天数：上一交易日可能隔着长假（黄金周 + 周末 ≈11 天），
+#: 30 天是“一定盖住上一交易日”的余量；活取源的缓存键不含窗口，宽窗口
+#: 不多花源请求（见 `api.py` 的 `/api/quote`）。
+QUOTE_LOOKBACK = timedelta(days=30)
 #: 活取源的对外名：`live.py` 不暴露这一请求到底走了 sina 还是 ngw（`Grabbed.via`
 #: 只在采集路的日报里点名），所以这里不冒充“本次走了 sina”——只说清链路是
 #: 分钟活取，链路内部的主备关系在模块 docstring 里，不在每次响应里编一个。
 QUOTE_MINUTE_SOURCE = "minute_5_live"
-QUOTE_DAILY_SOURCE = "daily_clean_zone"
 
 
 def _quote_bar_date(bar: Mapping[str, object]) -> str | None:
@@ -201,102 +204,127 @@ def build_quote(
     *,
     code: str,
     name: str,
-    daily_bars: Sequence[Mapping[str, object]],
     minute_bars: Sequence[Mapping[str, object]],
     as_of: date,
     fetched_at: datetime,
     minute_failed: bool = False,
 ) -> dict[str, object]:
-    """Muse 用行情快照：把“今天看什么价”算成一个口径，壳只搬不改。
+    """Muse 用行情快照：实时分钟线 + 缓存，昨收不再依赖干净区日线。
 
     与 `quote_of`（面板格式化字符串）不同，这里返回的数字一律是数值，因为
     调用方是 Muse：它要拿数值再算、再比对，格式化是展示层的事，不该在这里
     先做掉。查看 ≠ 研究：分钟价是展示用的现场行情，不进干净区、不进门禁、
     不给回测用；要变成研究数据资产，回去跑 `zx-minute` 采集。
-    分钟价是**分钟线末根价，不是逐笔价**；失败收敛成“无数据”，不编数。
-    昨收的取法只有一条：分钟价当天的昨收 = 该日前最后一根日线；日线价本身
-    的昨收 = 它前一根日线——日线里已含当天收盘的那根，不能把它再当成自己的
-    昨收，那会把涨跌幅算成 0。
+
+    口径（一次分钟活取，同一批根算到底，不另起第二源）：
+
+    - 今天有分钟根 → `mode="minute"`：价 = 今日末根收盘（分钟线末根价，
+      不是逐笔价）；当日开/高/低 = 今日根聚合（首根开、最高高、最低低），
+      量/额 = 今日根求和；昨收 = 上一交易日末根收盘（即那日收盘价，
+      分钟线 15:00 那根），涨跌幅相对它算。
+    - 今天无根、但之前有根 → `mode="last_close"`：价 = 上一交易日收盘，
+      开高低量额 = 那日的聚合，昨收 = 再上一交易日末根收盘——这是“未开盘/
+      停牌时看上一收盘”，不是今日实时价，`note` 里点名。
+    - 两边都没根 → `mode="unavailable"`，价空着，不编数，**不回落干净区
+      日线**：家里日线不一定常发布，拿它当昨收就是 2026-11-04 冒烟时
+      那种“对 10 月 21 日算 -18%”的误读；没实时数就说没实时数。
+
+    缓存不在本函数：调用方调的 `minute_source`（`live.py`）本身就是带缓存
+    的活取源——盘中 90 秒、盘外 3600 秒、单进程单飞、令牌桶 20 次/分钟，
+    同一只票 90 秒内重复查不重复发源请求；本函数只算口径，不再加一层
+    缓存（两层 TTL 叠加只会把“价到几点”算糊涂）。
     """
     as_of_text = as_of.isoformat()
-    daily = _sorted_quote_bars(daily_bars)
-    minute_today = [
+    bars = [
         bar
         for bar in _sorted_quote_bars(minute_bars)
-        if _quote_bar_date(bar) == as_of_text
-        and _num(bar.get("close")) is not None
-        and (_num(bar.get("close")) or 0) > 0
+        if _num(bar.get("close")) is not None and (_num(bar.get("close")) or 0) > 0
     ]
-    if minute_today:
-        bar = minute_today[-1]
-        before = [row for row in daily if (_quote_bar_date(row) or "") < as_of_text]
-        prev = _num(before[-1].get("close")) if before else None
-        prev_date = _quote_bar_date(before[-1]) if before else None
-        mode = "minute"
-        source = QUOTE_MINUTE_SOURCE
-        note = "分钟线末根价，非逐笔；昨收取自干净区日线。"
-        if prev is None:
-            note += "干净区无该日之前的日线，涨跌幅无法计算。"
-        elif prev_date is not None and (as_of - date.fromisoformat(prev_date)).days > 3:
-            note += (
-                f"注意：干净区日线最后一根是 {prev_date}，距今超过 3 天，"
-                "昨收与涨跌幅仅相对该日，不代表昨日收盘；日线重新发布后会自动恢复。"
-            )
-    elif daily:
-        bar = daily[-1]
-        prev = _num(daily[-2].get("close")) if len(daily) > 1 else None
-        prev_date = _quote_bar_date(daily[-2]) if len(daily) > 1 else None
-        mode = "daily"
-        source = QUOTE_DAILY_SOURCE
-        note = "分钟活取无今日数据，已回落到干净区日线收盘价，非实时。"
+    by_date: dict[str, list[Mapping[str, object]]] = {}
+    for bar in bars:
+        day = _quote_bar_date(bar)
+        if day is not None:
+            by_date.setdefault(day, []).append(bar)
+    today_bars = by_date.get(as_of_text, [])
+    if today_bars:
+        day_bars, mode, note = today_bars, "minute", (
+            "分钟线末根价，非逐笔；当日开高低量额由今日分钟线聚合；"
+            "昨收为上一交易日分钟线末根收盘，实时拉取，不依赖干净区日线。"
+        )
+    else:
+        earlier = sorted(day for day in by_date if day < as_of_text)
+        if not earlier:
+            note = "分钟活取无数据，不编造价格；未回落干净区日线。"
+            if minute_failed:
+                note = "分钟活取失败，" + note
+            return {
+                "code": code,
+                "name": name,
+                "mode": "unavailable",
+                "source": None,
+                "price": None,
+                "prev_close": None,
+                "prev_close_date": None,
+                "change": None,
+                "change_pct": None,
+                "open": None,
+                "high": None,
+                "low": None,
+                "volume": None,
+                "amount": None,
+                "bar_date": None,
+                "bar_time": None,
+                "fetched_at": fetched_at.isoformat(),
+                "note": note,
+            }
+        day_bars, mode, note = by_date[earlier[-1]], "last_close", (
+            "今日暂无分钟线（未开盘/停牌），价为上一交易日收盘，非今日实时价；"
+            "昨收为再上一交易日分钟线末根收盘。"
+        )
         if minute_failed:
             note = "分钟活取失败，" + note
-        if prev is None:
-            note += "日线不足两根，涨跌幅无法计算。"
-    else:
-        return {
-            "code": code,
-            "name": name,
-            "mode": "unavailable",
-            "source": None,
-            "price": None,
-            "prev_close": None,
-            "prev_close_date": None,
-            "change": None,
-            "change_pct": None,
-            "open": None,
-            "high": None,
-            "low": None,
-            "volume": None,
-            "amount": None,
-            "bar_date": None,
-            "bar_time": None,
-            "fetched_at": fetched_at.isoformat(),
-            "note": "分钟活取与干净区日线均无数据，不编造价格。",
-        }
-    price = _num(bar.get("close"))
+    price_day = _quote_bar_date(day_bars[-1])
+    assert price_day is not None
+    earlier = sorted(day for day in by_date if day < price_day)
+    prev_bars = by_date[earlier[-1]] if earlier else []
+    prev = _num(prev_bars[-1].get("close")) if prev_bars else None
+    prev_date = earlier[-1] if earlier else None
+    if prev is None:
+        note += "上一交易日分钟线无数据，涨跌幅无法计算。"
+    price = _num(day_bars[-1].get("close"))
     change: float | None = None
     change_pct: float | None = None
     if price is not None and prev is not None and prev > 0:
         change = price - prev
         change_pct = round(change / prev * 100, 4)
-    ts = bar.get("ts")
+    def _all_float(field: str) -> list[float] | None:
+        values = [_num(bar.get(field)) for bar in day_bars]
+        if len(values) != len(day_bars):
+            return None
+        clean = [v for v in values if v is not None]
+        return clean if len(clean) == len(values) else None
+
+    highs = _all_float("high")
+    lows = _all_float("low")
+    volumes = _all_float("volume")
+    amounts = _all_float("amount")
+    ts = day_bars[-1].get("ts")
     return {
         "code": code,
         "name": name,
         "mode": mode,
-        "source": source,
+        "source": QUOTE_MINUTE_SOURCE,
         "price": price,
         "prev_close": prev,
         "prev_close_date": prev_date,
         "change": change,
         "change_pct": change_pct,
-        "open": _num(bar.get("open")),
-        "high": _num(bar.get("high")),
-        "low": _num(bar.get("low")),
-        "volume": _num(bar.get("volume")),
-        "amount": _num(bar.get("amount")),
-        "bar_date": _quote_bar_date(bar),
+        "open": _num(day_bars[0].get("open")),
+        "high": max(highs) if highs else None,
+        "low": min(lows) if lows else None,
+        "volume": sum(volumes) if volumes else None,
+        "amount": sum(amounts) if amounts else None,
+        "bar_date": price_day,
         "bar_time": ts if isinstance(ts, str) else None,
         "fetched_at": fetched_at.isoformat(),
         "note": note,
