@@ -115,6 +115,22 @@ def test_stale_minute_bars_are_ignored_not_presented_as_today() -> None:
     assert body["prev_close"] == 11.0
 
 
+def test_stale_daily_prev_close_is_flagged_not_presented_as_yesterday() -> None:
+    # 生产实测：服务器干净区日线停在 2026-10-21，而今天是 2026-11-04——
+    # 昨收字段若不带日期、不带陈旧说明，-18% 这种涨跌幅会被误读成当日涨跌幅。
+    old_daily = [
+        {"date": "2026-10-20", "open": 650.0, "high": 650.0, "low": 650.0,
+         "close": 650.0, "volume": 1000.0, "amount": 650000.0},
+        {"date": "2026-10-21", "open": 646.0, "high": 646.0, "low": 646.0,
+         "close": 646.77, "volume": 1000.0, "amount": 646770.0},
+    ]
+    body = _build(daily=old_daily, minute=[_minute(530.16)])
+    assert body["prev_close"] == 646.77
+    assert body["prev_close_date"] == "2026-10-21"
+    assert "2026-10-21" in str(body["note"])
+    assert "不代表昨日收盘" in str(body["note"])
+
+
 def test_no_minute_falls_back_to_daily_close_not_a_made_up_price() -> None:
     body = _build()
     assert body["mode"] == "daily"

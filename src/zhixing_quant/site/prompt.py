@@ -231,14 +231,21 @@ def build_quote(
         bar = minute_today[-1]
         before = [row for row in daily if (_quote_bar_date(row) or "") < as_of_text]
         prev = _num(before[-1].get("close")) if before else None
+        prev_date = _quote_bar_date(before[-1]) if before else None
         mode = "minute"
         source = QUOTE_MINUTE_SOURCE
         note = "分钟线末根价，非逐笔；昨收取自干净区日线。"
         if prev is None:
             note += "干净区无该日之前的日线，涨跌幅无法计算。"
+        elif prev_date is not None and (as_of - date.fromisoformat(prev_date)).days > 3:
+            note += (
+                f"注意：干净区日线最后一根是 {prev_date}，距今超过 3 天，"
+                "昨收与涨跌幅仅相对该日，不代表昨日收盘；日线重新发布后会自动恢复。"
+            )
     elif daily:
         bar = daily[-1]
         prev = _num(daily[-2].get("close")) if len(daily) > 1 else None
+        prev_date = _quote_bar_date(daily[-2]) if len(daily) > 1 else None
         mode = "daily"
         source = QUOTE_DAILY_SOURCE
         note = "分钟活取无今日数据，已回落到干净区日线收盘价，非实时。"
@@ -254,6 +261,7 @@ def build_quote(
             "source": None,
             "price": None,
             "prev_close": None,
+            "prev_close_date": None,
             "change": None,
             "change_pct": None,
             "open": None,
@@ -280,6 +288,7 @@ def build_quote(
         "source": source,
         "price": price,
         "prev_close": prev,
+        "prev_close_date": prev_date,
         "change": change,
         "change_pct": change_pct,
         "open": _num(bar.get("open")),
