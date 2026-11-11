@@ -66,12 +66,14 @@ class FakeNgw:
     def __init__(self, page: KlinePage | Exception) -> None:
         self.page = page
         self.kline_calls = 0
+        self.kline_kwargs: list[dict[str, object]] = []
 
     def innercode(self, symbol: str) -> str:
         return f"IC{symbol}"
 
     def kline(self, innercode: str, **kw: object) -> KlinePage:  # noqa: ARG002 名字须与 NgwLike 协议一致
         self.kline_calls += 1
+        self.kline_kwargs.append(dict(kw))
         if isinstance(self.page, Exception):
             raise self.page
         return self.page
@@ -309,3 +311,104 @@ def test_build_minute_section_consumes_the_injected_provider(
         minute_source=dead,
     ).text
     assert NO_DATA_NOTE.splitlines()[0] in text2
+
+
+# ── 日K活取源（2026-11-11：K线查询改活取）──────────────────────────────────
+
+DSTART, DEND = date(2026, 11, 9), date(2026, 11, 11)
+
+
+def sina_daily_rows() -> list[dict[str, Any]]:
+    """sina 日线帧形状（`daily_frame` 归一后：日期是 date、价格是 float）。"""
+    return [
+        {
+            "date": date(2026, 11, 10),
+            "open": 480.0,
+            "high": 488.0,
+            "low": 469.58,
+            "close": 471.0,
+            "volume": 38864530.0,
+            "amount": 18564294196.0,
+        },
+        {
+            "date": date(2026, 11, 11),
+            "open": 480.42,
+            "high": 547.79,
+            "low": 480.42,
+            "close": 542.0,
+            "volume": 60735000.0,
+            "amount": 31229065541.0,
+        },
+    ]
+
+
+def ngw_daily_rows(*days: str, fen: int = 54200) -> list[Mapping[str, object]]:
+    """ngw 日K行形状（实测：`times` 以 000000 结尾、价格是整数分的字符串）。"""
+    return [
+        {
+            "times": f"{day}000000",
+            "openp": str(fen - 100),
+            "highp": str(fen + 50),
+            "lowp": str(fen - 200),
+            "nowv": str(fen),
+            "curvol": "1000",
+            "curvalue": str(fen // 100 * 1000),
+        }
+        for day in days
+    ]
+
+
+def make_daily(*, ngw: FakeNgw | None = None) -> Any:
+    return live.make_daily_source(
+        clock=time.monotonic,
+        now=lambda: QUIET_NIGHT,
+        sleeper=lambda _s: None,
+        ngw=ngw,
+    )
+
+
+def test_daily_sina_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(akshare_fetch, "daily_frame", lambda *_a, **_k: sina_daily_rows())
+    ngw = FakeNgw(KlinePage(rows=(), exhausted=True))
+    bars = make_daily(ngw=ngw)("300308", DSTART, DEND)
+    assert [bar.trade_date for bar in bars] == [date(2026, 11, 10), date(2026, 11, 11)]
+    assert bars[-1].close == 542.0 and bars[-1].volume == 60735000.0
+    assert ngw.kline_calls == 0  # 主源给了就不扰兜底
+
+
+def test_daily_sina_empty_falls_back_to_ngw_daily(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(akshare_fetch, "daily_frame", lambda *_a, **_k: [])
+    ngw = FakeNgw(
+        KlinePage(
+            rows=tuple(ngw_daily_rows("20261108", "20261111")), exhausted=False
+        )
+    )
+    bars = make_daily(ngw=ngw)("300308", DSTART, DEND)
+    # 日K走 type=5；窗口外的行（11-08）被筛掉；分 → 元
+    assert ngw.kline_kwargs and ngw.kline_kwargs[0]["ktype"] == "5"
+    assert [bar.trade_date for bar in bars] == [date(2026, 11, 11)]
+    assert bars[0].close == 542.0 and bars[0].open == 541.0
+
+
+def test_daily_both_sources_fail_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: object, **_k: object) -> list[dict[str, Any]]:
+        raise ConnectionError("sina 不理人")
+
+    monkeypatch.setattr(akshare_fetch, "daily_frame", boom)
+    ngw = FakeNgw(ConnectionError("ngw 也不理人"))
+    assert make_daily(ngw=ngw)("300308", DSTART, DEND) == []
+
+
+def test_daily_cache_hits_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def frame(*_a: object, **_k: object) -> list[dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        return sina_daily_rows()
+
+    monkeypatch.setattr(akshare_fetch, "daily_frame", frame)
+    source = make_daily()
+    assert source("300308", DSTART, DEND)
+    assert source("300308", DSTART, DEND)
+    assert calls == 1

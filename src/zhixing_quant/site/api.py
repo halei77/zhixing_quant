@@ -182,6 +182,7 @@ def create_app(
     recent: Recent,
     static_dir: Path = STATIC_DIR,
     minute_source: prompt.MinuteSource | None = None,
+    daily_source: prompt.DailySource | None = None,
 ) -> FastAPI:
     """装配应用。依赖全部从参数进来（与 ADR-0010 决定 1 同一手法），只有 `main` 从盘上取。
 
@@ -191,6 +192,8 @@ def create_app(
     字典既用来搜，也用来判"这只票存不存在"（`_known`）——同一份名单，不另立第二份答案。
     `minute_source`（ADR-0026）是分钟K活取能力：生产由 `main()` 装配，测试注入假件；
     没给就是过渡态——分钟段读盘（盘上已无）出交代，行为与 ADR-0025 落地日一致。
+    `daily_source`（2026-11-11）是日K活取能力，只喂 K线查询：没给就是改版前的
+    纯读盘行为，测试与离线场合照旧。
     """
     book = search.Index(listings)
     names = {listing.code: listing.name for listing in listings}
@@ -302,10 +305,14 @@ def create_app(
         kind: str = Query("stock", pattern="^(stock|index)$"),
         days: int = Query(120, ge=5, le=500),
     ) -> Any:
-        """K线查询（不复权；指数走参考表）。数据的口径与形状由 `prompt.read_kline` 定。"""
+        """K线查询（不复权；指数走参考表）。数据的口径与形状由 `prompt.read_kline` 定。
+
+        个股给了 `daily_source` 就活取优先（装配在 `main`，与 `minute_source` 同一条
+        注入纪律）；没给或活取回空，`read_kline` 退回读干净区日线。
+        """
         if kind == "stock":
             code = _known(code, names)
-        bars = prompt.read_kline(code, days=days, kind=kind)
+        bars = prompt.read_kline(code, days=days, kind=kind, daily_source=daily_source)
         return {
             "kind": kind,
             "code": code,
@@ -375,6 +382,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         recent=Recent(config.site_recent_file()),
         static_dir=served,
         minute_source=live.make_minute_source(),
+        daily_source=live.make_daily_source(),
     )
     host = os.environ.get("ZX_SITE_HOST", "127.0.0.1")
     port = int(os.environ.get("ZX_SITE_PORT", "8000"))

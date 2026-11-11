@@ -391,6 +391,41 @@ def test_kline_serves_indexes_from_the_reference_table(client: TestClient) -> No
     assert bad.status_code == 422
 
 
+def test_kline_prefers_the_live_daily_source(trace: Path) -> None:
+    """2026-11-11 改版：个股 K线给了活取源就出活取的数，不再是盘上那份（盘上今天没种行）。"""
+    from tests.fakes import bar as fake_bar
+
+    def fake_source(code: str, start: date, end: date) -> list:  # noqa: ARG001
+        return [fake_bar(date.today(), 123.0)]
+
+    app = api.create_app(
+        listings=BOOK,
+        cfg=CFG,
+        calendar=CALENDAR,
+        recent=api.Recent(trace),
+        daily_source=fake_source,
+    )
+    body = TestClient(app).get("/api/kline", params={"code": "600519", "days": 5}).json()
+    assert body["bars"][-1]["close"] == 123.0
+
+
+def test_kline_live_empty_falls_back_to_disk(trace: Path, root: Path) -> None:
+    """活取回空不许开天窗：退回干净区日线兜底（与改版前的纯读盘行为一致）。"""
+    from tests.fakes import bar as fake_bar
+
+    today = date.today()
+    store_bars([fake_bar(today, 99.5)], dataset=layout.DAILY, root=root)
+    app = api.create_app(
+        listings=BOOK,
+        cfg=CFG,
+        calendar=CALENDAR,
+        recent=api.Recent(trace),
+        daily_source=lambda *_a: [],
+    )
+    body = TestClient(app).get("/api/kline", params={"code": "600519", "days": 5}).json()
+    assert body["bars"][-1]["close"] == 99.5
+
+
 def test_the_search_limit_is_clamped_at_both_ends(client: TestClient) -> None:
     """`limit` 的上下界写在 `Query` 里而不是壳的判断里：越界是 422，不是悄悄截断。
 

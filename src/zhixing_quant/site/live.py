@@ -1,5 +1,10 @@
 """分钟K活取源（ADR-0026）：站点生成之路对分钟段的实时抓取——sina 主、ngw 兜底。
 
+日K活取源（2026-11-11 用户指令）：`make_daily_source` 是同一层的第二个入口，只服务
+K线查询这个**查看面**（`prompt.read_kline`）——sina 日线主、ngw 日线兜底，护栏
+（缓存/令牌桶/并发闸/单飞）与分钟源同一套常量。模板生成的日线段不在此列：那条路
+仍读干净区（ADR-0026 的可复现纪律不放宽），本层也不因此获得碰盘的资格。
+
 组合根装配（ADR-0012 决定 1）：`zx-site` 的 `main()` 里 `make_minute_source()` 造一个带
 缓存与限速的闭包，作为 `minute_source` 注入 `prompt.build`——`build` 层依旧不自己起 HTTP，
 联网的事实全部装在这里。测试注入假 provider；本层的抓取用可注入 transport 的离线件测
@@ -29,11 +34,13 @@ from datetime import date, datetime
 from datetime import time as time_of
 from typing import Protocol
 
-from zhixing_quant.domain.bar import Bar
-from zhixing_quant.site.prompt import MinuteSource
+from zhixing_quant.domain.bar import Bar, BarDraft
+from zhixing_quant.site.prompt import DailySource, MinuteSource
 from zhixing_quant.sources.akshare import fetch as akshare_fetch
+from zhixing_quant.sources.akshare.daily import daily_drafts as akshare_daily_drafts
 from zhixing_quant.sources.jobs.minute import NGW_PERIOD, VIA_NGW, Grabbed, drafts_for
 from zhixing_quant.sources.ngw import client as ngw_client
+from zhixing_quant.sources.ngw import daily as ngw_daily
 
 #: sina 一次请求的墙钟上限（实测中位 0.75~1.4s，8s 是 4 倍余量）——经全局 socket 默认值生效。
 SINA_SOCKET_TIMEOUT = 8.0
@@ -233,3 +240,122 @@ def make_minute_source(
             return hit[1]
 
     return fetch_minute
+
+
+def make_daily_source(
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    now: Callable[[], datetime] = datetime.now,
+    sleeper: Callable[[float], None] = time.sleep,
+    ngw: NgwLike | None = None,
+    rate_per_min: float = RATE_PER_MIN,
+) -> DailySource:
+    """造日K活取源：给 K线查询（查看面）用，装配与护栏与分钟源同一套。
+
+    sina 日线（akshare `stock_zh_a_daily`，窗口直达）主 → 异常/空帧降级 ngw 日线
+    （`type=5` 单页 ≤1400 根，窗口在这里筛）。交出的 Bar 是**原始价**——`read_kline`
+    本就是不复权口径，不需要组合根再换算。失败一律收敛成空：退回读盘兜底还是开
+    天窗是调用方（`read_kline`）的决定，本层只负责「这次源给没给」。
+    """
+    if socket.getdefaulttimeout() is None:
+        socket.setdefaulttimeout(SINA_SOCKET_TIMEOUT)
+    client = ngw or ngw_client.NgwClient(interval=NGW_LIVE_INTERVAL, backoff=NGW_LIVE_BACKOFF)
+    bucket = _Bucket(rate_per_min, clock=clock, sleeper=sleeper)
+    slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
+    guard = threading.Lock()
+    cache: OrderedDict[tuple[str, date, date], tuple[float, tuple[Bar, ...]]] = OrderedDict()
+    inflight: dict[tuple[str, date, date], threading.Event] = {}
+    innercodes: dict[str, str] = {}
+
+    def _ttl() -> float:
+        return CACHE_TTL_TRADING if _trading_now(now()) else CACHE_TTL_QUIET
+
+    def _to_bars(drafts: Sequence[BarDraft]) -> tuple[Bar, ...]:
+        bars: list[Bar] = []
+        for draft in drafts:
+            if draft.trade_date is None:
+                continue  # 缺身份的行不进查看面（与分钟源同一条：这里不收）
+            try:
+                bars.append(Bar.from_draft(draft))
+            except Exception:
+                continue
+        return tuple(sorted(bars, key=lambda bar: bar.trade_date))
+
+    def _grab(code: str, start: date, end: date) -> tuple[Bar, ...]:
+        """一次源请求（闸内）：sina 主 → 异常/空帧降级 ngw 日线。"""
+        try:
+            rows = akshare_fetch.daily_frame(code, start, end)
+        except Exception:
+            rows = []
+        if rows:
+            bars = _to_bars(akshare_daily_drafts(rows, symbol=code))
+            if bars:
+                return bars
+        try:
+            inner = innercodes.get(code)
+            if inner is None:
+                inner = client.innercode(code)
+                innercodes[code] = inner
+            page = client.kline(
+                inner,
+                count=ngw_client.MAX_KLINE_COUNT,
+                ktype=ngw_client.KLINE_TYPE_DAILY,
+                timeout=NGW_KLINE_TIMEOUT,
+            )
+        except Exception:
+            return ()
+        return tuple(
+            bar
+            for bar in _to_bars(ngw_daily.daily_drafts(page.rows, symbol=code))
+            if start <= bar.trade_date <= end
+        )
+
+    def fetch_daily(code: str, start: date, end: date) -> list[Bar]:
+        """`DailySource` 契约。一切失败收敛成空——查看面不因一个组件挂掉而 500。"""
+        key = (code, start, end)
+        if not bucket.take(QUEUE_BUDGET):
+            return []
+        fresh = _fresh(key)
+        if fresh is not None:
+            return list(fresh)
+        leader = False
+        with guard:
+            blocker = inflight.get(key)
+            if blocker is None:
+                inflight[key] = threading.Event()
+                leader = True
+        if not leader:
+            assert blocker is not None  # 同一把锁下取的 blocker：不是 leader 就说明它当时在场
+            if not blocker.wait(QUEUE_BUDGET):
+                return []
+            fresh = _fresh(key)
+            return list(fresh) if fresh is not None else []
+        try:
+            with slots:
+                bars = _grab(code, start, end)
+        except Exception:
+            return []  # 未预期错误同样收敛成空
+        finally:
+            with guard:
+                done = inflight.pop(key, None)
+            if done is not None:
+                done.set()
+        with guard:
+            cache[key] = (clock(), bars)
+            cache.move_to_end(key)
+            while len(cache) > CACHE_FRAMES:
+                cache.popitem(last=False)
+        return list(bars)
+
+    def _fresh(key: tuple[str, date, date]) -> tuple[Bar, ...] | None:
+        with guard:
+            hit = cache.get(key)
+            if hit is None:
+                return None
+            if clock() - hit[0] > _ttl():
+                cache.pop(key, None)
+                return None
+            cache.move_to_end(key)
+            return hit[1]
+
+    return fetch_daily

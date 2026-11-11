@@ -41,6 +41,11 @@ _MINUTE = f"{layout.MINUTE_5.rsplit('_', 1)[0]}_"
 #: 分钟，ADR-0025）→ 「本节无数据」交代，与过渡态一致。
 MinuteSource = Callable[[str, str, date, date], Sequence[Bar]]
 
+#: 日K活取源（`read_kline` 专用）：`(code, start, end) → **原始价** Bar 升序`。与
+#: `MinuteSource` 同一条注入纪律——这一层不自己起 HTTP，联网装在 `site/live.py`；
+#: 没给（None）或活取回空时，K线查询退回读干净区日线（见 `read_kline`）。
+DailySource = Callable[[str, date, date], Sequence[Bar]]
+
 #: 大盘基准：模板里的 `index_daily` 段读**这只**指数，不是当前个股。个股代码与指数代码的
 #: 六位空间重叠（000001 既是平安银行也是上证指数），不换 symbol 就会把个股名字下不存在的
 #: 指数行全读成空。钉死上证指数——民间"大盘"的默认所指，`search.INDEXES` 名册首行同一口径；
@@ -92,13 +97,23 @@ class Prompt:
 
 
 def read_kline(
-    code: str, *, days: int, kind: str = "stock", root: Path | None = None
+    code: str,
+    *,
+    days: int,
+    kind: str = "stock",
+    root: Path | None = None,
+    daily_source: DailySource | None = None,
 ) -> list[dict[str, object]]:
     """K线查询（站点 2026-09-22 用户要求"能查个股与指数"）。**不复权口径**——查行情的
     人要看的是当日真实价，与提示词模板的后复权口径（ADR-0011 决定 3）是两个用途两个口径。
 
-    `kind="index"` 时 `code` 是带市场后缀的指数代码（000001.SH，搜索结果的 kind=index
-    行给的就是它），数据出自参考表 `index_daily`（ADR-0015）；个股出自干净区日线。
+    个股（2026-11-11 用户指令改活取）：这是**查看面**，与 `/api/quote` 同族——给了
+    `daily_source` 就先走活取（akshare/sina 日线主、ngw 日线兜底，`site/live.py`），
+    活取回空（源双双没给/被限速闸挡下）才退回干净区日线兜底出数，不让页面因源抖动
+    开天窗。注意这只改 K线查询：**模板生成的日线段仍读盘**——那是 ADR-0026 决定 2
+    的可复现纪律，不随查看面放宽。`kind="index"` 时 `code` 是带市场后缀的指数代码
+    （000001.SH，搜索结果的 kind=index 行给的就是它），数据出自参考表 `index_daily`
+    （ADR-0015），不走活取（ngw 的 innercode 是个股代码空间，指数另是一套）。
     返回按日期升序的 dict 序列，直接是 /api/kline 的 payload 形状。
     """
     end = date.today()
@@ -117,6 +132,21 @@ def read_kline(
             }
             for row in rows[-days:]
         ]
+    if daily_source is not None:
+        live_bars = sorted(daily_source(code, start, end), key=lambda bar: bar.trade_date)
+        if live_bars:
+            return [
+                {
+                    "date": bar.trade_date.isoformat(),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "amount": bar.amount,
+                }
+                for bar in live_bars[-days:]
+            ]
     bars = read_bars(code, start, end, adjust="raw", dataset=layout.DAILY, root=root)
     return [
         {
